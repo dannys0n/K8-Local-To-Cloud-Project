@@ -1,0 +1,19 @@
+# Local environment files
+.env
+.env.*
+.envrc
+
+# Docker (local overrides and data)
+docker-compose.override.yml
+docker-compose.local.yml
+docker-compose.*.local.yml
+.docker/
+docker-data/
+
+# Kubernetes (local clusters/config)
+kubeconfig
+*.kubeconfig
+.kube/
+.minikube/
+.kind/
+.k3d/
