@@ -1,0 +1,41 @@
+name: Auto README
+
+on:
+  push:
+    branches: [ main ]
+
+permissions:
+  contents: write
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - run: pip install requests
+
+      - name: Generate README
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: python .github/scripts/generate_readme.py
+
+      - name: Commit if changed
+        run: |
+          if git diff --quiet; then
+            echo "README unchanged"
+          else
+            git config user.name "readme-bot"
+            git config user.email "actions@github.com"
+            git add README.md
+            git commit -m "auto: regenerate README"
+            git push
+          fi
