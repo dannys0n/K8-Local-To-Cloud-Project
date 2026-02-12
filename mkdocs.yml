@@ -3,6 +3,15 @@ site_name: K8 Local → Cloud Project
 theme:
   name: material
 
+markdown_extensions:
+  - admonition
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+
+
 nav:
   - Home: index.md
   - Getting Started: getting-started.md
@@ -10,3 +19,6 @@ nav:
   - Repository Map: repository-map.md
   - Scripts: scripts.md
   - Infrastructure: infrastructure.md
+  - Dependencies: dependencies.md
+  - K8s Topology: k8s-topology.md
+  - Services: services.md
