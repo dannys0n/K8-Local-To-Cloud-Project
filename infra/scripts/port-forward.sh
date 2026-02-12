@@ -29,9 +29,13 @@ start_pf prometheus  monitoring monitoring-kube-prometheus-prometheus  9090 9090
 # Managing (Portainer)
 start_pf portainer   portainer  portainer                             9000 9000
 
+# Databases
+start_pf redis       databases  redis                                6379 6379
+
 echo ""
 echo "kubectl get secret --namespace monitoring -l app.kubernetes.io/component=admin-secret -o jsonpath="{.items[0].data.admin-password}" | base64 --decode ; echo"
 echo "READY:"
 echo "  Grafana    http://localhost:3000"
 echo "  Prometheus http://localhost:9090"
 echo "  Portainer  http://localhost:9000 (create admin on first visit)"
+echo "  Redis      localhost:6379"
