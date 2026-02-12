@@ -1,4 +1,4 @@
-name: Auto README
+name: Auto README (RAG)
 
 on:
   push:
@@ -8,7 +8,7 @@ permissions:
   contents: write
 
 jobs:
-  generate:
+  readme:
     runs-on: ubuntu-latest
     continue-on-error: true
 
@@ -21,21 +21,26 @@ jobs:
         with:
           python-version: "3.11"
 
-      - run: pip install requests
+      - run: pip install requests numpy
+
+      - name: Build/Update index
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: python .github/scripts/rag_index.py
 
       - name: Generate README
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-        run: python .github/scripts/generate_readme.py
+        run: python .github/scripts/rag_generate.py
 
-      - name: Commit if changed
+      - name: Commit README
         run: |
           if git diff --quiet; then
-            echo "README unchanged"
+            echo "No changes"
           else
             git config user.name "readme-bot"
             git config user.email "actions@github.com"
-            git add README.md
-            git commit -m "auto: regenerate README"
+            git add README.md .repo_index
+            git commit -m "auto: generate README via RAG"
             git push
           fi
