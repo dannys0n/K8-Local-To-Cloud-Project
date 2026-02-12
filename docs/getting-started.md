@@ -1,7 +1,7 @@
 # Getting Started
 
-## Requirements
-- TODO
+## Start the cluster
+make up
 
-## Run locally
-- TODO
+## Stop the cluster
+make down

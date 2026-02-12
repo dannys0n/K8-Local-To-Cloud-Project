@@ -1,7 +1,9 @@
 # Architecture
 
-## High-level
-- TODO
+This project provisions:
 
-## Modules
-- TODO
+- Local Kubernetes (kind)
+- Monitoring (Prometheus + Grafana)
+- Cluster UI (Headlamp)
+
+The goal is to move from local infrastructure to cloud deployment.

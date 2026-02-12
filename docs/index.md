@@ -1,7 +1,5 @@
-# Project Documentation
+# K8 Local To Cloud Project
 
-This site documents the project.
+This site documents the infrastructure project.
 
-## Quick links
-- [Getting Started](getting-started.md)
-- [Architecture](architecture.md)
+This documentation is automatically published using GitHub Pages.
