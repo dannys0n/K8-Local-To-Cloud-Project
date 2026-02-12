@@ -1,17 +1,17 @@
-name: Generate and Deploy Docs
+name: Build Documentation Site
 
 on:
   push:
     branches: [main]
-    paths-ignore:
-      - 'README.md'
-      - 'docs/**'
+  workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
+  pages: write
+  id-token: write
 
 jobs:
-  docs:
+  build:
     runs-on: ubuntu-latest
 
     steps:
@@ -21,21 +21,24 @@ jobs:
         with:
           python-version: "3.x"
 
-      - name: Install MkDocs
+      - name: Install dependencies
         run: pip install mkdocs-material
 
-      - name: Generate documentation
-        run: python tools/generate_docs.py
+      - name: Build site
+        run: mkdocs build
 
-      - name: Commit generated files
-        run: |
-          if [[ -n "$(git status --porcelain)" ]]; then
-            git config user.name "github-actions"
-            git config user.email "actions@github.com"
-            git add README.md docs/
-            git commit -m "Auto-generate documentation"
-            git push
-          fi
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
 
-      - name: Deploy site
-        run: mkdocs gh-deploy --force
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
