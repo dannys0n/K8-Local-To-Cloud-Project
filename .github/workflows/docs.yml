@@ -1,4 +1,4 @@
-name: docs
+name: Deploy Docs
 
 on:
   push:
@@ -10,6 +10,7 @@ permissions:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+
     steps:
       - uses: actions/checkout@v4
 
@@ -20,5 +21,5 @@ jobs:
       - name: Install MkDocs
         run: pip install mkdocs-material
 
-      - name: Build and deploy to GitHub Pages
+      - name: Deploy site
         run: mkdocs gh-deploy --force
