@@ -17,3 +17,5 @@ kubeconfig
 .minikube/
 .kind/
 .k3d/
+
+*.pid
