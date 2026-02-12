@@ -19,3 +19,5 @@ kubeconfig
 .k3d/
 
 *.pid
+
+AtlasNet/
