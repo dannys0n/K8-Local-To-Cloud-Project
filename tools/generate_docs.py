@@ -97,10 +97,13 @@ def build_k8s_map():
 # SERVICE MAP
 # -------------------------------------------------------
 def build_service_map():
-    nodes=set()
+    nodes={}
     edges=[]
 
     for file in ROOT.rglob("*.*"):
+        if any(x in str(file) for x in EXCLUDE):
+            continue
+
         try:
             text=file.read_text(errors="ignore")[:5000]
         except:
@@ -108,26 +111,31 @@ def build_service_map():
 
         ports=re.findall(r"localhost:(\d+)",text)
 
-        if ports:
-            src=safe(file.name)
-            nodes.add((src,label(file.name)))
+        if not ports:
+            continue
 
-            for p in ports:
-                tgt=f"port_{p}"
-                nodes.add((tgt,f"port {p}"))
-                edges.append((src,tgt))
+        src_id=safe(file.name)
+        nodes[src_id]=label(file.name)
+
+        for p in ports:
+            tgt_id=f"port_{p}"
+            nodes[tgt_id]=f"port {p}"
+            edges.append((src_id,tgt_id))
 
     lines=["# Service Interaction Map","","```mermaid","graph LR"]
 
-    for n,l in nodes:
-        lines.append(f'{n}["{l}"]')
+    # declare nodes
+    for nid,lab in nodes.items():
+        lines.append(f'{nid}["{lab}"]')
 
+    # connect nodes (NO QUOTES)
     for a,b in edges:
         lines.append(f"{a} --> {b}")
 
     lines.append("```")
 
     (DOCS/"services.md").write_text("\n".join(lines))
+
 
 
 # -------------------------------------------------------
