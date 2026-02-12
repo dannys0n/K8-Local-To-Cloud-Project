@@ -3,34 +3,36 @@
 ## .
 
 - .gitignore
+- README.md
 - mkdocs.yml
 - Makefile
 
 ## docs
 
+- architecture-auto.md
 - architecture.md
 - getting-started.md
 - index.md
 
-## infra/databases
+## src/databases
 
 - postgres.yaml
 - namespace.yaml
 - redis.yaml
 
-## infra/kind
+## src/kind
 
 - cluster.yaml
 
-## infra/managing
+## src/managing
 
 - portainer-values.yaml
 
-## infra/monitoring
+## src/monitoring
 
 - values.yaml
 
-## infra/scripts
+## src/scripts
 
 - cluster.sh
 - port-forward.sh
@@ -41,7 +43,7 @@
 - ping-redis.sh
 - ping-postgres.sh
 
-## infra/test-service
+## src/test-service
 
 - echo.yaml
 
