@@ -8,30 +8,25 @@ DOCS = ROOT / "docs"
 EXCLUDE = {".git","node_modules","build","bin","obj",".idea",".vs",".github",".venv","dist","out"}
 SKIP_EXT = (".png",".jpg",".jpeg",".gif",".dll",".exe",".pdb",".zip",".7z",".gz",".uasset",".umap")
 
+# ------------------------------
+# Mermaid-safe naming
+# ------------------------------
+def safe(name: str):
+    s = re.sub(r'[^a-zA-Z0-9_]', '_', name)
+    if not s:
+        s = "node"
+    return s[:40]
 
-# -------------------------------------------------------
-# REPOSITORY SCAN
-# -------------------------------------------------------
-def scan():
-    structure = {}
-
-    for root, dirs, files in os.walk(ROOT):
-        dirs[:] = [d for d in dirs if d not in EXCLUDE]
-
-        rel = Path(root).relative_to(ROOT)
-        valid = [f for f in files if not f.endswith(SKIP_EXT)]
-
-        if valid:
-            structure[str(rel)] = sorted(valid)
-
-    return structure
+def label(name: str):
+    return name.replace('"', '').replace('\n','')[:60]
 
 
 # -------------------------------------------------------
-# DEPENDENCY GRAPH (imports/includes)
+# DEPENDENCY GRAPH
 # -------------------------------------------------------
 def build_dependency_graph():
-    edges = []
+    nodes=set()
+    edges=[]
 
     for path in ROOT.rglob("*.*"):
         if any(x in str(path) for x in EXCLUDE):
@@ -45,93 +40,102 @@ def build_dependency_graph():
         includes = re.findall(r'#include\s+[<"]([^">]+)', text)
         imports = re.findall(r'import\s+([\w\.]+)', text)
 
-        src = path.name
+        src = safe(path.name)
+        nodes.add((src,label(path.name)))
 
         for inc in includes + imports:
-            edges.append((src, inc.split("/")[-1]))
+            tgt=safe(inc.split("/")[-1])
+            nodes.add((tgt,label(inc)))
+            edges.append((src,tgt))
 
-    lines = ["# Dependency Graph", "", "```mermaid", "graph LR"]
+    lines=["# Dependency Graph","","```mermaid","graph LR"]
+
+    for n,l in nodes:
+        lines.append(f'{n}["{l}"]')
 
     for a,b in edges[:200]:
-        lines.append(f'"{a}" --> "{b}"')
-
-    lines.append("```")
-
-    (DOCS / "dependencies.md").write_text("\n".join(lines))
-
-
-# -------------------------------------------------------
-# KUBERNETES RESOURCE MAP
-# -------------------------------------------------------
-def build_k8s_map():
-    resources = []
-    links = []
-
-    for yaml in ROOT.rglob("*.yaml"):
-        if "node_modules" in str(yaml):
-            continue
-
-        text = yaml.read_text(errors="ignore")
-
-        kind = re.findall(r"kind:\s*(\w+)", text)
-        name = re.findall(r"name:\s*([\w\-]+)", text)
-
-        if kind and name:
-            resources.append((kind[0], name[0]))
-
-        if "serviceName" in text:
-            svc = re.findall(r"serviceName:\s*([\w\-]+)", text)
-            if svc and name:
-                links.append((name[0], svc[0]))
-
-    lines = ["# Kubernetes Resource Topology", "", "```mermaid", "graph TD"]
-
-    for k,n in resources:
-        lines.append(f'{n}["{k}: {n}"]')
-
-    for a,b in links:
         lines.append(f"{a} --> {b}")
 
     lines.append("```")
 
-    (DOCS / "k8s-topology.md").write_text("\n".join(lines))
+    (DOCS/"dependencies.md").write_text("\n".join(lines))
 
 
 # -------------------------------------------------------
-# SERVICE INTERACTION MAP (ports)
+# KUBERNETES TOPOLOGY
 # -------------------------------------------------------
-def build_service_map():
-    edges = []
+def build_k8s_map():
+    nodes=set()
+    edges=[]
 
-    for file in ROOT.rglob("*.*"):
-        try:
-            text = file.read_text(errors="ignore")[:5000]
-        except:
+    for yaml in ROOT.rglob("*.yaml"):
+        if any(x in str(yaml) for x in EXCLUDE):
             continue
 
-        ports = re.findall(r"localhost:(\d+)", text)
-        for p in ports:
-            edges.append((file.name, f"port-{p}"))
+        text=yaml.read_text(errors="ignore")
 
-    lines = ["# Service Interaction Map", "", "```mermaid", "graph LR"]
+        kinds=re.findall(r"kind:\s*(\w+)",text)
+        names=re.findall(r"name:\s*([\w\-\.]+)",text)
 
-    for a,b in edges[:100]:
-        lines.append(f'"{a}" --> "{b}"')
+        if kinds and names:
+            k=kinds[0]
+            n=names[0]
+            nid=safe(n)
+            nodes.add((nid,f"{k}: {n}"))
+
+    lines=["# Kubernetes Resource Topology","","```mermaid","graph TD"]
+
+    for n,l in nodes:
+        lines.append(f'{n}["{l}"]')
 
     lines.append("```")
 
-    (DOCS / "services.md").write_text("\n".join(lines))
+    (DOCS/"k8s-topology.md").write_text("\n".join(lines))
 
 
 # -------------------------------------------------------
-# MAIN
+# SERVICE MAP
+# -------------------------------------------------------
+def build_service_map():
+    nodes=set()
+    edges=[]
+
+    for file in ROOT.rglob("*.*"):
+        try:
+            text=file.read_text(errors="ignore")[:5000]
+        except:
+            continue
+
+        ports=re.findall(r"localhost:(\d+)",text)
+
+        if ports:
+            src=safe(file.name)
+            nodes.add((src,label(file.name)))
+
+            for p in ports:
+                tgt=f"port_{p}"
+                nodes.add((tgt,f"port {p}"))
+                edges.append((src,tgt))
+
+    lines=["# Service Interaction Map","","```mermaid","graph LR"]
+
+    for n,l in nodes:
+        lines.append(f'{n}["{l}"]')
+
+    for a,b in edges:
+        lines.append(f"{a} --> {b}")
+
+    lines.append("```")
+
+    (DOCS/"services.md").write_text("\n".join(lines))
+
+
 # -------------------------------------------------------
 def main():
     DOCS.mkdir(exist_ok=True)
-    scan()
     build_dependency_graph()
     build_k8s_map()
     build_service_map()
 
-if __name__ == "__main__":
+if __name__=="__main__":
     main()
