@@ -167,13 +167,13 @@ Once deployed, the following services are available on your local machine:
 
 | Service | URL | Credentials | Description |
 |---------|-----|-------------|-------------|
-| **Grafana** | http://localhost:3000 | Get password¹ | Metrics visualization and dashboards |
+| **Grafana** | http://localhost:3000 | See below [1] | Metrics visualization and dashboards |
 | **Prometheus** | http://localhost:9090 | None | Metrics collection and queries |
 | **Portainer** | http://localhost:9000 | Create on first visit | Kubernetes management UI |
 | **PostgreSQL** | localhost:5432 | postgres/postgres | Relational database (db: `app`) |
 | **Redis** | localhost:6379 | None | In-memory cache/store |
 
-¹ **Get Grafana password:**
+**[1] Get Grafana admin password:**
 ```bash
 kubectl get secret --namespace monitoring \
   -l app.kubernetes.io/component=admin-secret \
@@ -274,13 +274,7 @@ redis-cli -h localhost -p 6379 ping
 
 ### Cluster Configuration
 
-The Kind cluster is configured in `src/kind/cluster.yaml`:
-```yaml
-kind: Cluster
-apiVersion: kind.x-k8s.io/v1alpha4
-nodes:
-  - role: control-plane
-```
+The Kind cluster configuration is defined in `src/kind/cluster.yaml`. The default setup uses a single control-plane node optimized for local development. You can modify this file to add worker nodes or customize the cluster configuration.
 
 ### Monitoring Configuration
 
