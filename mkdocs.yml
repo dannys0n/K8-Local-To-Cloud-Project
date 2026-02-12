@@ -7,3 +7,4 @@ nav:
   - Home: index.md
   - Getting Started: getting-started.md
   - Architecture: architecture.md
+  - Repository Map: architecture-auto.md
