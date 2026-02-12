@@ -26,13 +26,12 @@ start_pf () {
 start_pf grafana     monitoring monitoring-grafana                     3000 80
 start_pf prometheus  monitoring monitoring-kube-prometheus-prometheus  9090 9090
 
-# Managing (Headlamp)
-start_pf headlamp    headlamp   headlamp                              8081 80
+# Managing (Portainer)
+start_pf portainer   portainer  portainer                             9000 9000
 
 echo ""
 echo "kubectl get secret --namespace monitoring -l app.kubernetes.io/component=admin-secret -o jsonpath="{.items[0].data.admin-password}" | base64 --decode ; echo"
-echo "kubectl -n headlamp create token headlamp-admin"
 echo "READY:"
 echo "  Grafana    http://localhost:3000"
 echo "  Prometheus http://localhost:9090"
-echo "  Headlamp   http://localhost:8081"
+echo "  Portainer  http://localhost:9000 (create admin on first visit)"

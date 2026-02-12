@@ -23,9 +23,13 @@ helm upgrade --install monitoring prometheus-community/kube-prometheus-stack \
 
 kubectl rollout status deployment/monitoring-grafana -n monitoring
 
-echo "Installing Headlamp (managing UI)..."
-kubectl apply -f infra/managing/rbac.yaml
-kubectl apply -f infra/managing/headlamp.yaml
-kubectl rollout status deployment/headlamp -n headlamp
+echo "Installing Portainer (managing UI)..."
+helm repo add portainer https://portainer.github.io/k8s/ >/dev/null 2>&1 || true
+helm repo update >/dev/null
+helm upgrade --install portainer portainer/portainer \
+  --namespace portainer \
+  --create-namespace \
+  --values infra/managing/portainer-values.yaml
+kubectl rollout status deployment/portainer -n portainer
 
 ./infra/scripts/port-forward.sh

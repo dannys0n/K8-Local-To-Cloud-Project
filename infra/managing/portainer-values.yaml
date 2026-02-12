@@ -1,0 +1,6 @@
+service:
+  type: ClusterIP
+  httpPort: 9000
+
+# Manage the cluster Portainer runs in (in-cluster)
+localMgmt: true
