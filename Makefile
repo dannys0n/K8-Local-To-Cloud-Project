@@ -9,9 +9,18 @@ monitors:
 managers:
 	./infra/scripts/managers.sh
 
-databases:
+databases: redis postgres
+
+databases-namespace:
+	kubectl apply -f infra/databases/namespace.yaml
+
+redis: databases-namespace
 	kubectl apply -f infra/databases/redis.yaml
 	kubectl rollout status deployment/redis -n databases
+
+postgres: databases-namespace
+	kubectl apply -f infra/databases/postgres.yaml
+	kubectl rollout status deployment/postgres -n databases
 
 port-forward:
 	./infra/scripts/port-forward.sh
@@ -24,3 +33,6 @@ status:
 
 ping-redis:
 	./infra/scripts/ping-redis.sh
+
+ping-postgres:
+	./infra/scripts/ping-postgres.sh
