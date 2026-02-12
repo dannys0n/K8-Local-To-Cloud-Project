@@ -10,4 +10,4 @@ command -v helm >/dev/null
 echo "Creating kind cluster..."
 kind create cluster \
   --name "${CLUSTER_NAME}" \
-  --config infra/kind/cluster.yaml || true
+  --config src/kind/cluster.yaml || true

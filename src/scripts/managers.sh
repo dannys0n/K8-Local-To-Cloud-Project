@@ -7,5 +7,5 @@ helm repo update >/dev/null
 helm upgrade --install portainer portainer/portainer \
   --namespace portainer \
   --create-namespace \
-  --values infra/managing/portainer-values.yaml
+  --values src/managing/portainer-values.yaml
 kubectl rollout status deployment/portainer -n portainer

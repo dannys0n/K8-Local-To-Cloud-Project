@@ -8,6 +8,6 @@ helm repo update >/dev/null
 helm upgrade --install monitoring prometheus-community/kube-prometheus-stack \
   --namespace monitoring \
   --create-namespace \
-  --values infra/monitoring/values.yaml
+  --values src/monitoring/values.yaml
 
 kubectl rollout status deployment/monitoring-grafana -n monitoring

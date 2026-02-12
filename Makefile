@@ -1,38 +1,38 @@
 up: cluster monitors managers databases port-forward
 
 cluster:
-	./infra/scripts/cluster.sh
+	./src/scripts/cluster.sh
 
 monitors:
-	./infra/scripts/monitors.sh
+	./src/scripts/monitors.sh
 
 managers:
-	./infra/scripts/managers.sh
+	./src/scripts/managers.sh
 
 databases: redis postgres
 
 databases-namespace:
-	kubectl apply -f infra/databases/namespace.yaml
+	kubectl apply -f src/databases/namespace.yaml
 
 redis: databases-namespace
-	kubectl apply -f infra/databases/redis.yaml
+	kubectl apply -f src/databases/redis.yaml
 	kubectl rollout status deployment/redis -n databases
 
 postgres: databases-namespace
-	kubectl apply -f infra/databases/postgres.yaml
+	kubectl apply -f src/databases/postgres.yaml
 	kubectl rollout status deployment/postgres -n databases
 
 port-forward:
-	./infra/scripts/port-forward.sh
+	./src/scripts/port-forward.sh
 
 down:
-	./infra/scripts/teardown.sh
+	./src/scripts/teardown.sh
 
 status:
 	kubectl get pods -n monitoring
 
 ping-redis:
-	./infra/scripts/ping-redis.sh
+	./src/scripts/ping-redis.sh
 
 ping-postgres:
-	./infra/scripts/ping-postgres.sh
+	./src/scripts/ping-postgres.sh
