@@ -2,8 +2,8 @@
 
 ```mermaid
 graph TD
-test["Namespace: test"]
-postgres["Deployment: postgres"]
-databases["Namespace: databases"]
 redis["Deployment: redis"]
+databases["Namespace: databases"]
+postgres["Deployment: postgres"]
+test["Namespace: test"]
 ```
