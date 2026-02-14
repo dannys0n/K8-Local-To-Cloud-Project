@@ -33,6 +33,12 @@ start_pf portainer   portainer  portainer                             9000 9000
 start_pf redis       databases  redis                                6379 6379
 start_pf postgres    databases  postgres                             5432 5432
 
+# Stateful TCP demo (optional: run make tcp-demo first)
+if kubectl get svc tcp-demo -n tcp-demo &>/dev/null; then
+  start_pf tcp-demo      tcp-demo tcp-demo 7654 7654
+  start_pf tcp-demo-web tcp-demo tcp-demo 8081 8080
+fi
+
 echo ""
 echo "kubectl get secret --namespace monitoring -l app.kubernetes.io/component=admin-secret -o jsonpath="{.items[0].data.admin-password}" | base64 --decode ; echo"
 echo "READY:"
@@ -41,3 +47,4 @@ echo "  Prometheus http://localhost:9090"
 echo "  Portainer  http://localhost:9000 (create admin on first visit)"
 echo "  Redis      localhost:6379"
 echo "  Postgres   localhost:5432 (postgres/postgres, db=app)"
+echo "  TCP demo   localhost:7654 (TCP) | http://localhost:8081 (web UI; run make tcp-demo)"
