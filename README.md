@@ -5,7 +5,6 @@ Generated: 2026-02-14 00:52 UTC
 ---
 Here is a complete GitHub README based on the provided files:
 
-```markdown
 # Kubernetes Cluster Management Scripts
 
 This repository contains scripts and manifests for managing a Kubernetes cluster, including port forwarding, monitoring, and database configurations.
@@ -54,4 +53,3 @@ This project focuses on automating the setup and maintenance of a Kubernetes clu
 - kubectl installed and configured
 - Helm installed
 - Kubernetes API server running
-```
