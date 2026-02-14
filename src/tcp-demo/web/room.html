@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Chat — Room</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: system-ui, sans-serif;
+      max-width: 520px;
+      margin: 0 auto;
+      padding: 1rem;
+      background: #1a1b26;
+      color: #c0caf5;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+    .header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 0.75rem;
+    }
+    h1 { font-size: 1.1rem; margin: 0; color: #7aa2f7; }
+    .room-id { font-size: 0.85rem; color: #565f89; }
+    .panel {
+      background: #24283b;
+      border-radius: 8px;
+      padding: 1rem;
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+    }
+    #messages {
+      flex: 1;
+      overflow-y: auto;
+      padding: 0.5rem 0;
+      font-size: 0.9rem;
+      line-height: 1.5;
+    }
+    #messages .sys { color: #9ece6a; }
+    #messages .err { color: #f7768e; }
+    #messages .msg { color: #a9b1d6; }
+    form { display: flex; gap: 0.5rem; margin-top: 0.5rem; }
+    input {
+      flex: 1;
+      padding: 0.5rem 0.75rem;
+      border-radius: 6px;
+      border: 1px solid #414868;
+      background: #1a1b26;
+      color: #c0caf5;
+      font-size: 1rem;
+    }
+    button {
+      padding: 0.5rem 1rem;
+      border-radius: 6px;
+      border: none;
+      background: #7aa2f7;
+      color: #1a1b26;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    button:hover { background: #89b4fa; }
+    .err-panel { border: 1px solid #f7768e; }
+    .err-panel p { margin: 0 0 0.5rem; color: #f7768e; }
+    .err-panel a { color: #7aa2f7; }
+    .you-label { font-size: 0.85rem; color: #9ece6a; font-weight: 600; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1>Room <span class="room-id" id="roomLabel">—</span> <span class="you-label" id="youLabel"></span></h1>
+    <button type="button" id="btnLeave">Leave</button>
+  </div>
+  <div id="joinError" class="panel err-panel" style="display:none;">
+    <p id="joinErrorText"></p>
+    <a href="/">Back to lobby</a>
+  </div>
+  <div class="panel" id="chatPanel">
+    <div id="messages"></div>
+    <form id="sendForm">
+      <input type="text" id="input" placeholder="Type a message..." autocomplete="off" />
+      <button type="submit">Send</button>
+    </form>
+  </div>
+
+  <script>
+    const params = new URLSearchParams(location.search);
+    const roomId = params.get('room');
+    const name = params.get('name');
+
+    if (!roomId || !name) {
+      document.body.innerHTML = '<p style="padding:1rem;color:#f7768e">Missing room or name. <a href="/">Back to lobby</a></p>';
+    } else {
+      document.getElementById('roomLabel').textContent = roomId;
+      document.getElementById('youLabel').textContent = '(you: ' + name + ')';
+
+      const messagesEl = document.getElementById('messages');
+      const inputEl = document.getElementById('input');
+      const wsScheme = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const wsUrl = `${wsScheme}//${location.host}/ws`;
+
+      const joinErrorEl = document.getElementById('joinError');
+      const joinErrorText = document.getElementById('joinErrorText');
+      const chatPanel = document.getElementById('chatPanel');
+      let joined = false;
+
+      function showJoinError(msg) {
+        joinErrorText.textContent = msg;
+        joinErrorEl.style.display = 'block';
+        chatPanel.style.display = 'none';
+      }
+
+      function addMessage(text, className) {
+        const p = document.createElement('p');
+        p.className = className || 'msg';
+        p.textContent = text;
+        messagesEl.appendChild(p);
+        messagesEl.scrollTop = messagesEl.scrollHeight;
+      }
+
+      const ws = new WebSocket(wsUrl);
+      ws.onopen = () => ws.send(`JOIN ${roomId} ${name}`);
+      ws.onmessage = (ev) => {
+        const line = (ev.data || '').trim();
+        if (line.startsWith('JOINED')) {
+          joined = true;
+        } else if (line.startsWith('REDIRECT')) {
+          showJoinError('This room is on another server. Use the same entry point (e.g. localhost).');
+        } else if (line.startsWith('ERR')) {
+          const msg = line.slice(4).trim();
+          if (!joined) showJoinError(msg);
+          else addMessage(msg, 'err');
+        } else if (line.startsWith('LEFT')) {
+          location.href = '/';
+        } else if (!line.startsWith('PLAYERS ')) {
+          addMessage(line, line.startsWith('[') ? 'sys' : 'msg');
+        }
+      };
+
+      document.getElementById('sendForm').onsubmit = (e) => {
+        e.preventDefault();
+        const t = inputEl.value.trim();
+        if (t && ws.readyState === WebSocket.OPEN) {
+          ws.send(t);
+          inputEl.value = '';
+        }
+      };
+      document.getElementById('btnLeave').onclick = () => {
+        if (ws.readyState === WebSocket.OPEN) ws.send('LEAVE');
+      };
+    }
+  </script>
+</body>
+</html>

@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Chatroom — Lobby</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: system-ui, sans-serif;
+      max-width: 400px;
+      margin: 0 auto;
+      padding: 1.5rem;
+      background: #1a1b26;
+      color: #c0caf5;
+      min-height: 100vh;
+    }
+    h1 { font-size: 1.25rem; margin: 0 0 1.5rem; color: #7aa2f7; }
+    .panel {
+      background: #24283b;
+      border-radius: 8px;
+      padding: 1.25rem;
+      margin-bottom: 1rem;
+    }
+    label { display: block; font-size: 0.85rem; color: #565f89; margin-bottom: 0.25rem; }
+    input, button {
+      padding: 0.5rem 0.75rem;
+      border-radius: 6px;
+      border: 1px solid #414868;
+      font-size: 1rem;
+      width: 100%;
+    }
+    input {
+      background: #1a1b26;
+      color: #c0caf5;
+      margin-bottom: 1rem;
+    }
+    input::placeholder { color: #565f89; }
+    button {
+      background: #7aa2f7;
+      color: #1a1b26;
+      border: none;
+      cursor: pointer;
+      font-weight: 600;
+      margin-top: 0.25rem;
+    }
+    button:hover { background: #89b4fa; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .status { font-size: 0.85rem; color: #9ece6a; margin-top: 0.75rem; }
+    .status.err { color: #f7768e; }
+    .divider { border-top: 1px solid #414868; margin: 1.25rem 0; }
+  </style>
+</head>
+<body>
+  <h1>Chatroom</h1>
+  <div class="panel">
+    <label for="playerName">Your name</label>
+    <input type="text" id="playerName" placeholder="Display name" autocomplete="off" />
+    <p class="status" id="status"></p>
+  </div>
+  <div class="panel">
+    <label>Create a new room</label>
+    <button type="button" id="btnCreate">Create room</button>
+  </div>
+  <div class="divider"></div>
+  <div class="panel">
+    <label for="roomId">Join an existing room</label>
+    <input type="text" id="roomId" placeholder="Room ID" autocomplete="off" />
+    <button type="button" id="btnJoin">Join room</button>
+  </div>
+
+  <script>
+    const playerNameEl = document.getElementById('playerName');
+    const roomIdEl = document.getElementById('roomId');
+    const statusEl = document.getElementById('status');
+    const wsScheme = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${wsScheme}//${location.host}/ws`;
+
+    function setStatus(msg, isErr) {
+      statusEl.textContent = msg;
+      statusEl.className = 'status' + (isErr ? ' err' : '');
+    }
+
+    document.getElementById('btnCreate').onclick = () => {
+      const name = playerNameEl.value.trim();
+      if (!name) { setStatus('Enter your name.', true); return; }
+      setStatus('Creating…', false);
+      const ws = new WebSocket(wsUrl);
+      ws.onopen = () => ws.send('CREATE_ROOM');
+      ws.onmessage = (ev) => {
+        const line = (ev.data || '').trim();
+        if (line.startsWith('ROOM ')) {
+          const roomId = line.slice(5).trim();
+          ws.send(`JOIN ${roomId} ${name}`);
+        } else if (line.startsWith('JOINED')) {
+          const match = line.match(/JOINED\s+(\S+)/);
+          const roomId = match ? match[1] : '';
+          ws.close();
+          location.href = '/room?room=' + encodeURIComponent(roomId) + '&name=' + encodeURIComponent(name);
+        } else if (line.startsWith('ERR')) {
+          setStatus(line.slice(4).trim() || 'Could not create room.', true);
+        }
+      };
+      ws.onerror = () => setStatus('Connection error.', true);
+    };
+
+    document.getElementById('btnJoin').onclick = () => {
+      const room = roomIdEl.value.trim();
+      const name = playerNameEl.value.trim();
+      if (!room || !name) { setStatus('Room ID and name required.', true); return; }
+      setStatus('Joining…', false);
+      const ws = new WebSocket(wsUrl);
+      ws.onopen = () => ws.send(`JOIN ${room} ${name}`);
+      ws.onmessage = (ev) => {
+        const line = (ev.data || '').trim();
+        if (line.startsWith('JOINED')) {
+          ws.close();
+          location.href = '/room?room=' + encodeURIComponent(room) + '&name=' + encodeURIComponent(name);
+        } else if (line.startsWith('REDIRECT')) {
+          setStatus('Room is on another server. Stay on this page and try again, or use the same URL.', true);
+        } else if (line.startsWith('ERR')) {
+          setStatus(line.slice(4).trim() || 'Could not join room.', true);
+        }
+      };
+      ws.onerror = () => setStatus('Connection error.', true);
+    };
+  </script>
+</body>
+</html>

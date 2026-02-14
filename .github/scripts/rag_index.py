@@ -32,7 +32,6 @@ IGNORE_DIRS = {
     "dist",
     "venv",
     "__pycache__",
-    "README.md",
 }
 
 MAX_FILE_SIZE = 200_000  # bytes
