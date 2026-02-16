@@ -20,4 +20,9 @@ kubeconfig
 
 *.pid
 
+.pids/
+
+# Next.js build artifacts
+.next/
+
 AtlasNet/
