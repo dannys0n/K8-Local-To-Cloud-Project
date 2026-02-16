@@ -1,3 +1,6 @@
+KIND_CLUSTER ?= dev
+CLIENTS ?= 50
+
 up: cluster monitors managers databases port-forward
 
 cluster:
@@ -31,8 +34,50 @@ down:
 status:
 	kubectl get pods -n monitoring
 
+# --- Game backend testbed:
+# 1
+game-testbed: game-build game-load-images game-backend game-proxy
+# 2
+proxy-port-forward-lan:
+	kubectl port-forward svc/game-proxy 8080:8080 --address=0.0.0.0
+# 3
+game-load-local:
+	cd src/app/load && python3 main.py $(CLIENTS)
+
+# run this to watch the number of active sessions
+# watch -n 1 'curl -s http://localhost:8080/api/sessions/active | jq .count'
+
+game-build:
+	docker build -t game-backend:local src/app/backend
+	docker build -t game-proxy:local  src/app/proxy
+	docker build -t game-server:local  src/app/game-server
+
+game-load-images:
+	kind load docker-image game-backend:local --name $(KIND_CLUSTER)
+	kind load docker-image game-proxy:local  --name $(KIND_CLUSTER)
+	kind load docker-image game-server:local --name $(KIND_CLUSTER)
+
+game-backend:
+	kubectl apply -f src/k8s/base/backend-rbac.yaml
+	kubectl apply -f src/k8s/base/backend.yaml
+	kubectl apply -f src/k8s/base/backend-hpa.yaml
+
+game-proxy:
+	kubectl apply -f src/k8s/base/proxy.yaml
+	kubectl apply -f src/k8s/base/proxy-hpa.yaml
+
 ping-redis:
-    ./src/scripts/ping-redis.sh
+	./src/scripts/ping-redis.sh
 
 ping-postgres:
-    ./src/scripts/ping-postgres.sh
+	./src/scripts/ping-postgres.sh
+
+clear-databases:
+	@echo "Clearing Redis..."
+	@kubectl exec deployment/redis -n databases -- redis-cli FLUSHALL || echo "Redis flush failed"
+	@echo "Clearing Postgres..."
+	@kubectl exec deployment/postgres -n databases -- psql -U postgres -d app -c "TRUNCATE TABLE matches, match_events CASCADE;" || echo "Postgres truncate failed"
+	@echo "Cleaning up orphaned game server pods..."
+	@kubectl delete deployment -l app=game-server --ignore-not-found || true
+	@echo "Databases cleared!"
+

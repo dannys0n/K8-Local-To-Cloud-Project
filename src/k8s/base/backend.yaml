@@ -1,0 +1,70 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: game-backend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: game-backend
+  template:
+    metadata:
+      labels:
+        app: game-backend
+    spec:
+      serviceAccountName: game-backend
+      containers:
+        - name: backend
+          image: game-backend:local
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+          env:
+            - name: PYTHONUNBUFFERED
+              value: "1"
+            - name: DATABASE_URL
+              value: "postgresql://postgres:postgres@postgres.databases.svc.cluster.local:5432/app"
+            - name: REDIS_HOST
+              value: "redis.databases.svc.cluster.local"
+            - name: REDIS_PORT
+              value: "6379"
+            - name: NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 0  # Start checking immediately
+            periodSeconds: 1  # Check every second
+            timeoutSeconds: 1
+            failureThreshold: 2  # Fail fast
+            successThreshold: 1
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 3  # Give it 3s to start
+            periodSeconds: 2
+            timeoutSeconds: 1
+            failureThreshold: 2
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: game-backend
+spec:
+  selector:
+    app: game-backend
+  ports:
+    - port: 8080
+      targetPort: 8080
+
