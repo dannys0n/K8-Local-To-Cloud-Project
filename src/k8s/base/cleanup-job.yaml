@@ -1,0 +1,39 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: game-server-cleanup
+spec:
+  schedule: "*/5 * * * *"  # Every 5 minutes
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          serviceAccountName: game-backend
+          containers:
+            - name: cleanup
+              image: bitnami/kubectl:latest
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  # Find game server deployments for ended matches
+                  kubectl get deployments -l app=game-server -o json | \
+                  jq -r '.items[] | select(.metadata.name | startswith("game-server-")) | .metadata.name' | \
+                  while read dep; do
+                    session_id=$(echo $dep | sed 's/game-server-//')
+                    # Check if match is ended in DB (via backend service)
+                    if kubectl exec deployment/game-backend -- python3 -c "
+                      import psycopg2, os
+                      conn = psycopg2.connect('postgresql://postgres:postgres@postgres.databases.svc.cluster.local:5432/app')
+                      cur = conn.cursor()
+                      cur.execute('SELECT ended_at FROM matches WHERE session_id LIKE %s', (f'%{session_id}%',))
+                      row = cur.fetchone()
+                      if row and row[0]:
+                        exit(0)  # Match ended
+                      exit(1)  # Match still active
+                    " 2>/dev/null; then
+                      echo "Deleting orphaned deployment: $dep"
+                      kubectl delete deployment $dep --ignore-not-found
+                    fi
+                  done
+          restartPolicy: OnFailure
