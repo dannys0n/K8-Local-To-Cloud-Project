@@ -32,22 +32,7 @@ status:
 	kubectl get pods -n monitoring
 
 ping-redis:
-	./src/scripts/ping-redis.sh
+    ./src/scripts/ping-redis.sh
 
 ping-postgres:
-	./src/scripts/ping-postgres.sh
-
-# --- Demo services:
-
-# 1) Stateful TCP — direct POSIX TCP, Redis; close to AtlasNet-style integration
-tcp-demo-build:
-	./src/scripts/tcp-demo-build.sh
-
-tcp-demo-deploy: tcp-demo-build
-	kubectl apply -f src/tcp-demo/namespace.yaml
-	kubectl apply -f src/tcp-demo/deployment.yaml
-	kubectl rollout status deployment/tcp-demo -n tcp-demo
-	kubectl apply -f src/tcp-demo/hpa.yaml
-
-tcp-demo: tcp-demo-deploy
-	@./src/scripts/port-forward.sh
+    ./src/scripts/ping-postgres.sh
