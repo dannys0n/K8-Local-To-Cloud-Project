@@ -4,6 +4,7 @@ import Image from "next/image";
 import Link from "next/link";
 import { redirect } from "next/navigation";
 
+import { MockUserSwitcher } from "@/components/clerk/mock-user-switcher";
 import { UserButton } from "@/components/clerk/user-button";
 import { ModeToggle } from "@/components/mode-toggle";
 import { Separator } from "@/components/ui/separator";
@@ -69,6 +70,7 @@ export const NavigationSidebar = async () => {
           />
         </Link>
         <ModeToggle align="start" side="top" />
+        <MockUserSwitcher />
         <SignedIn>
           <UserButton imageUrl={profile.imageUrl} />
           <SignOutButton>

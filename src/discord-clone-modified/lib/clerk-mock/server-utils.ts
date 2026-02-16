@@ -1,23 +1,31 @@
+import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 
-const MOCK_USER_ID = "mock-user-id";
+import {
+  DEFAULT_MOCK_USER_ID,
+  getMockUserById,
+} from "./users";
 
-const MOCK_USER = {
-  id: MOCK_USER_ID,
-  firstName: "Mock",
-  lastName: "User",
-  imageUrl: "/logo.png",
-  emailAddresses: [{ emailAddress: "mock@example.com" }],
-};
+const COOKIE_NAME = "mock_user_id";
+
+function getMockUserIdFromCookie(): string {
+  const cookieStore = cookies();
+  const cookie = cookieStore.get(COOKIE_NAME)?.value;
+  if (cookie && getMockUserById(cookie)) {
+    return cookie;
+  }
+  return DEFAULT_MOCK_USER_ID;
+}
 
 /** Server-only: used by initialProfile, etc. */
 export function auth() {
-  return { userId: MOCK_USER_ID };
+  return { userId: getMockUserIdFromCookie() };
 }
 
 /** Server-only: used by initialProfile */
 export async function currentUser() {
-  return MOCK_USER;
+  const userId = getMockUserIdFromCookie();
+  return getMockUserById(userId);
 }
 
 /** Server-only: redirect to sign-in */
