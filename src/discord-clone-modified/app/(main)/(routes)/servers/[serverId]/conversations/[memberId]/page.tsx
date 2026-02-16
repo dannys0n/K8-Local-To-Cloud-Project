@@ -1,4 +1,4 @@
-import { redirectToSignIn } from "@clerk/nextjs";
+import { redirectToSignIn } from "@clerk/nextjs/server";
 import { redirect } from "next/navigation";
 
 import { ChatHeader } from "@/components/chat/chat-header";

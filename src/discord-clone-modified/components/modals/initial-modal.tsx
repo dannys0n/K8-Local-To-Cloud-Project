@@ -7,6 +7,7 @@ import { useEffect, useState } from "react";
 import { useForm } from "react-hook-form";
 import * as z from "zod";
 
+import { MockUserSwitcher } from "@/components/clerk/mock-user-switcher";
 import { FileUpload } from "@/components/file-upload";
 import { Button } from "@/components/ui/button";
 import {
@@ -72,6 +73,9 @@ export const InitialModal = () => {
   return (
     <Dialog open>
       <DialogContent className="p-0 overflow-hidden" hideCloseIcon>
+        <div className="absolute right-4 top-4">
+          <MockUserSwitcher />
+        </div>
         <DialogHeader className="pt-8 px-6">
           <DialogTitle className="text-2xl text-center font-bold">
             Create your server

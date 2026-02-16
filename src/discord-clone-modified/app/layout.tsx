@@ -1,4 +1,5 @@
 import { ClerkProvider } from "@clerk/nextjs";
+import { auth } from "@clerk/nextjs/server";
 import { NextSSRPlugin } from "@uploadthing/react/next-ssr-plugin";
 import type { Metadata, Viewport } from "next";
 import { Open_Sans } from "next/font/google";
@@ -22,13 +23,14 @@ export const viewport: Viewport = {
 
 export const metadata: Metadata = siteConfig;
 
-export default function RootLayout({
+export default async function RootLayout({
   children,
 }: Readonly<{
   children: React.ReactNode;
 }>) {
+  const { userId } = auth();
   return (
-    <ClerkProvider>
+    <ClerkProvider initialUserId={userId ?? undefined}>
       <html lang="en" suppressHydrationWarning>
         <body className={cn(font.className, "bg-white dark:bg-[#313338]")}>
           <ThemeProvider

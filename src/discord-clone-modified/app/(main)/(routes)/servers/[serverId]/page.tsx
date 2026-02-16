@@ -1,4 +1,4 @@
-import { redirectToSignIn } from "@clerk/nextjs";
+import { redirectToSignIn } from "@clerk/nextjs/server";
 
 import { currentProfile } from "@/lib/current-profile";
 import { db } from "@/lib/db";

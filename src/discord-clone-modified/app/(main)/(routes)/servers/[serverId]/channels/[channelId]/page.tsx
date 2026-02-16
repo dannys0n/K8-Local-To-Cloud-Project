@@ -1,4 +1,4 @@
-import { redirectToSignIn } from "@clerk/nextjs";
+import { redirectToSignIn } from "@clerk/nextjs/server";
 import { ChannelType } from "@prisma/client";
 import { redirect } from "next/navigation";
 

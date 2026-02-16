@@ -5,19 +5,21 @@ import { createContext, useCallback, useContext, useEffect } from "react";
 import Image from "next/image";
 import Link from "next/link";
 
-const MOCK_USER = {
-  id: "mock-user-id",
-  firstName: "Mock",
-  lastName: "User",
-  imageUrl: "/logo.png",
-  emailAddresses: [{ emailAddress: "mock@example.com" }],
+import { DEFAULT_MOCK_USER_ID, getMockUserById } from "./users";
+
+const defaultUser = getMockUserById(DEFAULT_MOCK_USER_ID);
+
+const MockAuthContext = createContext({ user: defaultUser });
+
+type ClerkProviderProps = {
+  children: ReactNode;
+  initialUserId?: string;
 };
 
-const MockAuthContext = createContext({ user: MOCK_USER });
-
-export function ClerkProvider({ children }: { children: ReactNode }) {
+export function ClerkProvider({ children, initialUserId }: ClerkProviderProps) {
+  const user = getMockUserById(initialUserId ?? DEFAULT_MOCK_USER_ID);
   return (
-    <MockAuthContext.Provider value={{ user: MOCK_USER }}>
+    <MockAuthContext.Provider value={{ user }}>
       {children}
     </MockAuthContext.Provider>
   );
@@ -53,8 +55,9 @@ export function UserButton({
   userProfileUrl?: string;
   imageUrl?: string;
 }) {
+  const { user } = useUser();
   const avatarBoxClass = appearance?.elements?.avatarBox ?? "h-[48px] w-[48px]";
-  const avatarSrc = (imageUrl && imageUrl.trim()) || MOCK_USER.imageUrl;
+  const avatarSrc = (imageUrl && imageUrl.trim()) || user.imageUrl;
   return (
     <Link href={userProfileUrl ?? "/account"} className="block">
       <Image
@@ -91,14 +94,15 @@ export function SignUp(_props?: { appearance?: { baseTheme?: unknown } }) {
 }
 
 export function UserProfile(_props?: { appearance?: { baseTheme?: unknown } }) {
+  const { user } = useUser();
   return (
     <div className="rounded-lg border p-6 dark:border-zinc-700 dark:bg-zinc-800/50">
       <h2 className="text-lg font-semibold dark:text-white">Mock User Profile</h2>
       <div className="mt-4 space-y-2 text-sm text-zinc-600 dark:text-zinc-300">
         <p>
-          Name: {MOCK_USER.firstName} {MOCK_USER.lastName}
+          Name: {user.firstName} {user.lastName}
         </p>
-        <p>Email: {MOCK_USER.emailAddresses[0]?.emailAddress}</p>
+        <p>Email: {user.emailAddresses[0]?.emailAddress}</p>
         <p className="text-xs text-zinc-500">(Clerk mock mode — no real auth)</p>
       </div>
     </div>
