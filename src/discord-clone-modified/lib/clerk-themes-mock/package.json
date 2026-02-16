@@ -1,0 +1,9 @@
+{
+  "name": "@clerk/themes",
+  "version": "1.7.10",
+  "type": "module",
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js"
+  }
+}
