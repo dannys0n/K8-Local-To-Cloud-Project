@@ -1,6 +1,12 @@
 KIND_CLUSTER ?= dev
 CLIENTS ?= 50
 
+# To get running:
+# make up
+# make game-testbed
+# make proxy-port-forward-local
+# game-load-local CLIENTS=100
+
 up: cluster monitors managers databases port-forward
 
 cluster:
