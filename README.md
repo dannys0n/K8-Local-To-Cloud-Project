@@ -20,6 +20,54 @@ Components:
 - **Game Server** (TCP): Authoritative server running per match in its own Kubernetes pod, managing state transitions (open → running → stop).
 - **Load Tester**: Simulates multiple client lifecycles (join, play, end) to test scalability.
 
+## AWS Migration Progress (branch: `game-backend-test`)
+
+This section documents what is currently validated on AWS in this branch.
+
+### What is working on AWS now
+
+- EKS cluster provisioning and node readiness are validated.
+- ECR image push flow is validated for `game-backend`, `game-proxy`, and `game-server`.
+- Backend and proxy are deployed on EKS and reachable via a public LoadBalancer service for `game-proxy`.
+- Public HTTP health check works:
+  - `GET /health` on proxy returns `{"status":"ok"}`.
+- Matchmaking API works on EKS:
+  - `POST /api/match/join` can create sessions and trigger dynamic game server deployment creation.
+- Dynamic game server pods can run successfully from ECR-backed image.
+- In-cluster TCP connectivity to spawned game servers is validated (via temporary `nettest` pod):
+  - TCP connect succeeds.
+  - Protocol command `GET_STATE` returns `STATE open`.
+- In-cluster lightweight load test is validated (temporary `loadtest` pod), receiving successful join responses.
+
+### Important current limitation
+
+- Returned `connect_host` is currently a private node IP (for NodePort), which is reachable from inside the cluster/VPC but not from a public laptop network.
+- Result: external players cannot directly TCP-connect yet without additional AWS networking design.
+
+### Code changes made in this branch for AWS bring-up
+
+- `src/app/backend/k8s_game_server.py`
+  - Dynamic game server image is now configurable via env var:
+    - `GAME_SERVER_IMAGE` (fallback: `game-server:local`).
+  - Creation log includes image used.
+- `src/k8s/base/backend.yaml`
+  - Added backend env var:
+    - `GAME_SERVER_IMAGE: "game-server:local"` (local-safe default, can be overridden in AWS deploy).
+- `src/app/proxy/main.py`
+  - Increased `/api/match/join` backend forward timeout from `10.0` to `60.0` to reduce cold-start timeout during dynamic game server bring-up.
+
+### Why this change was needed
+
+- Before the change, backend created game server deployments using hardcoded image `game-server:local`, which caused `ErrImagePull` / `ImagePullBackOff` on EKS.
+- After switching to env-configurable image and setting it to ECR image in deployment, dynamic game server creation succeeded.
+
+### Next migration tasks
+
+1. Replace in-cluster Postgres/Redis with AWS managed services (RDS + ElastiCache).
+2. Implement public TCP connectivity design for game sessions (for example per-session NLB or a shared TCP gateway).
+3. Add AWS-specific manifests/overlay so local kind and AWS EKS flows are cleanly separated.
+4. Add deploy automation (build/push/deploy) for repeatable branch testing.
+
 ## Architecture
 
 ```
@@ -146,6 +194,7 @@ The load tester:
 - `SESSION_SIZE`: Players per match (hard-coded in `settings.py`?).
 - `MIN_PARTIAL_SESSION_SIZE`: Minimum players to start partial match.
 - `FLUSH_WAIT_SECONDS`: Queue flush interval.
+- `GAME_SERVER_IMAGE`: Container image used by backend when creating per-match game server deployments (defaults to `game-server:local` for local dev).
 
 ### Game Server (per-pod)
 - `SESSION_ID`: Set by backend during pod creation.
