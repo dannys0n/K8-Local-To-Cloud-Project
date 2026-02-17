@@ -32,7 +32,9 @@ class MatchResponse(BaseModel):
 
 
 # Queue moved to Redis for multi-pod support
-_session_size = 12  # 6v6 sessions
+_session_size = int(os.getenv("SESSION_SIZE", "12"))  # default 6v6
+_flush_wait_seconds = float(os.getenv("FLUSH_WAIT_SECONDS", "15"))
+_min_partial_session_size = int(os.getenv("MIN_PARTIAL_SESSION_SIZE", "2"))
 
 _db_conn = None
 _k8s_api = None
@@ -381,6 +383,27 @@ def _create_match_session(players: List[str]) -> MatchResponse:
     )
 
 
+def _get_player_queue_ts_key(player_id: str) -> str:
+    return f"matchmaking:queued_at:{player_id}"
+
+
+def _dequeue_players(redis_client, queue_key: str, count: int) -> List[str]:
+    pipe = redis_client.pipeline()
+    for _ in range(count):
+        pipe.lpop(queue_key)
+    players_list = pipe.execute()
+    players = [p for p in players_list if p]
+    if players:
+        try:
+            cleanup = redis_client.pipeline()
+            for p in players:
+                cleanup.delete(_get_player_queue_ts_key(p))
+            cleanup.execute()
+        except Exception:  # noqa: BLE001
+            pass
+    return players
+
+
 @app.get("/health")
 def health() -> dict:
     # touch DB so /health reflects DB availability
@@ -410,19 +433,29 @@ def join_match(req: MatchRequest) -> MatchResponse:
         try:
             # Add player to queue
             redis_client.rpush(queue_key, req.player_id)
+            redis_client.set(_get_player_queue_ts_key(req.player_id), str(time.time()), ex=3600)
             
             # Check queue length atomically
             queue_len = redis_client.llen(queue_key)
             
+            flush_count = 0
             if queue_len >= _session_size:
-                # Pop 12 players atomically (use transaction for safety)
-                pipe = redis_client.pipeline()
-                for _ in range(_session_size):
-                    pipe.lpop(queue_key)
-                players_list = pipe.execute()
-                players = [p for p in players_list if p]  # Filter None values
-                
-                if len(players) == _session_size:
+                flush_count = _session_size
+            elif queue_len >= _min_partial_session_size:
+                oldest_player = redis_client.lindex(queue_key, 0)
+                if oldest_player:
+                    queued_at_raw = redis_client.get(_get_player_queue_ts_key(oldest_player))
+                    if queued_at_raw:
+                        try:
+                            oldest_wait = time.time() - float(queued_at_raw)
+                            if oldest_wait >= _flush_wait_seconds:
+                                flush_count = queue_len
+                        except ValueError:
+                            pass
+
+            if flush_count > 0:
+                players = _dequeue_players(redis_client, queue_key, flush_count)
+                if len(players) == flush_count:
                     return _create_match_session(players)
         except Exception as e:  # noqa: BLE001
             logger.warning(f"Redis queue operation failed: {e}, falling back to in-memory")
@@ -431,12 +464,22 @@ def join_match(req: MatchRequest) -> MatchResponse:
     if not hasattr(join_match, '_local_queue'):
         join_match._local_queue = deque()
     
-    join_match._local_queue.append(req.player_id)
-    
-    if len(join_match._local_queue) >= _session_size:
+    join_match._local_queue.append((req.player_id, time.time()))
+
+    local_len = len(join_match._local_queue)
+    local_flush_count = 0
+    if local_len >= _session_size:
+        local_flush_count = _session_size
+    elif local_len >= _min_partial_session_size:
+        oldest_queued_at = join_match._local_queue[0][1]
+        if time.time() - oldest_queued_at >= _flush_wait_seconds:
+            local_flush_count = local_len
+
+    if local_flush_count > 0:
         players: List[str] = []
-        for _ in range(_session_size):
-            players.append(join_match._local_queue.popleft())
+        for _ in range(local_flush_count):
+            p, _queued_at = join_match._local_queue.popleft()
+            players.append(p)
         return _create_match_session(players)
     
     # pending / solo case (not yet in a full 6v6)
