@@ -28,11 +28,21 @@ postgres: databases-namespace
 port-forward:
 	./src/scripts/port-forward.sh
 
+
 down:
 	./src/scripts/teardown.sh
 
 status:
 	kubectl get pods -n monitoring
+
+# --- Database cleanups
+
+# run if problems with database ports
+free-local-db-ports:
+	bash ./src/scripts/free-local-db-ports.sh
+
+clear-databases:
+	bash ./src/scripts/clear-databases.sh
 
 # --- Game backend testbed:
 # 1
@@ -68,15 +78,3 @@ ping-redis:
 
 ping-postgres:
 	./src/scripts/ping-postgres.sh
-
-clear-databases:
-	@echo "Clearing Redis..."
-	@kubectl exec deployment/redis -n databases -- redis-cli FLUSHALL || echo "Redis flush failed"
-	@echo "Clearing Postgres..."
-	@kubectl exec deployment/postgres -n databases -- psql -U postgres -d app -c "TRUNCATE TABLE IF EXISTS matches CASCADE;" || echo "Postgres truncate failed"
-	@kubectl exec deployment/postgres -n databases -- psql -U postgres -d app -c "DROP TABLE IF EXISTS match_events, game_server_stats;" || echo "Postgres telemetry table cleanup failed"
-	@echo "Cleaning up orphaned game server pods and services..."
-	@kubectl delete deployment -l app=game-server --ignore-not-found || true
-	@kubectl delete service -l app=game-server --ignore-not-found || true
-	@echo "Databases cleared!"
-
