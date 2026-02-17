@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import traceback
+import time
 import uuid
 
 import psycopg2
@@ -27,6 +28,8 @@ class MatchRequest(BaseModel):
 class MatchResponse(BaseModel):
     session_id: str
     players: List[str]
+    connect_host: str = ""   # Set when matched; client uses this to connect to game server
+    connect_port: int = 0   # NodePort when matched
 
 
 class StartMatchRequest(BaseModel):
@@ -37,6 +40,8 @@ class StartMatchResponse(BaseModel):
     session_id: str
     game_server_pod: str
     status: str
+    connect_host: str = ""  # IP/host for clients to connect to
+    connect_port: int = 0   # Port (e.g. NodePort)
 
 
 # Queue moved to Redis for multi-pod support
@@ -123,6 +128,17 @@ def _ensure_schema(conn) -> None:
             );
             """
         )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS game_server_stats (
+              session_id text PRIMARY KEY,
+              state text NOT NULL,
+              client_count int NOT NULL DEFAULT 0,
+              ttl_seconds int NOT NULL DEFAULT 0,
+              updated_at timestamptz DEFAULT now()
+            );
+            """
+        )
 
 
 def _get_k8s_api():
@@ -136,7 +152,52 @@ def _get_k8s_api():
     return _k8s_api
 
 
-def _create_game_server_pod(session_id: str, players: List[str]) -> str:
+def _get_core_v1_api():
+    """CoreV1Api for Services and Nodes."""
+    if not hasattr(_get_core_v1_api, "_api"):
+        try:
+            config.load_incluster_config()
+        except Exception:  # noqa: BLE001
+            config.load_kube_config()
+        _get_core_v1_api._api = client.CoreV1Api()
+    return _get_core_v1_api._api
+
+
+def _wait_for_game_server_ready(session_id: str, timeout_seconds: float = 45.0) -> bool:
+    """
+    Wait until at least one game-server pod for this session is Running and Ready.
+    This avoids handing out connect info before TCP is actually accepting.
+    """
+    core_api = _get_core_v1_api()
+    namespace = os.getenv("NAMESPACE", "default")
+    label_selector = f"app=game-server,session_id={session_id}"
+    deadline = time.time() + timeout_seconds
+
+    while time.time() < deadline:
+        try:
+            pods = core_api.list_namespaced_pod(
+                namespace=namespace,
+                label_selector=label_selector,
+            )
+            for pod in pods.items:
+                status = pod.status
+                if status is None or status.phase != "Running":
+                    continue
+                ready = False
+                for cs in status.container_statuses or []:
+                    if cs.ready:
+                        ready = True
+                        break
+                if ready:
+                    return True
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"Error while waiting for game server readiness ({session_id}): {e}")
+        time.sleep(0.5)
+
+    return False
+
+
+def _create_game_server_pod(session_id: str, players: List[str]) -> tuple[str, str, int]:
     """Create a game server pod for a session."""
     k8s_apps_api = _get_k8s_api()
     
@@ -174,6 +235,14 @@ def _create_game_server_pod(session_id: str, players: List[str]) -> str:
                                     name="PLAYERS",
                                     value=json.dumps(players),
                                 ),
+                                client.V1EnvVar(name="PORT", value="8080"),
+                                client.V1EnvVar(
+                                    name="DATABASE_URL",
+                                    value=os.getenv(
+                                        "DATABASE_URL",
+                                        "postgresql://postgres:postgres@postgres.databases.svc.cluster.local:5432/app",
+                                    ),
+                                ),
                             ],
                         )
                     ],
@@ -186,21 +255,91 @@ def _create_game_server_pod(session_id: str, players: List[str]) -> str:
     try:
         k8s_apps_api.create_namespaced_deployment(namespace=namespace, body=deployment)
         logger.info(f"Successfully created deployment {pod_name}")
-        return pod_name
     except ApiException as e:
         logger.error(f"Failed to create deployment: status={e.status}, reason={e.reason}, body={e.body}")
         if e.status == 409:  # Already exists
-            logger.info(f"Deployment {pod_name} already exists, returning existing name")
-            return pod_name
-        raise
+            logger.info(f"Deployment {pod_name} already exists")
+        else:
+            raise
+
+    # Create a NodePort Service so clients can connect to this game server
+    core_api = _get_core_v1_api()
+    svc_name = pod_name  # same name as deployment
+    svc = client.V1Service(
+        metadata=client.V1ObjectMeta(
+            name=svc_name,
+            namespace=namespace,
+            labels={"app": "game-server", "session_id": session_id},
+        ),
+        spec=client.V1ServiceSpec(
+            type="NodePort",
+            selector={"app": "game-server", "session_id": session_id},
+            ports=[client.V1ServicePort(port=8080, target_port=8080, protocol="TCP")],
+        ),
+    )
+    try:
+        core_api.create_namespaced_service(namespace=namespace, body=svc)
+        logger.info(f"Created Service {svc_name} (NodePort)")
+    except ApiException as e:
+        if e.status == 409:
+            pass  # already exists
+        else:
+            logger.warning(f"Failed to create Service for {pod_name}: {e}")
+            return pod_name, "", 0
+
+    # Read back the assigned NodePort and a node IP
+    import time
+    time.sleep(0.5)  # give API a moment
+    try:
+        created = core_api.read_namespaced_service(name=svc_name, namespace=namespace)
+        node_port = created.spec.ports[0].node_port if created.spec.ports else 0
+    except Exception:  # noqa: BLE001
+        node_port = 0
+
+    # Prefer node IP from env (e.g. kind: use host). Else use first node's address.
+    connect_host = os.getenv("GAME_SERVER_CONNECT_HOST", "")
+    if not connect_host:
+        try:
+            nodes = core_api.list_node()
+            for node in nodes.items:
+                for addr in node.status.addresses or []:
+                    if addr.type in ("ExternalIP", "InternalIP"):
+                        connect_host = addr.address
+                        break
+                if connect_host:
+                    break
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"Failed to auto-detect node IP for game server connect_host: {e}")
+    if not connect_host:
+        connect_host = "localhost"  # fallback for port-forward setups
+        logger.warning(
+            "Falling back to localhost for game-server connect_host; this may be unreachable for NodePort clients"
+        )
+
+    # Wait for pod readiness before giving clients connect details.
+    if not _wait_for_game_server_ready(session_id, timeout_seconds=45.0):
+        logger.warning(
+            f"Game server {pod_name} not ready within timeout; clients may need to retry connect"
+        )
+
+    return pod_name, connect_host, node_port or 0
 
 
 def _delete_game_server_pod(session_id: str) -> None:
-    """Delete the game server pod for a session with retries."""
+    """Delete the game server deployment and its Service for a session with retries."""
     k8s_apps_api = _get_k8s_api()
+    core_api = _get_core_v1_api()
     namespace = os.getenv("NAMESPACE", "default")
     pod_name = f"game-server-{session_id[:8]}"
-    
+
+    # Delete Service first (no need to retry much)
+    try:
+        core_api.delete_namespaced_service(name=pod_name, namespace=namespace)
+        logger.info(f"Deleted Service {pod_name}")
+    except ApiException as e:
+        if e.status != 404:
+            logger.warning(f"Failed to delete Service {pod_name}: {e}")
+
     max_retries = 3
     for attempt in range(max_retries):
         try:
@@ -284,7 +423,34 @@ def join_match(req: MatchRequest) -> MatchResponse:
                                 (session_id, "join", p),
                             )
                     
-                    return MatchResponse(session_id=session_id, players=players)
+                    # Allocate game server (pod + NodePort Service); proxy gets address to tell clients
+                    game_server_pod, connect_host, connect_port = _create_game_server_pod(session_id, players)
+                    
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "UPDATE matches SET game_server_pod = %s WHERE session_id = %s",
+                            (game_server_pod, session_id),
+                        )
+                        cur.execute(
+                            "INSERT INTO match_events (session_id, event_type, player_id) VALUES (%s, %s, %s)",
+                            (session_id, "start", ""),
+                        )
+                    
+                    if redis_client:
+                        try:
+                            redis_client.sadd("active_sessions", session_id)
+                            redis_client.set(f"session:{session_id}:pod", game_server_pod, ex=3600)
+                            redis_client.set(f"session:{session_id}:host", connect_host, ex=3600)
+                            redis_client.set(f"session:{session_id}:port", str(connect_port), ex=3600)
+                        except Exception:  # noqa: BLE001
+                            pass
+                    
+                    return MatchResponse(
+                        session_id=session_id,
+                        players=players,
+                        connect_host=connect_host,
+                        connect_port=connect_port,
+                    )
         except Exception as e:  # noqa: BLE001
             logger.warning(f"Redis queue operation failed: {e}, falling back to in-memory")
     
@@ -316,11 +482,82 @@ def join_match(req: MatchRequest) -> MatchResponse:
                     (session_id, "join", p),
                 )
         
-        return MatchResponse(session_id=session_id, players=players)
+        game_server_pod, connect_host, connect_port = _create_game_server_pod(session_id, players)
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE matches SET game_server_pod = %s WHERE session_id = %s",
+                (game_server_pod, session_id),
+            )
+            cur.execute(
+                "INSERT INTO match_events (session_id, event_type, player_id) VALUES (%s, %s, %s)",
+                (session_id, "start", ""),
+            )
+        
+        redis_client = _get_redis_client()
+        if redis_client:
+            try:
+                redis_client.sadd("active_sessions", session_id)
+                redis_client.set(f"session:{session_id}:pod", game_server_pod, ex=3600)
+                redis_client.set(f"session:{session_id}:host", connect_host, ex=3600)
+                redis_client.set(f"session:{session_id}:port", str(connect_port), ex=3600)
+            except Exception:  # noqa: BLE001
+                pass
+        
+        return MatchResponse(
+            session_id=session_id,
+            players=players,
+            connect_host=connect_host,
+            connect_port=connect_port,
+        )
     
     # pending / solo case (not yet in a full 6v6)
     pending_id = f"pending:{req.player_id}"
     return MatchResponse(session_id=pending_id, players=[req.player_id])
+
+
+@app.get("/match/status")
+def match_status(player_id: str) -> dict:
+    """
+    Called by proxy so queued clients can poll until matched.
+    Returns pending or matched with connect address for the game server.
+    """
+    conn = _get_db_conn()
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT m.session_id, m.ended_at
+            FROM match_events e
+            JOIN matches m ON m.session_id = e.session_id
+            WHERE e.player_id = %s AND e.event_type = 'join'
+            ORDER BY e.id DESC LIMIT 1
+            """,
+            (player_id,),
+        )
+        row = cur.fetchone()
+    
+    if not row:
+        return {"status": "pending"}
+    
+    session_id, ended_at = row
+    if ended_at:
+        return {"status": "ended", "session_id": session_id}
+    
+    # Session exists and not ended; get connect address from Redis
+    redis_client = _get_redis_client()
+    if redis_client:
+        host = redis_client.get(f"session:{session_id}:host") or ""
+        port_str = redis_client.get(f"session:{session_id}:port") or "0"
+        port = int(port_str) if port_str.isdigit() else 0
+        if host and port:
+            return {
+                "status": "matched",
+                "session_id": session_id,
+                "connect_host": host,
+                "connect_port": port,
+            }
+    
+    # Fallback: read from DB if we stored it (we don't currently store host/port in DB)
+    return {"status": "pending"}
 
 
 @app.post("/match/start", response_model=StartMatchResponse)
@@ -349,7 +586,7 @@ def start_match(req: StartMatchRequest) -> StartMatchResponse:
     try:
         logger.info(f"Starting match for session {session_id}")
         
-        game_server_pod = _create_game_server_pod(session_id, players)
+        game_server_pod, connect_host, connect_port = _create_game_server_pod(session_id, players)
         
         # Update DB with game server pod name
         conn = _get_db_conn()
@@ -373,11 +610,13 @@ def start_match(req: StartMatchRequest) -> StartMatchResponse:
             except Exception as e:  # noqa: BLE001
                 logger.warning(f"Failed to track session in Redis: {e}")
         
-        logger.info(f"Match started successfully: {session_id} -> {game_server_pod}")
+        logger.info(f"Match started successfully: {session_id} -> {game_server_pod} ({connect_host}:{connect_port})")
         return StartMatchResponse(
             session_id=session_id,
             game_server_pod=game_server_pod,
             status="started",
+            connect_host=connect_host,
+            connect_port=connect_port,
         )
     except Exception as e:  # noqa: BLE001
         error_detail = f"{str(e)}\n{traceback.format_exc()}"
@@ -416,11 +655,47 @@ def end_match(session_id: str) -> dict:
         try:
             redis_client.srem("active_sessions", session_id)
             redis_client.delete(f"session:{session_id}:pod")
+            redis_client.delete(f"session:{session_id}:host")
+            redis_client.delete(f"session:{session_id}:port")
             logger.info(f"Removed active session {session_id} from Redis")
         except Exception as e:  # noqa: BLE001
             logger.warning(f"Failed to remove session from Redis: {e}")
     
     return {"status": "ended", "session_id": session_id}
+
+
+@app.get("/server-stats")
+def get_server_stats() -> dict:
+    """
+    Return game server stats from DB (TTL, client counts).
+    Used by the print-server-data script without requiring psycopg2 on the host.
+    """
+    try:
+        conn = _get_db_conn()
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT session_id, state, client_count, ttl_seconds, updated_at
+                FROM game_server_stats
+                ORDER BY updated_at DESC
+                """
+            )
+            rows = cur.fetchall()
+        return {
+            "servers": [
+                {
+                    "session_id": row[0],
+                    "state": row[1],
+                    "client_count": row[2],
+                    "ttl_seconds": row[3],
+                    "updated_at": str(row[4]) if row[4] else None,
+                }
+                for row in rows
+            ],
+        }
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"Failed to query server stats: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/sessions/active")
@@ -528,6 +803,11 @@ def cleanup_orphaned_servers() -> dict:
             
             if row and row[0]:  # Match has ended_at timestamp
                 try:
+                    core_api = _get_core_v1_api()
+                    try:
+                        core_api.delete_namespaced_service(name=dep_name, namespace=namespace)
+                    except ApiException:  # noqa: BLE001
+                        pass
                     k8s_apps_api.delete_namespaced_deployment(
                         name=dep_name,
                         namespace=namespace,
