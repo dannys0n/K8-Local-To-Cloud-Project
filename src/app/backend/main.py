@@ -1,9 +1,8 @@
 from collections import deque
-from typing import Dict, List
+from typing import List
 import json
 import logging
 import os
-import traceback
 import time
 import uuid
 
@@ -30,18 +29,6 @@ class MatchResponse(BaseModel):
     players: List[str]
     connect_host: str = ""   # Set when matched; client uses this to connect to game server
     connect_port: int = 0   # NodePort when matched
-
-
-class StartMatchRequest(BaseModel):
-    session_id: str
-
-
-class StartMatchResponse(BaseModel):
-    session_id: str
-    game_server_pod: str
-    status: str
-    connect_host: str = ""  # IP/host for clients to connect to
-    connect_port: int = 0   # Port (e.g. NodePort)
 
 
 # Queue moved to Redis for multi-pod support
@@ -86,6 +73,40 @@ def _get_redis_client():
     return _redis_client
 
 
+def _track_session_in_redis(session_id: str, game_server_pod: str, connect_host: str, connect_port: int) -> None:
+    redis_client = _get_redis_client()
+    if not redis_client:
+        return
+    try:
+        redis_client.sadd("active_sessions", session_id)
+        redis_client.set(f"session:{session_id}:pod", game_server_pod, ex=3600)
+        redis_client.set(f"session:{session_id}:host", connect_host, ex=3600)
+        redis_client.set(f"session:{session_id}:port", str(connect_port), ex=3600)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _untrack_session_in_redis(session_id: str) -> None:
+    redis_client = _get_redis_client()
+    if not redis_client:
+        return
+    try:
+        redis_client.srem("active_sessions", session_id)
+        redis_client.delete(f"session:{session_id}:pod")
+        redis_client.delete(f"session:{session_id}:host")
+        redis_client.delete(f"session:{session_id}:port")
+        logger.info(f"Removed active session {session_id} from Redis")
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"Failed to remove session from Redis: {e}")
+
+
+def _load_k8s_config() -> None:
+    try:
+        config.load_incluster_config()
+    except Exception:  # noqa: BLE001
+        config.load_kube_config()
+
+
 def _ensure_schema(conn) -> None:
     with conn.cursor() as cur:
         # Create matches table if it doesn't exist
@@ -123,10 +144,7 @@ def _ensure_schema(conn) -> None:
 def _get_k8s_api():
     global _k8s_api
     if _k8s_api is None:
-        try:
-            config.load_incluster_config()
-        except Exception:  # noqa: BLE001
-            config.load_kube_config()
+        _load_k8s_config()
         _k8s_api = client.AppsV1Api()
     return _k8s_api
 
@@ -134,10 +152,7 @@ def _get_k8s_api():
 def _get_core_v1_api():
     """CoreV1Api for Services and Nodes."""
     if not hasattr(_get_core_v1_api, "_api"):
-        try:
-            config.load_incluster_config()
-        except Exception:  # noqa: BLE001
-            config.load_kube_config()
+        _load_k8s_config()
         _get_core_v1_api._api = client.CoreV1Api()
     return _get_core_v1_api._api
 
@@ -336,6 +351,36 @@ def _delete_game_server_pod(session_id: str) -> None:
                 raise
 
 
+def _create_match_session(players: List[str]) -> MatchResponse:
+    session_id = str(uuid.uuid4())
+    conn = _get_db_conn()
+    backend_pod = os.getenv("HOSTNAME", "unknown")
+    players_json = ",".join(players)
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO matches (session_id, players_json, backend_pod) VALUES (%s, %s, %s)",
+            (session_id, players_json, backend_pod),
+        )
+
+    game_server_pod, connect_host, connect_port = _create_game_server_pod(session_id, players)
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE matches SET game_server_pod = %s WHERE session_id = %s",
+            (game_server_pod, session_id),
+        )
+
+    _track_session_in_redis(session_id, game_server_pod, connect_host, connect_port)
+
+    return MatchResponse(
+        session_id=session_id,
+        players=players,
+        connect_host=connect_host,
+        connect_port=connect_port,
+    )
+
+
 @app.get("/health")
 def health() -> dict:
     # touch DB so /health reflects DB availability
@@ -354,7 +399,7 @@ def join_match(req: MatchRequest) -> MatchResponse:
     Simple 6v6 matchmaking using Redis queue (shared across pods):
     - enqueue player in Redis
     - when we have 12 players, form a session (6v6)
-    - write authoritative session + join events to Postgres
+    - write authoritative session to Postgres
     """
     redis_client = _get_redis_client()
     
@@ -378,42 +423,7 @@ def join_match(req: MatchRequest) -> MatchResponse:
                 players = [p for p in players_list if p]  # Filter None values
                 
                 if len(players) == _session_size:
-                    session_id = str(uuid.uuid4())
-                    
-                    conn = _get_db_conn()
-                    backend_pod = os.getenv("HOSTNAME", "unknown")
-                    players_json = ",".join(players)
-                    
-                    with conn.cursor() as cur:
-                        cur.execute(
-                            "INSERT INTO matches (session_id, players_json, backend_pod) VALUES (%s, %s, %s)",
-                            (session_id, players_json, backend_pod),
-                        )
-                    
-                    # Allocate game server (pod + NodePort Service); proxy gets address to tell clients
-                    game_server_pod, connect_host, connect_port = _create_game_server_pod(session_id, players)
-                    
-                    with conn.cursor() as cur:
-                        cur.execute(
-                            "UPDATE matches SET game_server_pod = %s WHERE session_id = %s",
-                            (game_server_pod, session_id),
-                        )
-                    
-                    if redis_client:
-                        try:
-                            redis_client.sadd("active_sessions", session_id)
-                            redis_client.set(f"session:{session_id}:pod", game_server_pod, ex=3600)
-                            redis_client.set(f"session:{session_id}:host", connect_host, ex=3600)
-                            redis_client.set(f"session:{session_id}:port", str(connect_port), ex=3600)
-                        except Exception:  # noqa: BLE001
-                            pass
-                    
-                    return MatchResponse(
-                        session_id=session_id,
-                        players=players,
-                        connect_host=connect_host,
-                        connect_port=connect_port,
-                    )
+                    return _create_match_session(players)
         except Exception as e:  # noqa: BLE001
             logger.warning(f"Redis queue operation failed: {e}, falling back to in-memory")
     
@@ -427,42 +437,7 @@ def join_match(req: MatchRequest) -> MatchResponse:
         players: List[str] = []
         for _ in range(_session_size):
             players.append(join_match._local_queue.popleft())
-        
-        session_id = str(uuid.uuid4())
-        
-        conn = _get_db_conn()
-        backend_pod = os.getenv("HOSTNAME", "unknown")
-        players_json = ",".join(players)
-        
-        with conn.cursor() as cur:
-            cur.execute(
-                "INSERT INTO matches (session_id, players_json, backend_pod) VALUES (%s, %s, %s)",
-                (session_id, players_json, backend_pod),
-            )
-        
-        game_server_pod, connect_host, connect_port = _create_game_server_pod(session_id, players)
-        with conn.cursor() as cur:
-            cur.execute(
-                "UPDATE matches SET game_server_pod = %s WHERE session_id = %s",
-                (game_server_pod, session_id),
-            )
-        
-        redis_client = _get_redis_client()
-        if redis_client:
-            try:
-                redis_client.sadd("active_sessions", session_id)
-                redis_client.set(f"session:{session_id}:pod", game_server_pod, ex=3600)
-                redis_client.set(f"session:{session_id}:host", connect_host, ex=3600)
-                redis_client.set(f"session:{session_id}:port", str(connect_port), ex=3600)
-            except Exception:  # noqa: BLE001
-                pass
-        
-        return MatchResponse(
-            session_id=session_id,
-            players=players,
-            connect_host=connect_host,
-            connect_port=connect_port,
-        )
+        return _create_match_session(players)
     
     # pending / solo case (not yet in a full 6v6)
     pending_id = f"pending:{req.player_id}"
@@ -524,66 +499,6 @@ def match_status(player_id: str) -> dict:
     return {"status": "pending"}
 
 
-@app.post("/match/start", response_model=StartMatchResponse)
-def start_match(req: StartMatchRequest) -> StartMatchResponse:
-    """
-    Start a match by creating a game server pod.
-    Call this after matchmaking forms a session.
-    """
-    session_id = req.session_id
-    
-    # Check if session exists in DB (not just in-memory, since we have multiple replicas)
-    conn = _get_db_conn()
-    with conn.cursor() as cur:
-        cur.execute(
-            "SELECT players_json FROM matches WHERE session_id = %s AND ended_at IS NULL",
-            (session_id,),
-        )
-        row = cur.fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail="Session not found or already ended")
-        
-        players_json = row[0]
-        players = players_json.split(",") if players_json else []
-    
-    # Create game server pod
-    try:
-        logger.info(f"Starting match for session {session_id}")
-        
-        game_server_pod, connect_host, connect_port = _create_game_server_pod(session_id, players)
-        
-        # Update DB with game server pod name
-        conn = _get_db_conn()
-        with conn.cursor() as cur:
-            cur.execute(
-                "UPDATE matches SET game_server_pod = %s WHERE session_id = %s",
-                (game_server_pod, session_id),
-            )
-        
-        # Track active session in Redis
-        redis_client = _get_redis_client()
-        if redis_client:
-            try:
-                redis_client.sadd("active_sessions", session_id)
-                redis_client.set(f"session:{session_id}:pod", game_server_pod, ex=3600)  # TTL 1 hour
-                logger.info(f"Tracked active session {session_id} in Redis")
-            except Exception as e:  # noqa: BLE001
-                logger.warning(f"Failed to track session in Redis: {e}")
-        
-        logger.info(f"Match started successfully: {session_id} -> {game_server_pod} ({connect_host}:{connect_port})")
-        return StartMatchResponse(
-            session_id=session_id,
-            game_server_pod=game_server_pod,
-            status="started",
-            connect_host=connect_host,
-            connect_port=connect_port,
-        )
-    except Exception as e:  # noqa: BLE001
-        error_detail = f"{str(e)}\n{traceback.format_exc()}"
-        logger.error(f"ERROR starting match {session_id}: {error_detail}")
-        raise HTTPException(status_code=500, detail=f"Failed to start match: {str(e)}")
-
-
 @app.post("/match/{session_id}/end")
 def end_match(session_id: str) -> dict:
     """
@@ -605,17 +520,7 @@ def end_match(session_id: str) -> dict:
             (session_id,),
         )
     
-    # Remove from Redis active sessions
-    redis_client = _get_redis_client()
-    if redis_client:
-        try:
-            redis_client.srem("active_sessions", session_id)
-            redis_client.delete(f"session:{session_id}:pod")
-            redis_client.delete(f"session:{session_id}:host")
-            redis_client.delete(f"session:{session_id}:port")
-            logger.info(f"Removed active session {session_id} from Redis")
-        except Exception as e:  # noqa: BLE001
-            logger.warning(f"Failed to remove session from Redis: {e}")
+    _untrack_session_in_redis(session_id)
     
     return {"status": "ended", "session_id": session_id}
 
