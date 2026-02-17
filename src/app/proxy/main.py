@@ -47,7 +47,7 @@ async def proxy_join(request: Request):
         "/match/join",
         content=body,
         headers={"content-type": content_type},
-        timeout=10.0,
+        timeout=60.0,
     )
 
 

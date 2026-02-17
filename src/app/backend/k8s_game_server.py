@@ -62,9 +62,12 @@ def wait_for_game_server_ready(session_id: str, timeout_seconds: float = 45.0) -
 def create_game_server_pod(session_id: str, players: List[str]) -> tuple[str, str, int]:
     k8s_apps_api = get_k8s_api()
     core_api = get_core_v1_api()
+    game_server_image = os.getenv("GAME_SERVER_IMAGE", "game-server:local")
 
     pod_name = f"game-server-{session_id[:8]}"
-    logger.info(f"Creating game server pod {pod_name} in namespace {NAMESPACE}")
+    logger.info(
+        f"Creating game server pod {pod_name} in namespace {NAMESPACE} using image {game_server_image}"
+    )
 
     deployment = client.V1Deployment(
         metadata=client.V1ObjectMeta(
@@ -85,7 +88,7 @@ def create_game_server_pod(session_id: str, players: List[str]) -> tuple[str, st
                     containers=[
                         client.V1Container(
                             name="game-server",
-                            image="game-server:local",
+                            image=game_server_image,
                             image_pull_policy="IfNotPresent",
                             ports=[client.V1ContainerPort(container_port=8080)],
                             env=[
