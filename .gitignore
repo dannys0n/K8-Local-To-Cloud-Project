@@ -20,4 +20,16 @@ kubeconfig
 
 *.pid
 
+.pids/
+
+# Python cache/artifacts
+__pycache__/
+*.py[cod]
+*.pyc
+*$py.class
+.pytest_cache/
+
+# Next.js build artifacts
+.next/
+
 AtlasNet/
