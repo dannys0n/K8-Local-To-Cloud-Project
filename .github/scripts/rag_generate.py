@@ -33,7 +33,7 @@ for path, txt in top:
 payload = {
  "model": "openrouter/free",
  "messages": [
-   {"role":"system","content":"Write a GitHub README using ONLY provided files. Do not hallucinate."},
+   {"role":"system","content":"Write a markdown GitHub README (just write, not generate the file!) using ONLY provided files. Do not hallucinate."},
    {"role":"user","content":context}
  ]
 }
