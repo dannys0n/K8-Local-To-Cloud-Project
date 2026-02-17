@@ -43,6 +43,36 @@ async def shutdown() -> None:
         _client = None
 
 
+async def _forward_json(
+    method: str,
+    path: str,
+    *,
+    content: bytes | None = None,
+    params: dict | None = None,
+    headers: dict | None = None,
+    timeout: float = 10.0,
+):
+    if _client is None:
+        raise HTTPException(status_code=503, detail="Proxy not ready")
+    try:
+        if method == "GET":
+            resp = await _client.get(path, params=params, timeout=timeout, headers=headers)
+        elif method == "POST":
+            resp = await _client.post(path, content=content, timeout=timeout, headers=headers)
+        else:
+            raise HTTPException(status_code=500, detail=f"Unsupported method: {method}")
+        resp.raise_for_status()
+        return resp.json()
+    except httpx.TimeoutException:
+        raise HTTPException(status_code=504, detail="Backend timeout")
+    except httpx.RequestError as e:
+        raise HTTPException(status_code=502, detail=f"Backend connection error: {str(e)}")
+    except HTTPException:
+        raise
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"Proxy error: {str(e)}")
+
+
 @app.get("/health")
 async def health() -> dict:
     """Health check - also checks backend connectivity."""
@@ -76,112 +106,40 @@ async def proxy_join(request: Request):
     Thin HTTP proxy in front of the backend.
     Forwards JSON body to /match/join on the backend service.
     """
-    if _client is None:
-        raise HTTPException(status_code=503, detail="Proxy not ready")
-
-    try:
-        body = await request.body()
-        content_type = request.headers.get("content-type", "application/json")
-
-        resp = await _client.post(
-            "/match/join",
-            content=body,
-            headers={"content-type": content_type},
-            timeout=10.0,
-        )
-        resp.raise_for_status()
-        return resp.json()
-    except httpx.TimeoutException:
-        raise HTTPException(status_code=504, detail="Backend timeout")
-    except httpx.RequestError as e:
-        raise HTTPException(status_code=502, detail=f"Backend connection error: {str(e)}")
-    except Exception as e:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=f"Proxy error: {str(e)}")
-
-
-@app.post("/api/match/start")
-async def proxy_start(request: Request):
-    """Forward /match/start to backend."""
-    if _client is None:
-        raise HTTPException(status_code=503, detail="Proxy not ready")
-
-    try:
-        body = await request.body()
-        content_type = request.headers.get("content-type", "application/json")
-
-        resp = await _client.post(
-            "/match/start",
-            content=body,
-            headers={"content-type": content_type},
-            timeout=30.0,  # Pod creation can take time
-        )
-        resp.raise_for_status()
-        return resp.json()
-    except httpx.TimeoutException:
-        raise HTTPException(status_code=504, detail="Backend timeout")
-    except httpx.RequestError as e:
-        raise HTTPException(status_code=502, detail=f"Backend connection error: {str(e)}")
-    except Exception as e:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=f"Proxy error: {str(e)}")
+    body = await request.body()
+    content_type = request.headers.get("content-type", "application/json")
+    return await _forward_json(
+        "POST",
+        "/match/join",
+        content=body,
+        headers={"content-type": content_type},
+        timeout=10.0,
+    )
 
 
 @app.post("/api/match/{session_id}/end")
 async def proxy_end(session_id: str, request: Request):
     """Forward /match/{session_id}/end to backend."""
-    if _client is None:
-        raise HTTPException(status_code=503, detail="Proxy not ready")
-
-    try:
-        resp = await _client.post(
-            f"/match/{session_id}/end",
-            timeout=15.0,
-        )
-        resp.raise_for_status()
-        return resp.json()
-    except httpx.TimeoutException:
-        raise HTTPException(status_code=504, detail="Backend timeout")
-    except httpx.RequestError as e:
-        raise HTTPException(status_code=502, detail=f"Backend connection error: {str(e)}")
-    except Exception as e:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=f"Proxy error: {str(e)}")
+    return await _forward_json(
+        "POST",
+        f"/match/{session_id}/end",
+        timeout=15.0,
+    )
 
 
 @app.get("/api/match/status")
 async def proxy_match_status(player_id: str):
     """Forward status so queued clients can poll until matched and get game server address."""
-    if _client is None:
-        raise HTTPException(status_code=503, detail="Proxy not ready")
-
-    try:
-        resp = await _client.get(
-            "/match/status",
-            params={"player_id": player_id},
-            timeout=5.0,
-        )
-        resp.raise_for_status()
-        return resp.json()
-    except httpx.TimeoutException:
-        raise HTTPException(status_code=504, detail="Backend timeout")
-    except httpx.RequestError as e:
-        raise HTTPException(status_code=502, detail=f"Backend connection error: {str(e)}")
-    except Exception as e:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=f"Proxy error: {str(e)}")
+    return await _forward_json(
+        "GET",
+        "/match/status",
+        params={"player_id": player_id},
+        timeout=5.0,
+    )
 
 
 @app.get("/api/sessions/active")
 async def proxy_active_sessions():
     """Forward /sessions/active to backend."""
-    if _client is None:
-        raise HTTPException(status_code=503, detail="Proxy not ready")
-
-    try:
-        resp = await _client.get("/sessions/active", timeout=5.0)
-        resp.raise_for_status()
-        return resp.json()
-    except httpx.TimeoutException:
-        raise HTTPException(status_code=504, detail="Backend timeout")
-    except httpx.RequestError as e:
-        raise HTTPException(status_code=502, detail=f"Backend connection error: {str(e)}")
-    except Exception as e:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=f"Proxy error: {str(e)}")
+    return await _forward_json("GET", "/sessions/active", timeout=5.0)
 
