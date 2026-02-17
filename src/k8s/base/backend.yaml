@@ -32,6 +32,11 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
+            # Optional override for returned game server host.
+            # Leave unset for kind so backend auto-detects the node InternalIP
+            # (e.g. 172.18.0.2), which is reachable for NodePort TCP.
+            # - name: GAME_SERVER_CONNECT_HOST
+            #   value: "172.18.0.2"
           resources:
             requests:
               cpu: 100m

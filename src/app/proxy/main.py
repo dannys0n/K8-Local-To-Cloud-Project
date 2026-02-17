@@ -1,3 +1,14 @@
+"""
+Game proxy: single entry point for clients.
+
+Flow:
+- Clients hit proxy to join matchmaking (queued at backend).
+- Backend allocates a game server when 12 are ready and notifies via response
+  (join returns connect_host/port for the 12th) or status (queued clients poll
+  GET /api/match/status?player_id= until status=matched and get address).
+- Proxy forwards all requests to backend; proxy tells grouped clients the
+  game server address (in join response or via status poll).
+"""
 import os
 
 import httpx
@@ -125,6 +136,46 @@ async def proxy_end(session_id: str, request: Request):
             f"/match/{session_id}/end",
             timeout=15.0,
         )
+        resp.raise_for_status()
+        return resp.json()
+    except httpx.TimeoutException:
+        raise HTTPException(status_code=504, detail="Backend timeout")
+    except httpx.RequestError as e:
+        raise HTTPException(status_code=502, detail=f"Backend connection error: {str(e)}")
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"Proxy error: {str(e)}")
+
+
+@app.get("/api/match/status")
+async def proxy_match_status(player_id: str):
+    """Forward status so queued clients can poll until matched and get game server address."""
+    if _client is None:
+        raise HTTPException(status_code=503, detail="Proxy not ready")
+
+    try:
+        resp = await _client.get(
+            "/match/status",
+            params={"player_id": player_id},
+            timeout=5.0,
+        )
+        resp.raise_for_status()
+        return resp.json()
+    except httpx.TimeoutException:
+        raise HTTPException(status_code=504, detail="Backend timeout")
+    except httpx.RequestError as e:
+        raise HTTPException(status_code=502, detail=f"Backend connection error: {str(e)}")
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"Proxy error: {str(e)}")
+
+
+@app.get("/api/server-stats")
+async def proxy_server_stats():
+    """Forward /server-stats to backend (for print-server-data without psycopg2 on host)."""
+    if _client is None:
+        raise HTTPException(status_code=503, detail="Proxy not ready")
+
+    try:
+        resp = await _client.get("/server-stats", timeout=5.0)
         resp.raise_for_status()
         return resp.json()
     except httpx.TimeoutException:

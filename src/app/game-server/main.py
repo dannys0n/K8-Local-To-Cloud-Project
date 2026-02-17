@@ -1,60 +1,220 @@
+"""
+Game server: TCP server with authoritative state (open -> running -> stop).
+Match config (e.g. duration) is decided by clients (custom match); server notifies
+clients on state changes and closes itself when done or when no clients remain in running.
+Continuously writes TTL and client count to the database.
+"""
+import asyncio
 import os
+import sys
 import time
-from datetime import datetime
 
-from fastapi import FastAPI
-from pydantic import BaseModel
+import psycopg2
 
+SESSION_ID = os.getenv("SESSION_ID", "unknown")
+PORT = int(os.getenv("PORT", "8080"))
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    "postgresql://postgres:postgres@postgres.databases.svc.cluster.local:5432/app",
+)
+STATS_INTERVAL = float(os.getenv("STATS_INTERVAL_SECONDS", "2"))
 
-app = FastAPI(title="Game Server", version="0.1.0")
-
-# In-memory match state (authoritative for this match instance)
-_match_state = {
-    "session_id": os.getenv("SESSION_ID", "unknown"),
-    "players": [],
-    "started_at": None,
-    "ended_at": None,
-    "status": "pending",
-}
-
-
-class MatchStatus(BaseModel):
-    session_id: str
-    players: list[str]
-    status: str
-    started_at: str | None
-    ended_at: str | None
+# State: open -> running -> stop (server-authoritative)
+_state = "open"
+# Match duration in seconds; set by first client via REQUEST_MATCH <sec>
+_match_duration_seconds: float | None = None
+# When we transitioned to running (time.time())
+_running_started_at: float | None = None
+_clients: list[asyncio.StreamWriter] = []
+_state_lock = asyncio.Lock()
+_shutdown = asyncio.Event()
 
 
-@app.get("/health")
-def health() -> dict:
-    return {"status": "ok", "session_id": _match_state["session_id"]}
+def _get_state() -> str:
+    return _state
 
 
-@app.get("/status", response_model=MatchStatus)
-def get_status() -> MatchStatus:
-    """Get current match status."""
-    return MatchStatus(
-        session_id=_match_state["session_id"],
-        players=_match_state["players"],
-        status=_match_state["status"],
-        started_at=_match_state["started_at"].isoformat() if _match_state["started_at"] else None,
-        ended_at=_match_state["ended_at"].isoformat() if _match_state["ended_at"] else None,
-    )
+def _set_state(new: str) -> None:
+    global _state
+    _state = new
 
 
-@app.post("/start")
-def start_match(players: list[str]) -> dict:
-    """Initialize match with players (called by backend when pod starts)."""
-    _match_state["players"] = players
-    _match_state["started_at"] = datetime.utcnow()
-    _match_state["status"] = "active"
-    return {"status": "started", "session_id": _match_state["session_id"]}
+async def _broadcast(line: str) -> None:
+    """Send a line to all connected clients (with newline)."""
+    msg = (line if line.endswith("\n") else line + "\n").encode()
+    async with _state_lock:
+        for w in _clients:
+            try:
+                w.write(msg)
+                await w.drain()
+            except Exception:  # noqa: BLE001
+                pass
 
 
-@app.post("/end")
-def end_match() -> dict:
-    """End the match (called by clients or backend)."""
-    _match_state["ended_at"] = datetime.utcnow()
-    _match_state["status"] = "ended"
-    return {"status": "ended", "session_id": _match_state["session_id"]}
+async def _run_timer(duration_seconds: float) -> None:
+    """After duration_seconds in 'running', transition to stop and trigger shutdown."""
+    await asyncio.sleep(duration_seconds)
+    async with _state_lock:
+        if _get_state() != "running":
+            return
+        _set_state("stop")
+    await _broadcast("STATE stop")
+    _shutdown.set()
+
+
+def _check_empty_and_stop() -> None:
+    """If in running state and no clients left, close session early."""
+    global _state
+    if _state == "running" and len(_clients) == 0:
+        _set_state("stop")
+        _shutdown.set()
+
+
+def _write_stats_sync() -> None:
+    """Write current state, client_count, TTL to DB (run in executor)."""
+    try:
+        state = _get_state()
+        with _state_lock:
+            client_count = len(_clients)
+        if state == "running" and _match_duration_seconds is not None and _running_started_at is not None:
+            elapsed = time.time() - _running_started_at
+            ttl_seconds = max(0, int(_match_duration_seconds - elapsed))
+        else:
+            ttl_seconds = 0
+        conn = psycopg2.connect(DATABASE_URL)
+        conn.autocommit = True
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO game_server_stats (session_id, state, client_count, ttl_seconds, updated_at)
+                    VALUES (%s, %s, %s, %s, now())
+                    ON CONFLICT (session_id) DO UPDATE SET
+                      state = EXCLUDED.state,
+                      client_count = EXCLUDED.client_count,
+                      ttl_seconds = EXCLUDED.ttl_seconds,
+                      updated_at = now()
+                    """,
+                    (SESSION_ID, state, client_count, ttl_seconds),
+                )
+        finally:
+            conn.close()
+    except Exception:  # noqa: BLE001
+        pass  # don't fail the game server if DB is unavailable
+
+
+async def _handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+    global _match_duration_seconds
+    async with _state_lock:
+        _clients.append(writer)
+
+    try:
+        while True:
+            line = await reader.readline()
+            if not line:
+                break
+            raw = line.decode().strip()
+            cmd = raw.upper()
+            if cmd == "GET_STATE":
+                writer.write(f"STATE {_get_state()}\n".encode())
+                await writer.drain()
+            elif cmd == "GET_RUNNING_LENGTH":
+                dur = _match_duration_seconds
+                if dur is not None:
+                    writer.write(f"RUNNING_LENGTH {int(dur)}\n".encode())
+                else:
+                    writer.write(b"RUNNING_LENGTH 0\n")
+                await writer.drain()
+            elif cmd.startswith("REQUEST_MATCH "):
+                # Client requests custom match duration (seconds). First one wins.
+                parts = raw.split()
+                if len(parts) == 2:
+                    try:
+                        sec = float(parts[1])
+                        if sec > 0 and sec <= 86400:  # cap 24h
+                            started_now = False
+                            async with _state_lock:
+                                if _match_duration_seconds is None and _get_state() == "open":
+                                    _match_duration_seconds = sec
+                                    _set_state("running")
+                                    global _running_started_at
+                                    _running_started_at = time.time()
+                                    asyncio.create_task(_run_timer(sec))
+                                    started_now = True
+                            writer.write(f"RUNNING_LENGTH {int(_match_duration_seconds or 0)}\n".encode())
+                            await writer.drain()
+                            if started_now:
+                                await _broadcast("STATE running")
+                            continue
+                    except ValueError:
+                        pass
+                writer.write(b"UNKNOWN\n")
+                await writer.drain()
+            else:
+                writer.write(b"UNKNOWN\n")
+                await writer.drain()
+    except (ConnectionResetError, BrokenPipeError, asyncio.CancelledError):
+        pass
+    finally:
+        async with _state_lock:
+            if writer in _clients:
+                _clients.remove(writer)
+            _check_empty_and_stop()
+        try:
+            writer.close()
+            await writer.wait_closed()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+async def _stats_loop(loop: asyncio.AbstractEventLoop) -> None:
+    """Periodically write stats to DB until shutdown."""
+    while not _shutdown.is_set():
+        try:
+            await asyncio.wait_for(_shutdown.wait(), timeout=STATS_INTERVAL)
+        except asyncio.TimeoutError:
+            pass
+        await loop.run_in_executor(None, _write_stats_sync)
+
+
+async def _serve() -> None:
+    loop = asyncio.get_event_loop()
+    stats_task = asyncio.create_task(_stats_loop(loop))
+    server = await asyncio.start_server(_handle_client, "0.0.0.0", PORT)
+    async with server:
+        await _shutdown.wait()
+    stats_task.cancel()
+    try:
+        await stats_task
+    except asyncio.CancelledError:
+        pass
+    # Final write before exit
+    await loop.run_in_executor(None, _write_stats_sync)
+    server.close()
+    await server.wait_closed()
+    # Close all client connections before exiting
+    async with _state_lock:
+        for w in _clients[:]:
+            try:
+                w.close()
+                await w.wait_closed()
+            except Exception:  # noqa: BLE001
+                pass
+            _clients.clear()
+
+
+def main() -> int:
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_until_complete(_serve())
+        return 0
+    except KeyboardInterrupt:
+        return 0
+    finally:
+        loop.close()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

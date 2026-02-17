@@ -1,6 +1,5 @@
 import argparse
 import os
-import random
 import socket
 import time
 import uuid
@@ -8,74 +7,62 @@ import uuid
 import requests
 
 
-def _detect_lan_ip() -> str:
-    """Best-effort LAN IP detection (no external call, uses routing table)."""
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(("10.255.255.255", 1))
-        ip = s.getsockname()[0]
-    except Exception:  # noqa: BLE001
-        ip = "127.0.0.1"
-    finally:
-        s.close()
-    return ip
-
-
 class GameClient:
-    """Simulates a realistic game client with join → play → end cycle."""
+    """Simulates a realistic game client: join queue → get server address → play → end."""
 
     def __init__(self, base_url: str, player_id: str):
         self.base_url = base_url
         self.player_id = player_id
+        self.game_server_host_override = os.getenv("GAME_SERVER_HOST_OVERRIDE", "").strip()
         self.session_id = None
-        self.game_server_pod = None
+        self.connect_host = None
+        self.connect_port = None
+
+    def _log(self, msg: str) -> None:
+        print(f"  {self.player_id[:8]} {msg}")
 
     def join_matchmaking(self) -> dict | None:
-        """Join matchmaking queue."""
+        """Join matchmaking queue. When 12 are ready, backend allocates game server; response may include connect address."""
+        self._log("state=joining_matchmaking")
         try:
             resp = requests.post(
                 f"{self.base_url}/api/match/join",
                 json={"player_id": self.player_id},
-                timeout=5.0,
+                timeout=15.0,
             )
             resp.raise_for_status()
             data = resp.json()
             self.session_id = data.get("session_id")
+            self.connect_host = self.game_server_host_override or data.get("connect_host") or None
+            self.connect_port = data.get("connect_port") or 0
+            if self.connect_host and self.connect_port:
+                self._log(
+                    f"state=matched session={self.session_id} server={self.connect_host}:{self.connect_port}"
+                )
+            else:
+                self._log(f"state=queued session={self.session_id}")
             return data
         except Exception as e:  # noqa: BLE001
-            print(f"  {self.player_id[:8]} join error: {e}")
+            self._log(f"state=join_error error={e}")
             return None
 
-    def start_match(self) -> bool:
-        """Start the match (create game server pod)."""
-        if not self.session_id or self.session_id.startswith("pending"):
-            return False
-        
+    def poll_status(self) -> dict | None:
+        """Poll until matched; proxy returns game server address when backend has allocated."""
         try:
-            resp = requests.post(
-                f"{self.base_url}/api/match/start",
-                json={"session_id": self.session_id},
-                timeout=10.0,
+            resp = requests.get(
+                f"{self.base_url}/api/match/status",
+                params={"player_id": self.player_id},
+                timeout=5.0,
             )
             resp.raise_for_status()
             data = resp.json()
-            self.game_server_pod = data.get("game_server_pod")
-            return True
+            if data.get("status") == "matched":
+                self.session_id = data.get("session_id")
+                self.connect_host = self.game_server_host_override or data.get("connect_host")
+                self.connect_port = data.get("connect_port", 0)
+            return data
         except Exception as e:  # noqa: BLE001
-            print(f"  {self.player_id[:8]} start error: {e}")
-            return False
-
-    def check_status(self) -> dict | None:
-        """Check match status (simulates reconnection check)."""
-        if not self.session_id:
-            return None
-        
-        try:
-            # In real game, this would hit the game server pod directly
-            # For now, just verify session exists
-            return {"status": "active"}
-        except Exception as e:  # noqa: BLE001
-            print(f"  {self.player_id[:8]} status error: {e}")
+            self._log(f"state=status_error error={e}")
             return None
 
     def end_match(self) -> bool:
@@ -89,60 +76,150 @@ class GameClient:
                 timeout=5.0,
             )
             resp.raise_for_status()
+            self._log(f"state=session_ended session={self.session_id}")
             return True
         except Exception as e:  # noqa: BLE001
-            print(f"  {self.player_id[:8]} end error: {e}")
+            self._log(f"state=end_error session={self.session_id} error={e}")
             return False
+
+    def connect_and_wait_for_stop(
+        self,
+        *,
+        match_duration_seconds: int = 30,
+        recv_timeout: float = 60.0,
+        connect_retries: int = 60,
+        connect_retry_delay: float = 1.0,
+    ) -> float | None:
+        """
+        Connect to the game server over TCP, request a custom match of match_duration_seconds
+        (client-decided config), then block until the server sends STATE stop and closes.
+        Retries the initial connection so the game server pod has time to start.
+        Returns running length in seconds from server ack, or None.
+        """
+        if not self.connect_host or not self.connect_port:
+            return None
+        running_length = None
+        sock = None
+        last_server_state = None
+        self._log(f"state=tcp_connecting target={self.connect_host}:{self.connect_port}")
+        for attempt in range(connect_retries):
+            try:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(recv_timeout)
+                sock.connect((self.connect_host, self.connect_port))
+                self._log(
+                    f"state=tcp_connected target={self.connect_host}:{self.connect_port} attempts={attempt + 1}"
+                )
+                break
+            except (ConnectionRefusedError, OSError) as e:
+                if sock is not None:
+                    try:
+                        sock.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+                    sock = None
+                if attempt < connect_retries - 1:
+                    time.sleep(connect_retry_delay)
+                else:
+                    self._log(
+                        f"state=tcp_connect_failed attempts={connect_retries} error={e}"
+                    )
+                    return None
+        if sock is None:
+            return None
+        try:
+            # Client decides config: request a 30s (or custom) game
+            sock.sendall(f"REQUEST_MATCH {match_duration_seconds}\n".encode())
+            first_payload = sock.recv(512).decode()
+            for line in first_payload.splitlines():
+                line = line.strip()
+                if line.startswith("RUNNING_LENGTH "):
+                    # Keep only the numeric token even if other messages are in same TCP frame.
+                    token = line.split(maxsplit=1)[1].split()[0]
+                    running_length = float(token)
+                    self._log(f"state=running_length value={running_length}")
+                if line.startswith("STATE "):
+                    server_state = line.split(maxsplit=1)[1].strip().lower()
+                    if server_state != last_server_state:
+                        last_server_state = server_state
+                        self._log(f"state=server_{server_state}")
+            # Wait for server to send STATE stop and close the connection
+            while True:
+                data = sock.recv(256).decode()
+                if not data:
+                    self._log("state=tcp_disconnected")
+                    break
+                for line in data.splitlines():
+                    line = line.strip()
+                    if line.startswith("STATE "):
+                        server_state = line.split(maxsplit=1)[1].strip().lower()
+                        if server_state != last_server_state:
+                            last_server_state = server_state
+                            self._log(f"state=server_{server_state}")
+                        if server_state == "stop":
+                            return running_length
+        except (socket.timeout, ConnectionResetError, BrokenPipeError, OSError) as e:
+            if "STATE STOP" not in str(e).upper():
+                self._log(f"state=tcp_error error={e}")
+        finally:
+            try:
+                sock.close()
+            except Exception:  # noqa: BLE001
+                pass
+        return running_length
 
 
 def simulate_client_lifecycle(base_url: str, match_duration: float) -> None:
-    """Simulate one client's full lifecycle: join → start → play → end."""
+    """
+    Flow: join queue at proxy → backend allocates game server when 12 ready →
+    proxy returns address (in join response or via status poll) → play → end.
+    """
     player_id = str(uuid.uuid4())
     client = GameClient(base_url, player_id)
     
-    # Join matchmaking - keep retrying until matched (not pending)
-    max_wait_time = 60.0  # Max 60 seconds to find a match
-    wait_start = time.time()
-    session_id = None
-    
-    while time.time() - wait_start < max_wait_time:
-        result = client.join_matchmaking()
-        if not result:
-            time.sleep(1.0)  # Retry after error
-            continue
-        
-        session_id = result.get("session_id", "")
-        if not session_id.startswith("pending"):
-            # Got a real match!
-            break
-        
-        # Still pending, wait a bit and check again (simulate staying in queue)
-        time.sleep(0.5)
-    
-    if not session_id or session_id.startswith("pending"):
-        # Never got matched, give up
+    # 1. Join matchmaking (proxy forwards to backend; backend queues, may form match and allocate server)
+    result = client.join_matchmaking()
+    if not result:
         return
     
-    # Wait a bit (simulate waiting for other players)
-    time.sleep(0.5)
+    session_id = result.get("session_id", "")
+    # If we got connect address in the response, we're matched (12th player or batch)
+    if result.get("connect_host") and result.get("connect_port"):
+        pass  # already have address
+    elif session_id.startswith("pending"):
+        # Queued; poll until backend has allocated and proxy can tell us the server address
+        max_wait = 60.0
+        wait_start = time.time()
+        last_status = None
+        while time.time() - wait_start < max_wait:
+            status = client.poll_status()
+            if status:
+                current = status.get("status")
+                if current != last_status:
+                    last_status = current
+                    client._log(f"state=match_status_{current}")
+            if status and status.get("status") == "matched":
+                client._log(
+                    f"state=matched session={client.session_id} server={client.connect_host}:{client.connect_port}"
+                )
+                break
+            if status and status.get("status") == "ended":
+                client._log("state=session_ended_before_connect")
+                return
+            time.sleep(0.5)
+        if not client.session_id or not client.connect_host:
+            client._log("state=match_timeout_waiting_for_server")
+            return
+    else:
+        # Session but no address (shouldn't happen if join allocates)
+        if not client.connect_host:
+            return
     
-    # Start match (create game server pod)
-    if not client.start_match():
-        return
-    
-    # Simulate playing (check status periodically, simulate reconnection)
-    play_time = 0.0
-    check_interval = 2.0
-    
-    while play_time < match_duration:
-        time.sleep(min(check_interval, match_duration - play_time))
-        play_time += check_interval
-        
-        # Randomly simulate reconnection check (10% chance)
-        if random.random() < 0.1:
-            client.check_status()
-    
-    # End match
+    # 2. Connect to game server over TCP; client requests 30s custom match; wait for server to send STATE stop (authoritative)
+    client.connect_and_wait_for_stop(match_duration_seconds=30, recv_timeout=max(60.0, 30 + 10))
+
+    # 3. End match (proxy forwards to backend; backend deletes game server)
+    client._log(f"state=ending_session session={client.session_id}")
     client.end_match()
 
 
@@ -159,10 +236,7 @@ def main() -> None:
     - Play for a duration (with reconnection checks)
     - End matches (deletes game server pods)
     """
-    lan_ip = _detect_lan_ip()
-    default_url = os.getenv(
-        "TARGET_URL", f"http://{lan_ip}:8080"
-    )
+    default_url = os.getenv("TARGET_URL", "http://localhost:8080")
 
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -173,7 +247,7 @@ def main() -> None:
     parser.add_argument(
         "--url",
         default=default_url,
-        help="base URL (defaults to LAN IP on port 8080)",
+        help="base URL (defaults to localhost on port 8080)",
     )
     parser.add_argument(
         "--match-duration",
@@ -189,7 +263,9 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    print(f"LAN IP detected as {lan_ip}")
+    gs_host_override = os.getenv("GAME_SERVER_HOST_OVERRIDE", "").strip()
+    if gs_host_override:
+        print(f"Overriding game server host with: {gs_host_override}")
     if args.spawn_rate > 0:
         print(
             f"Spawning {args.clients} clients at {args.spawn_rate}/s "
