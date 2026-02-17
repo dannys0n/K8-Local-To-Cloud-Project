@@ -1,361 +1,38 @@
-from collections import deque
 from typing import List
-import json
 import logging
 import os
 import time
 import uuid
 
-import psycopg2
-import redis
 from fastapi import FastAPI, HTTPException
-from kubernetes import client, config
+from kubernetes import client
 from kubernetes.client.rest import ApiException
-from pydantic import BaseModel
+
+from k8s_game_server import create_game_server_pod, delete_game_server_pod, get_core_v1_api, get_k8s_api
+from models import MatchRequest, MatchResponse
+from settings import FLUSH_WAIT_SECONDS, MIN_PARTIAL_SESSION_SIZE, NAMESPACE, SESSION_SIZE
+from storage import (
+    append_local_queue,
+    dequeue_players,
+    get_db_conn,
+    get_player_queue_ts_key,
+    get_redis_client,
+    local_dequeue,
+    local_oldest_wait_seconds,
+    local_queue_len,
+    track_session_in_redis,
+    untrack_session_in_redis,
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-
 app = FastAPI(title="Game Backend", version="0.1.0")
-
-
-class MatchRequest(BaseModel):
-    player_id: str
-
-
-class MatchResponse(BaseModel):
-    session_id: str
-    players: List[str]
-    connect_host: str = ""   # Set when matched; client uses this to connect to game server
-    connect_port: int = 0   # NodePort when matched
-
-
-# Queue moved to Redis for multi-pod support
-_session_size = int(os.getenv("SESSION_SIZE", "12"))  # default 6v6
-_flush_wait_seconds = float(os.getenv("FLUSH_WAIT_SECONDS", "15"))
-_min_partial_session_size = int(os.getenv("MIN_PARTIAL_SESSION_SIZE", "2"))
-
-_db_conn = None
-_k8s_api = None
-_redis_client = None
-
-
-def _get_db_conn():
-    global _db_conn
-    if _db_conn is None:
-        dsn = os.getenv(
-            "DATABASE_URL",
-            "postgresql://postgres:postgres@postgres.databases.svc.cluster.local:5432/app",
-        )
-        _db_conn = psycopg2.connect(dsn)
-        _db_conn.autocommit = True
-        _ensure_schema(_db_conn)
-    return _db_conn
-
-
-def _get_redis_client():
-    global _redis_client
-    if _redis_client is None:
-        redis_host = os.getenv("REDIS_HOST", "redis.databases.svc.cluster.local")
-        redis_port = int(os.getenv("REDIS_PORT", "6379"))
-        try:
-            _redis_client = redis.Redis(
-                host=redis_host,
-                port=redis_port,
-                decode_responses=True,
-                socket_connect_timeout=2,
-            )
-            # Test connection
-            _redis_client.ping()
-            logger.info(f"Connected to Redis at {redis_host}:{redis_port}")
-        except Exception as e:  # noqa: BLE001
-            logger.warning(f"Redis connection failed: {e}, continuing without Redis")
-            _redis_client = None
-    return _redis_client
-
-
-def _track_session_in_redis(session_id: str, game_server_pod: str, connect_host: str, connect_port: int) -> None:
-    redis_client = _get_redis_client()
-    if not redis_client:
-        return
-    try:
-        redis_client.sadd("active_sessions", session_id)
-        redis_client.set(f"session:{session_id}:pod", game_server_pod, ex=3600)
-        redis_client.set(f"session:{session_id}:host", connect_host, ex=3600)
-        redis_client.set(f"session:{session_id}:port", str(connect_port), ex=3600)
-    except Exception:  # noqa: BLE001
-        pass
-
-
-def _untrack_session_in_redis(session_id: str) -> None:
-    redis_client = _get_redis_client()
-    if not redis_client:
-        return
-    try:
-        redis_client.srem("active_sessions", session_id)
-        redis_client.delete(f"session:{session_id}:pod")
-        redis_client.delete(f"session:{session_id}:host")
-        redis_client.delete(f"session:{session_id}:port")
-        logger.info(f"Removed active session {session_id} from Redis")
-    except Exception as e:  # noqa: BLE001
-        logger.warning(f"Failed to remove session from Redis: {e}")
-
-
-def _load_k8s_config() -> None:
-    try:
-        config.load_incluster_config()
-    except Exception:  # noqa: BLE001
-        config.load_kube_config()
-
-
-def _ensure_schema(conn) -> None:
-    with conn.cursor() as cur:
-        # Create matches table if it doesn't exist
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS matches (
-              session_id text PRIMARY KEY,
-              players_json text NOT NULL,
-              backend_pod text,
-              created_at timestamptz DEFAULT now()
-            );
-            """
-        )
-        # Add missing columns if they don't exist (for existing tables)
-        # Check if column exists by querying information_schema
-        cur.execute("""
-            SELECT column_name 
-            FROM information_schema.columns 
-            WHERE table_name='matches' AND column_name='game_server_pod';
-        """)
-        if not cur.fetchone():
-            cur.execute("ALTER TABLE matches ADD COLUMN game_server_pod text;")
-        
-        cur.execute("""
-            SELECT column_name 
-            FROM information_schema.columns 
-            WHERE table_name='matches' AND column_name='ended_at';
-        """)
-        if not cur.fetchone():
-            cur.execute("ALTER TABLE matches ADD COLUMN ended_at timestamptz;")
-        
-        # Telemetry/event tables removed; `matches` remains authoritative.
-
-
-def _get_k8s_api():
-    global _k8s_api
-    if _k8s_api is None:
-        _load_k8s_config()
-        _k8s_api = client.AppsV1Api()
-    return _k8s_api
-
-
-def _get_core_v1_api():
-    """CoreV1Api for Services and Nodes."""
-    if not hasattr(_get_core_v1_api, "_api"):
-        _load_k8s_config()
-        _get_core_v1_api._api = client.CoreV1Api()
-    return _get_core_v1_api._api
-
-
-def _wait_for_game_server_ready(session_id: str, timeout_seconds: float = 45.0) -> bool:
-    """
-    Wait until at least one game-server pod for this session is Running and Ready.
-    This avoids handing out connect info before TCP is actually accepting.
-    """
-    core_api = _get_core_v1_api()
-    namespace = os.getenv("NAMESPACE", "default")
-    label_selector = f"app=game-server,session_id={session_id}"
-    deadline = time.time() + timeout_seconds
-
-    while time.time() < deadline:
-        try:
-            pods = core_api.list_namespaced_pod(
-                namespace=namespace,
-                label_selector=label_selector,
-            )
-            for pod in pods.items:
-                status = pod.status
-                if status is None or status.phase != "Running":
-                    continue
-                ready = False
-                for cs in status.container_statuses or []:
-                    if cs.ready:
-                        ready = True
-                        break
-                if ready:
-                    return True
-        except Exception as e:  # noqa: BLE001
-            logger.warning(f"Error while waiting for game server readiness ({session_id}): {e}")
-        time.sleep(0.5)
-
-    return False
-
-
-def _create_game_server_pod(session_id: str, players: List[str]) -> tuple[str, str, int]:
-    """Create a game server pod for a session."""
-    k8s_apps_api = _get_k8s_api()
-    
-    pod_name = f"game-server-{session_id[:8]}"
-    namespace = os.getenv("NAMESPACE", "default")
-    
-    logger.info(f"Creating game server pod {pod_name} in namespace {namespace}")
-    
-    # Create Deployment (simpler than Pod for lifecycle management)
-    deployment = client.V1Deployment(
-        metadata=client.V1ObjectMeta(
-            name=pod_name,
-            namespace=namespace,
-            labels={"app": "game-server", "session_id": session_id},
-        ),
-        spec=client.V1DeploymentSpec(
-            replicas=1,
-            selector=client.V1LabelSelector(
-                match_labels={"app": "game-server", "session_id": session_id}
-            ),
-            template=client.V1PodTemplateSpec(
-                metadata=client.V1ObjectMeta(
-                    labels={"app": "game-server", "session_id": session_id}
-                ),
-                spec=client.V1PodSpec(
-                    containers=[
-                        client.V1Container(
-                            name="game-server",
-                            image="game-server:local",
-                            image_pull_policy="IfNotPresent",
-                            ports=[client.V1ContainerPort(container_port=8080)],
-                            env=[
-                                client.V1EnvVar(name="SESSION_ID", value=session_id),
-                                client.V1EnvVar(
-                                    name="PLAYERS",
-                                    value=json.dumps(players),
-                                ),
-                                client.V1EnvVar(name="PORT", value="8080"),
-                            ],
-                        )
-                    ],
-                    restart_policy="Always",  # Deployments require Always, not Never
-                ),
-            ),
-        ),
-    )
-    
-    try:
-        k8s_apps_api.create_namespaced_deployment(namespace=namespace, body=deployment)
-        logger.info(f"Successfully created deployment {pod_name}")
-    except ApiException as e:
-        logger.error(f"Failed to create deployment: status={e.status}, reason={e.reason}, body={e.body}")
-        if e.status == 409:  # Already exists
-            logger.info(f"Deployment {pod_name} already exists")
-        else:
-            raise
-
-    # Create a NodePort Service so clients can connect to this game server
-    core_api = _get_core_v1_api()
-    svc_name = pod_name  # same name as deployment
-    svc = client.V1Service(
-        metadata=client.V1ObjectMeta(
-            name=svc_name,
-            namespace=namespace,
-            labels={"app": "game-server", "session_id": session_id},
-        ),
-        spec=client.V1ServiceSpec(
-            type="NodePort",
-            selector={"app": "game-server", "session_id": session_id},
-            ports=[client.V1ServicePort(port=8080, target_port=8080, protocol="TCP")],
-        ),
-    )
-    try:
-        core_api.create_namespaced_service(namespace=namespace, body=svc)
-        logger.info(f"Created Service {svc_name} (NodePort)")
-    except ApiException as e:
-        if e.status == 409:
-            pass  # already exists
-        else:
-            logger.warning(f"Failed to create Service for {pod_name}: {e}")
-            return pod_name, "", 0
-
-    # Read back the assigned NodePort and a node IP
-    import time
-    time.sleep(0.5)  # give API a moment
-    try:
-        created = core_api.read_namespaced_service(name=svc_name, namespace=namespace)
-        node_port = created.spec.ports[0].node_port if created.spec.ports else 0
-    except Exception:  # noqa: BLE001
-        node_port = 0
-
-    # Prefer node IP from env (e.g. kind: use host). Else use first node's address.
-    connect_host = os.getenv("GAME_SERVER_CONNECT_HOST", "")
-    if not connect_host:
-        try:
-            nodes = core_api.list_node()
-            for node in nodes.items:
-                for addr in node.status.addresses or []:
-                    if addr.type in ("ExternalIP", "InternalIP"):
-                        connect_host = addr.address
-                        break
-                if connect_host:
-                    break
-        except Exception as e:  # noqa: BLE001
-            logger.warning(f"Failed to auto-detect node IP for game server connect_host: {e}")
-    if not connect_host:
-        connect_host = "localhost"  # fallback for port-forward setups
-        logger.warning(
-            "Falling back to localhost for game-server connect_host; this may be unreachable for NodePort clients"
-        )
-
-    # Wait for pod readiness before giving clients connect details.
-    if not _wait_for_game_server_ready(session_id, timeout_seconds=45.0):
-        logger.warning(
-            f"Game server {pod_name} not ready within timeout; clients may need to retry connect"
-        )
-
-    return pod_name, connect_host, node_port or 0
-
-
-def _delete_game_server_pod(session_id: str) -> None:
-    """Delete the game server deployment and its Service for a session with retries."""
-    k8s_apps_api = _get_k8s_api()
-    core_api = _get_core_v1_api()
-    namespace = os.getenv("NAMESPACE", "default")
-    pod_name = f"game-server-{session_id[:8]}"
-
-    # Delete Service first (no need to retry much)
-    try:
-        core_api.delete_namespaced_service(name=pod_name, namespace=namespace)
-        logger.info(f"Deleted Service {pod_name}")
-    except ApiException as e:
-        if e.status != 404:
-            logger.warning(f"Failed to delete Service {pod_name}: {e}")
-
-    max_retries = 3
-    for attempt in range(max_retries):
-        try:
-            k8s_apps_api.delete_namespaced_deployment(
-                name=pod_name,
-                namespace=namespace,
-                body=client.V1DeleteOptions(propagation_policy="Foreground"),
-            )
-            logger.info(f"Successfully deleted game server pod {pod_name}")
-            return
-        except ApiException as e:
-            if e.status == 404:  # Already deleted, that's fine
-                logger.info(f"Game server pod {pod_name} already deleted")
-                return
-            if attempt < max_retries - 1:
-                wait_time = 2 ** attempt  # Exponential backoff
-                logger.warning(f"Failed to delete {pod_name} (attempt {attempt + 1}/{max_retries}): {e}, retrying in {wait_time}s")
-                import time
-                time.sleep(wait_time)
-            else:
-                logger.error(f"Failed to delete {pod_name} after {max_retries} attempts: {e}")
-                raise
 
 
 def _create_match_session(players: List[str]) -> MatchResponse:
     session_id = str(uuid.uuid4())
-    conn = _get_db_conn()
+    conn = get_db_conn()
     backend_pod = os.getenv("HOSTNAME", "unknown")
     players_json = ",".join(players)
 
@@ -365,16 +42,13 @@ def _create_match_session(players: List[str]) -> MatchResponse:
             (session_id, players_json, backend_pod),
         )
 
-    game_server_pod, connect_host, connect_port = _create_game_server_pod(session_id, players)
-
+    game_server_pod, connect_host, connect_port = create_game_server_pod(session_id, players)
     with conn.cursor() as cur:
         cur.execute(
             "UPDATE matches SET game_server_pod = %s WHERE session_id = %s",
             (game_server_pod, session_id),
         )
-
-    _track_session_in_redis(session_id, game_server_pod, connect_host, connect_port)
-
+    track_session_in_redis(session_id, game_server_pod, connect_host, connect_port)
     return MatchResponse(
         session_id=session_id,
         players=players,
@@ -383,32 +57,10 @@ def _create_match_session(players: List[str]) -> MatchResponse:
     )
 
 
-def _get_player_queue_ts_key(player_id: str) -> str:
-    return f"matchmaking:queued_at:{player_id}"
-
-
-def _dequeue_players(redis_client, queue_key: str, count: int) -> List[str]:
-    pipe = redis_client.pipeline()
-    for _ in range(count):
-        pipe.lpop(queue_key)
-    players_list = pipe.execute()
-    players = [p for p in players_list if p]
-    if players:
-        try:
-            cleanup = redis_client.pipeline()
-            for p in players:
-                cleanup.delete(_get_player_queue_ts_key(p))
-            cleanup.execute()
-        except Exception:  # noqa: BLE001
-            pass
-    return players
-
-
 @app.get("/health")
 def health() -> dict:
-    # touch DB so /health reflects DB availability
     try:
-        conn = _get_db_conn()
+        conn = get_db_conn()
         with conn.cursor() as cur:
             cur.execute("SELECT 1;")
     except Exception:  # noqa: BLE001
@@ -418,84 +70,57 @@ def health() -> dict:
 
 @app.post("/match/join", response_model=MatchResponse)
 def join_match(req: MatchRequest) -> MatchResponse:
-    """
-    Simple 6v6 matchmaking using Redis queue (shared across pods):
-    - enqueue player in Redis
-    - when we have 12 players, form a session (6v6)
-    - write authoritative session to Postgres
-    """
-    redis_client = _get_redis_client()
-    
-    # Use Redis list for queue (atomic operations)
+    redis_client = get_redis_client()
     queue_key = "matchmaking_queue"
-    
+
     if redis_client:
         try:
-            # Add player to queue
             redis_client.rpush(queue_key, req.player_id)
-            redis_client.set(_get_player_queue_ts_key(req.player_id), str(time.time()), ex=3600)
-            
-            # Check queue length atomically
+            redis_client.set(get_player_queue_ts_key(req.player_id), str(time.time()), ex=3600)
             queue_len = redis_client.llen(queue_key)
-            
+
             flush_count = 0
-            if queue_len >= _session_size:
-                flush_count = _session_size
-            elif queue_len >= _min_partial_session_size:
+            if queue_len >= SESSION_SIZE:
+                flush_count = SESSION_SIZE
+            elif queue_len >= MIN_PARTIAL_SESSION_SIZE:
                 oldest_player = redis_client.lindex(queue_key, 0)
                 if oldest_player:
-                    queued_at_raw = redis_client.get(_get_player_queue_ts_key(oldest_player))
+                    queued_at_raw = redis_client.get(get_player_queue_ts_key(oldest_player))
                     if queued_at_raw:
                         try:
                             oldest_wait = time.time() - float(queued_at_raw)
-                            if oldest_wait >= _flush_wait_seconds:
+                            if oldest_wait >= FLUSH_WAIT_SECONDS:
                                 flush_count = queue_len
                         except ValueError:
                             pass
 
             if flush_count > 0:
-                players = _dequeue_players(redis_client, queue_key, flush_count)
+                players = dequeue_players(redis_client, queue_key, flush_count)
                 if len(players) == flush_count:
                     return _create_match_session(players)
         except Exception as e:  # noqa: BLE001
             logger.warning(f"Redis queue operation failed: {e}, falling back to in-memory")
-    
-    # Fallback to in-memory queue (single pod only)
-    if not hasattr(join_match, '_local_queue'):
-        join_match._local_queue = deque()
-    
-    join_match._local_queue.append((req.player_id, time.time()))
 
-    local_len = len(join_match._local_queue)
+    append_local_queue(req.player_id)
+    local_len = local_queue_len()
     local_flush_count = 0
-    if local_len >= _session_size:
-        local_flush_count = _session_size
-    elif local_len >= _min_partial_session_size:
-        oldest_queued_at = join_match._local_queue[0][1]
-        if time.time() - oldest_queued_at >= _flush_wait_seconds:
+    if local_len >= SESSION_SIZE:
+        local_flush_count = SESSION_SIZE
+    elif local_len >= MIN_PARTIAL_SESSION_SIZE:
+        if local_oldest_wait_seconds() >= FLUSH_WAIT_SECONDS:
             local_flush_count = local_len
 
     if local_flush_count > 0:
-        players: List[str] = []
-        for _ in range(local_flush_count):
-            p, _queued_at = join_match._local_queue.popleft()
-            players.append(p)
+        players = local_dequeue(local_flush_count)
         return _create_match_session(players)
-    
-    # pending / solo case (not yet in a full 6v6)
-    pending_id = f"pending:{req.player_id}"
-    return MatchResponse(session_id=pending_id, players=[req.player_id])
+
+    return MatchResponse(session_id=f"pending:{req.player_id}", players=[req.player_id])
 
 
 @app.get("/match/status")
 def match_status(player_id: str) -> dict:
-    """
-    Called by proxy so queued clients can poll until matched.
-    Returns pending or matched with connect address for the game server.
-    """
-    conn = _get_db_conn()
+    conn = get_db_conn()
     with conn.cursor() as cur:
-        # players_json is a comma-separated list; match exact token boundaries.
         cur.execute(
             """
             SELECT session_id, ended_at
@@ -516,16 +141,15 @@ def match_status(player_id: str) -> dict:
             ),
         )
         row = cur.fetchone()
-    
+
     if not row:
         return {"status": "pending"}
-    
+
     session_id, ended_at = row
     if ended_at:
         return {"status": "ended", "session_id": session_id}
-    
-    # Session exists and not ended; get connect address from Redis
-    redis_client = _get_redis_client()
+
+    redis_client = get_redis_client()
     if redis_client:
         host = redis_client.get(f"session:{session_id}:host") or ""
         port_str = redis_client.get(f"session:{session_id}:port") or "0"
@@ -537,79 +161,53 @@ def match_status(player_id: str) -> dict:
                 "connect_host": host,
                 "connect_port": port,
             }
-    
-    # Fallback: read from DB if we stored it (we don't currently store host/port in DB)
     return {"status": "pending"}
 
 
 @app.post("/match/{session_id}/end")
 def end_match(session_id: str) -> dict:
-    """
-    End a match by deleting the game server pod and updating DB.
-    """
-    # Delete game server pod (don't fail the request if this fails)
     try:
-        _delete_game_server_pod(session_id)
+        delete_game_server_pod(session_id)
     except Exception as e:  # noqa: BLE001
-        # Log but don't fail the request - cleanup can happen later
         logger.error(f"Failed to delete game server pod for {session_id}: {e}")
-        # Still mark as ended in DB so we can clean up later
-    
-    # Update DB
-    conn = _get_db_conn()
+
+    conn = get_db_conn()
     with conn.cursor() as cur:
         cur.execute(
             "UPDATE matches SET ended_at = now() WHERE session_id = %s",
             (session_id,),
         )
-    
-    _untrack_session_in_redis(session_id)
-    
+    untrack_session_in_redis(session_id)
     return {"status": "ended", "session_id": session_id}
 
 
 @app.get("/sessions/active")
 def get_active_sessions() -> dict:
-    """
-    Get real-time count and list of active sessions (matches) from Redis.
-    Each session represents one match with 12 players.
-    Falls back to Postgres if Redis unavailable.
-    
-    Returns:
-    - count: number of active sessions (matches), not players
-    - sessions: list of session objects with session_id and game_server_pod
-    """
-    redis_client = _get_redis_client()
-    
+    redis_client = get_redis_client()
     if redis_client:
         try:
             session_ids = redis_client.smembers("active_sessions")
-            count = len(session_ids)
-            
-            # Get pod info for each session
             sessions = []
             for sid in session_ids:
                 pod = redis_client.get(f"session:{sid}:pod") or "unknown"
                 sessions.append({"session_id": sid, "game_server_pod": pod})
-            
             return {
-                "count": count,
+                "count": len(session_ids),
                 "sessions": sessions,
                 "source": "redis",
                 "note": "Each session = 1 match with 12 players",
             }
         except Exception as e:  # noqa: BLE001
             logger.warning(f"Redis query failed: {e}, falling back to Postgres")
-    
-    # Fallback to Postgres - only return recent matches (last 5 minutes) to avoid stale data
+
     try:
-        conn = _get_db_conn()
+        conn = get_db_conn()
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT session_id, game_server_pod, created_at 
-                FROM matches 
-                WHERE ended_at IS NULL 
+                SELECT session_id, game_server_pod, created_at
+                FROM matches
+                WHERE ended_at IS NULL
                   AND created_at > now() - interval '5 minutes'
                 ORDER BY created_at DESC
                 """
@@ -636,51 +234,39 @@ def get_active_sessions() -> dict:
 
 @app.post("/cleanup/orphaned-servers")
 def cleanup_orphaned_servers() -> dict:
-    """
-    Clean up game server deployments for matches that have ended.
-    Useful for cleaning up pods that failed to delete during match end.
-    """
-    conn = _get_db_conn()
-    k8s_apps_api = _get_k8s_api()
-    namespace = os.getenv("NAMESPACE", "default")
-    
-    # Find all game server deployments
+    conn = get_db_conn()
+    k8s_apps_api = get_k8s_api()
     try:
         deployments = k8s_apps_api.list_namespaced_deployment(
-            namespace=namespace,
+            namespace=NAMESPACE,
             label_selector="app=game-server",
         )
     except Exception as e:  # noqa: BLE001
         logger.error(f"Failed to list deployments: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to list deployments: {e}")
-    
+
     cleaned = 0
     with conn.cursor() as cur:
         for dep in deployments.items:
-            # Extract session_id from deployment name (game-server-{first8chars})
             dep_name = dep.metadata.name
             if not dep_name.startswith("game-server-"):
                 continue
-            
             session_prefix = dep_name.replace("game-server-", "")
-            
-            # Check if match is ended
             cur.execute(
                 "SELECT ended_at FROM matches WHERE session_id LIKE %s",
                 (f"{session_prefix}%",),
             )
             row = cur.fetchone()
-            
-            if row and row[0]:  # Match has ended_at timestamp
+            if row and row[0]:
                 try:
-                    core_api = _get_core_v1_api()
+                    core_api = get_core_v1_api()
                     try:
-                        core_api.delete_namespaced_service(name=dep_name, namespace=namespace)
+                        core_api.delete_namespaced_service(name=dep_name, namespace=NAMESPACE)
                     except ApiException:  # noqa: BLE001
                         pass
                     k8s_apps_api.delete_namespaced_deployment(
                         name=dep_name,
-                        namespace=namespace,
+                        namespace=NAMESPACE,
                         body=client.V1DeleteOptions(propagation_policy="Foreground"),
                     )
                     cleaned += 1
@@ -688,7 +274,7 @@ def cleanup_orphaned_servers() -> dict:
                 except ApiException as e:
                     if e.status != 404:
                         logger.warning(f"Failed to delete {dep_name}: {e}")
-    
+
     return {"cleaned": cleaned, "message": f"Cleaned up {cleaned} orphaned game server deployments"}
 
 
