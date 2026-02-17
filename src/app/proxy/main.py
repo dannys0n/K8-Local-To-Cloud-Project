@@ -168,24 +168,6 @@ async def proxy_match_status(player_id: str):
         raise HTTPException(status_code=500, detail=f"Proxy error: {str(e)}")
 
 
-@app.get("/api/server-stats")
-async def proxy_server_stats():
-    """Forward /server-stats to backend (for print-server-data without psycopg2 on host)."""
-    if _client is None:
-        raise HTTPException(status_code=503, detail="Proxy not ready")
-
-    try:
-        resp = await _client.get("/server-stats", timeout=5.0)
-        resp.raise_for_status()
-        return resp.json()
-    except httpx.TimeoutException:
-        raise HTTPException(status_code=504, detail="Backend timeout")
-    except httpx.RequestError as e:
-        raise HTTPException(status_code=502, detail=f"Backend connection error: {str(e)}")
-    except Exception as e:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=f"Proxy error: {str(e)}")
-
-
 @app.get("/api/sessions/active")
 async def proxy_active_sessions():
     """Forward /sessions/active to backend."""

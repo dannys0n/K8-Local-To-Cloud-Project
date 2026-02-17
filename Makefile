@@ -44,20 +44,6 @@ proxy-port-forward-local:
 game-load-local:
 	cd src/app/load && python3 main.py $(CLIENTS)
 
-# run this to watch the number of active sessions
-# watch -n 1 'curl -s http://localhost:8080/api/sessions/active | jq .count'
-
-# Print game server stats via proxy API (no DB driver required on host).
-print-server-data:
-	python3 src/scripts/print_server_data.py
-
-# Active session IDs
-#kubectl exec deployment/redis -n databases -- redis-cli SMEMBERS active_sessions
-
-# Matchmaking queue length
-#kubectl exec deployment/redis -n databases -- redis-cli LLEN matchmaking_queue
-
-
 game-build:
 	docker build -t game-backend:local src/app/backend
 	docker build -t game-proxy:local  src/app/proxy
@@ -87,7 +73,8 @@ clear-databases:
 	@echo "Clearing Redis..."
 	@kubectl exec deployment/redis -n databases -- redis-cli FLUSHALL || echo "Redis flush failed"
 	@echo "Clearing Postgres..."
-	@kubectl exec deployment/postgres -n databases -- psql -U postgres -d app -c "TRUNCATE TABLE IF EXISTS game_server_stats, matches, match_events CASCADE;" || echo "Postgres truncate failed"
+	@kubectl exec deployment/postgres -n databases -- psql -U postgres -d app -c "TRUNCATE TABLE IF EXISTS matches CASCADE;" || echo "Postgres truncate failed"
+	@kubectl exec deployment/postgres -n databases -- psql -U postgres -d app -c "DROP TABLE IF EXISTS match_events, game_server_stats;" || echo "Postgres telemetry table cleanup failed"
 	@echo "Cleaning up orphaned game server pods and services..."
 	@kubectl delete deployment -l app=game-server --ignore-not-found || true
 	@kubectl delete service -l app=game-server --ignore-not-found || true

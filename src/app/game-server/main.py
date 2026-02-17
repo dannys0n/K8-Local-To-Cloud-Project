@@ -2,22 +2,14 @@
 Game server: TCP server with authoritative state (open -> running -> stop).
 Match config (e.g. duration) is decided by clients (custom match); server notifies
 clients on state changes and closes itself when done or when no clients remain in running.
-Continuously writes TTL and client count to the database.
 """
 import asyncio
 import os
 import sys
 import time
 
-import psycopg2
-
 SESSION_ID = os.getenv("SESSION_ID", "unknown")
 PORT = int(os.getenv("PORT", "8080"))
-DATABASE_URL = os.getenv(
-    "DATABASE_URL",
-    "postgresql://postgres:postgres@postgres.databases.svc.cluster.local:5432/app",
-)
-STATS_INTERVAL = float(os.getenv("STATS_INTERVAL_SECONDS", "2"))
 
 # State: open -> running -> stop (server-authoritative)
 _state = "open"
@@ -68,39 +60,6 @@ def _check_empty_and_stop() -> None:
     if _state == "running" and len(_clients) == 0:
         _set_state("stop")
         _shutdown.set()
-
-
-def _write_stats_sync() -> None:
-    """Write current state, client_count, TTL to DB (run in executor)."""
-    try:
-        state = _get_state()
-        with _state_lock:
-            client_count = len(_clients)
-        if state == "running" and _match_duration_seconds is not None and _running_started_at is not None:
-            elapsed = time.time() - _running_started_at
-            ttl_seconds = max(0, int(_match_duration_seconds - elapsed))
-        else:
-            ttl_seconds = 0
-        conn = psycopg2.connect(DATABASE_URL)
-        conn.autocommit = True
-        try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    INSERT INTO game_server_stats (session_id, state, client_count, ttl_seconds, updated_at)
-                    VALUES (%s, %s, %s, %s, now())
-                    ON CONFLICT (session_id) DO UPDATE SET
-                      state = EXCLUDED.state,
-                      client_count = EXCLUDED.client_count,
-                      ttl_seconds = EXCLUDED.ttl_seconds,
-                      updated_at = now()
-                    """,
-                    (SESSION_ID, state, client_count, ttl_seconds),
-                )
-        finally:
-            conn.close()
-    except Exception:  # noqa: BLE001
-        pass  # don't fail the game server if DB is unavailable
 
 
 async def _handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
@@ -167,29 +126,10 @@ async def _handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWri
             pass
 
 
-async def _stats_loop(loop: asyncio.AbstractEventLoop) -> None:
-    """Periodically write stats to DB until shutdown."""
-    while not _shutdown.is_set():
-        try:
-            await asyncio.wait_for(_shutdown.wait(), timeout=STATS_INTERVAL)
-        except asyncio.TimeoutError:
-            pass
-        await loop.run_in_executor(None, _write_stats_sync)
-
-
 async def _serve() -> None:
-    loop = asyncio.get_event_loop()
-    stats_task = asyncio.create_task(_stats_loop(loop))
     server = await asyncio.start_server(_handle_client, "0.0.0.0", PORT)
     async with server:
         await _shutdown.wait()
-    stats_task.cancel()
-    try:
-        await stats_task
-    except asyncio.CancelledError:
-        pass
-    # Final write before exit
-    await loop.run_in_executor(None, _write_stats_sync)
     server.close()
     await server.wait_closed()
     # Close all client connections before exiting

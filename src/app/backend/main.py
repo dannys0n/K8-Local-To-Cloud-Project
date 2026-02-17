@@ -117,28 +117,7 @@ def _ensure_schema(conn) -> None:
         if not cur.fetchone():
             cur.execute("ALTER TABLE matches ADD COLUMN ended_at timestamptz;")
         
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS match_events (
-              id bigserial PRIMARY KEY,
-              session_id text,
-              event_type text,
-              player_id text,
-              created_at timestamptz DEFAULT now()
-            );
-            """
-        )
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS game_server_stats (
-              session_id text PRIMARY KEY,
-              state text NOT NULL,
-              client_count int NOT NULL DEFAULT 0,
-              ttl_seconds int NOT NULL DEFAULT 0,
-              updated_at timestamptz DEFAULT now()
-            );
-            """
-        )
+        # Telemetry/event tables removed; `matches` remains authoritative.
 
 
 def _get_k8s_api():
@@ -236,13 +215,6 @@ def _create_game_server_pod(session_id: str, players: List[str]) -> tuple[str, s
                                     value=json.dumps(players),
                                 ),
                                 client.V1EnvVar(name="PORT", value="8080"),
-                                client.V1EnvVar(
-                                    name="DATABASE_URL",
-                                    value=os.getenv(
-                                        "DATABASE_URL",
-                                        "postgresql://postgres:postgres@postgres.databases.svc.cluster.local:5432/app",
-                                    ),
-                                ),
                             ],
                         )
                     ],
@@ -417,11 +389,6 @@ def join_match(req: MatchRequest) -> MatchResponse:
                             "INSERT INTO matches (session_id, players_json, backend_pod) VALUES (%s, %s, %s)",
                             (session_id, players_json, backend_pod),
                         )
-                        for p in players:
-                            cur.execute(
-                                "INSERT INTO match_events (session_id, event_type, player_id) VALUES (%s, %s, %s)",
-                                (session_id, "join", p),
-                            )
                     
                     # Allocate game server (pod + NodePort Service); proxy gets address to tell clients
                     game_server_pod, connect_host, connect_port = _create_game_server_pod(session_id, players)
@@ -430,10 +397,6 @@ def join_match(req: MatchRequest) -> MatchResponse:
                         cur.execute(
                             "UPDATE matches SET game_server_pod = %s WHERE session_id = %s",
                             (game_server_pod, session_id),
-                        )
-                        cur.execute(
-                            "INSERT INTO match_events (session_id, event_type, player_id) VALUES (%s, %s, %s)",
-                            (session_id, "start", ""),
                         )
                     
                     if redis_client:
@@ -476,21 +439,12 @@ def join_match(req: MatchRequest) -> MatchResponse:
                 "INSERT INTO matches (session_id, players_json, backend_pod) VALUES (%s, %s, %s)",
                 (session_id, players_json, backend_pod),
             )
-            for p in players:
-                cur.execute(
-                    "INSERT INTO match_events (session_id, event_type, player_id) VALUES (%s, %s, %s)",
-                    (session_id, "join", p),
-                )
         
         game_server_pod, connect_host, connect_port = _create_game_server_pod(session_id, players)
         with conn.cursor() as cur:
             cur.execute(
                 "UPDATE matches SET game_server_pod = %s WHERE session_id = %s",
                 (game_server_pod, session_id),
-            )
-            cur.execute(
-                "INSERT INTO match_events (session_id, event_type, player_id) VALUES (%s, %s, %s)",
-                (session_id, "start", ""),
             )
         
         redis_client = _get_redis_client()
@@ -523,15 +477,25 @@ def match_status(player_id: str) -> dict:
     """
     conn = _get_db_conn()
     with conn.cursor() as cur:
+        # players_json is a comma-separated list; match exact token boundaries.
         cur.execute(
             """
-            SELECT m.session_id, m.ended_at
-            FROM match_events e
-            JOIN matches m ON m.session_id = e.session_id
-            WHERE e.player_id = %s AND e.event_type = 'join'
-            ORDER BY e.id DESC LIMIT 1
+            SELECT session_id, ended_at
+            FROM matches
+            WHERE
+              players_json = %s
+              OR players_json LIKE %s
+              OR players_json LIKE %s
+              OR players_json LIKE %s
+            ORDER BY created_at DESC
+            LIMIT 1
             """,
-            (player_id,),
+            (
+                player_id,
+                f"{player_id},%",
+                f"%,{player_id},%",
+                f"%,{player_id}",
+            ),
         )
         row = cur.fetchone()
     
@@ -595,10 +559,6 @@ def start_match(req: StartMatchRequest) -> StartMatchResponse:
                 "UPDATE matches SET game_server_pod = %s WHERE session_id = %s",
                 (game_server_pod, session_id),
             )
-            cur.execute(
-                "INSERT INTO match_events (session_id, event_type, player_id) VALUES (%s, %s, %s)",
-                (session_id, "start", ""),
-            )
         
         # Track active session in Redis
         redis_client = _get_redis_client()
@@ -644,10 +604,6 @@ def end_match(session_id: str) -> dict:
             "UPDATE matches SET ended_at = now() WHERE session_id = %s",
             (session_id,),
         )
-        cur.execute(
-            "INSERT INTO match_events (session_id, event_type, player_id) VALUES (%s, %s, %s)",
-            (session_id, "end", ""),
-        )
     
     # Remove from Redis active sessions
     redis_client = _get_redis_client()
@@ -662,40 +618,6 @@ def end_match(session_id: str) -> dict:
             logger.warning(f"Failed to remove session from Redis: {e}")
     
     return {"status": "ended", "session_id": session_id}
-
-
-@app.get("/server-stats")
-def get_server_stats() -> dict:
-    """
-    Return game server stats from DB (TTL, client counts).
-    Used by the print-server-data script without requiring psycopg2 on the host.
-    """
-    try:
-        conn = _get_db_conn()
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT session_id, state, client_count, ttl_seconds, updated_at
-                FROM game_server_stats
-                ORDER BY updated_at DESC
-                """
-            )
-            rows = cur.fetchall()
-        return {
-            "servers": [
-                {
-                    "session_id": row[0],
-                    "state": row[1],
-                    "client_count": row[2],
-                    "ttl_seconds": row[3],
-                    "updated_at": str(row[4]) if row[4] else None,
-                }
-                for row in rows
-            ],
-        }
-    except Exception as e:  # noqa: BLE001
-        logger.error(f"Failed to query server stats: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/sessions/active")
