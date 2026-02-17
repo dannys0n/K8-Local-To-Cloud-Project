@@ -1,3 +1,6 @@
+KIND_CLUSTER ?= dev
+CLIENTS ?= 50
+
 up: cluster monitors managers databases port-forward
 
 cluster:
@@ -25,29 +28,53 @@ postgres: databases-namespace
 port-forward:
 	./src/scripts/port-forward.sh
 
+
 down:
 	./src/scripts/teardown.sh
 
 status:
 	kubectl get pods -n monitoring
 
+# --- Database cleanups
+
+# run if problems with database ports
+free-local-db-ports:
+	bash ./src/scripts/free-local-db-ports.sh
+
+clear-databases:
+	bash ./src/scripts/clear-databases.sh
+
+# --- Game backend testbed:
+# 1
+game-testbed: game-build game-load-images game-backend game-proxy
+# 2
+proxy-port-forward-local:
+	kubectl port-forward svc/game-proxy 8080:8080
+# 3
+game-load-local:
+	cd src/app/load && python3 main.py $(CLIENTS)
+
+game-build:
+	docker build -t game-backend:local src/app/backend
+	docker build -t game-proxy:local  src/app/proxy
+	docker build -t game-server:local  src/app/game-server
+
+game-load-images:
+	kind load docker-image game-backend:local --name $(KIND_CLUSTER)
+	kind load docker-image game-proxy:local  --name $(KIND_CLUSTER)
+	kind load docker-image game-server:local --name $(KIND_CLUSTER)
+
+game-backend:
+	kubectl apply -f src/k8s/base/backend-rbac.yaml
+	kubectl apply -f src/k8s/base/backend.yaml
+	kubectl apply -f src/k8s/base/backend-hpa.yaml
+
+game-proxy:
+	kubectl apply -f src/k8s/base/proxy.yaml
+	kubectl apply -f src/k8s/base/proxy-hpa.yaml
+
 ping-redis:
 	./src/scripts/ping-redis.sh
 
 ping-postgres:
 	./src/scripts/ping-postgres.sh
-
-# --- Demo services:
-
-# 1) Stateful TCP — direct POSIX TCP, Redis; close to AtlasNet-style integration
-tcp-demo-build:
-	./src/scripts/tcp-demo-build.sh
-
-tcp-demo-deploy: tcp-demo-build
-	kubectl apply -f src/tcp-demo/namespace.yaml
-	kubectl apply -f src/tcp-demo/deployment.yaml
-	kubectl rollout status deployment/tcp-demo -n tcp-demo
-	kubectl apply -f src/tcp-demo/hpa.yaml
-
-tcp-demo: tcp-demo-deploy
-	@./src/scripts/port-forward.sh
