@@ -174,4 +174,3 @@ aws-clean-app:
 aws-smoke-test:
 	PROXY_SERVICE_PORT=$(PROXY_SERVICE_PORT) \
 	bash ./src/scripts/aws/smoke-test.sh
-
