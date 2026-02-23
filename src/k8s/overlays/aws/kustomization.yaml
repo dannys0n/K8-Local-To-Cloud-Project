@@ -1,0 +1,22 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+- ../../base
+patches:
+- patch: |-
+    - op: replace
+      path: /spec/template/spec/containers/0/image
+      value: GAME_BACKEND_IMAGE_PLACEHOLDER
+    - op: replace
+      path: /spec/template/spec/containers/0/env/8/value
+      value: GAME_SERVER_IMAGE_PLACEHOLDER
+  target:
+    kind: Deployment
+    name: game-backend
+- patch: |-
+    - op: replace
+      path: /spec/template/spec/containers/0/image
+      value: GAME_PROXY_IMAGE_PLACEHOLDER
+  target:
+    kind: Deployment
+    name: game-proxy
