@@ -4,7 +4,7 @@ set -euo pipefail
 CLUSTER_NAME="${CLUSTER_NAME:-mycluster}"
 
 # Expose HTTP/HTTPS through the k3d load balancer (useful for optional Ingress)
-k3d cluster create "${CLUSTER_NAME}"   -p "8080:80@loadbalancer"   -p "8443:443@loadbalancer"   --servers 1 --agents 0
+k3d cluster create "${CLUSTER_NAME}"   -p "8080:80@loadbalancer"   -p "8443:443@loadbalancer"   --servers 1 --agents 2
 
 kubectl config use-context "k3d-${CLUSTER_NAME}"
 
