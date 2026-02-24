@@ -1,0 +1,6 @@
+# Keep this minimal; rely on port-forward or optional Ingress
+service:
+  type: ClusterIP
+
+# 1 replica is fine for local dev
+replicaCount: 1

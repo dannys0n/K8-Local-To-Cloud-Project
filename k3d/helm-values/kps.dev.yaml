@@ -1,0 +1,12 @@
+# Minimal overrides for local dev
+grafana:
+  adminPassword: admin
+  service:
+    type: ClusterIP
+
+alertmanager:
+  enabled: false
+
+prometheus:
+  prometheusSpec:
+    retention: 2d
