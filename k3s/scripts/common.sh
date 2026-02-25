@@ -1,4 +1,3 @@
-\
 #!/usr/bin/env bash
 set -euo pipefail
 
@@ -53,6 +52,9 @@ wait_for_k3s() {
   local tries="${1:-60}"
   for _ in $(seq 1 "$tries"); do
     if command -v kubectl >/dev/null 2>&1 && kubectl get nodes >/dev/null 2>&1; then
+      return 0
+    fi
+    if command -v k3s >/dev/null 2>&1 && sudo_if_needed k3s kubectl get nodes >/dev/null 2>&1; then
       return 0
     fi
     sleep 2

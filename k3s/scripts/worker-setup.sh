@@ -1,35 +1,48 @@
-\
 #!/usr/bin/env bash
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/common.sh"
 
+find_pi_cmdline() {
+  if [[ -f /boot/firmware/cmdline.txt ]]; then
+    echo "/boot/firmware/cmdline.txt"
+    return 0
+  fi
+  if [[ -f /boot/cmdline.txt ]]; then
+    echo "/boot/cmdline.txt"
+    return 0
+  fi
+  return 1
+}
+
+cmdline_has_arg() {
+  local file="$1"
+  local arg="$2"
+  grep -Eq "(^|[[:space:]])${arg}([[:space:]]|$)" "$file"
+}
+
 echo "== Worker setup (Raspberry Pi OS) =="
 
-apt_install curl ca-certificates avahi-daemon libnss-mdns
+apt_install curl ca-certificates
 
-sudo_if_needed systemctl enable --now avahi-daemon || true
-
-# Enable cgroups (common requirement on Pi OS). Best-effort.
-CMDLINE=""
-if [[ -f /boot/cmdline.txt ]]; then CMDLINE="/boot/cmdline.txt"; fi
-if [[ -f /boot/firmware/cmdline.txt ]]; then CMDLINE="/boot/firmware/cmdline.txt"; fi
-
-if [[ -n "$CMDLINE" ]]; then
-  NEED_REBOOT=0
-  for p in cgroup_enable=cpuset cgroup_memory=1 cgroup_enable=memory; do
-    if ! grep -q "$p" "$CMDLINE"; then
-      sudo_if_needed sed -i "s|$| $p|" "$CMDLINE"
-      NEED_REBOOT=1
+if cmdline_file="$(find_pi_cmdline)"; then
+  need_reboot=0
+  for arg in cgroup_memory=1 cgroup_enable=memory; do
+    if ! cmdline_has_arg "$cmdline_file" "$arg"; then
+      sudo_if_needed sed -i "s|$| $arg|" "$cmdline_file"
+      need_reboot=1
     fi
   done
 
-  if [[ "$NEED_REBOOT" -eq 1 ]]; then
-    echo "Enabled cgroups in $CMDLINE. Rebooting now..."
-    sudo_if_needed reboot
-    exit 0
+  if [[ "$need_reboot" -eq 1 ]]; then
+    echo "Updated $cmdline_file with required cgroup args."
+    echo "Reboot required before joining cluster."
+    echo "Next: sudo reboot"
+    exit 1
   fi
+else
+  echo "Warning: could not find Raspberry Pi cmdline.txt; skipped cgroup boot arg checks."
 fi
 
 echo "Worker setup complete."
