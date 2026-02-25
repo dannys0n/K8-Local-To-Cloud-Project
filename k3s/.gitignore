@@ -1,0 +1,17 @@
+# Local environment / secrets
+config/cluster.env
+config/kubeconfig
+config/*.pem
+config/*.key
+config/*.crt
+config/*.kubeconfig
+config/*.log
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Bash
+*.swp
