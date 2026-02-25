@@ -77,7 +77,10 @@ has_recent_agent_fatal_logs() {
   if [[ -z "$logs" ]]; then
     return 1
   fi
-  printf '%s\n' "$logs" | grep -Eiq 'level=fatal|node password rejected|token|certificate signed by unknown authority|failed to get CA certs|401 Unauthorized|connection refused|context deadline exceeded'
+  # Keep this intentionally narrow. The agent can log transient connection warnings during startup
+  # (especially on slow boots or after restarts). We only want to fail fast on strong signals that
+  # the join credentials/CA are wrong.
+  printf '%s\n' "$logs" | grep -Eiq 'level=fatal|\bFATA\b|node password rejected|server rejected|401 Unauthorized|x509: certificate signed by unknown authority|failed to get CA certs'
 }
 
 echo "== Worker up (join cluster) =="
@@ -105,12 +108,12 @@ if [[ -n "$CLI_K3S_TOKEN" ]]; then
   K3S_TOKEN="$CLI_K3S_TOKEN"
 fi
 
-# Prompt before reusing saved config unless explicitly skipped.
-if [[ -f "$CONF_FILE" && "${FORCE_PROMPT:-0}" != "1" && -n "${K3S_URL:-}" && -n "${K3S_TOKEN:-}" && -z "$CLI_K3S_URL" && -z "$CLI_K3S_TOKEN" ]]; then
-  echo "Saved worker join config found in $CONF_FILE:"
-  echo "  K3S_URL=$K3S_URL"
-  echo "  K3S_TOKEN=$(mask_secret "$K3S_TOKEN")"
-  read -r -p "Reuse saved config? [Y/n]: " reuse_saved
+# Always prompt to reuse cached config if present (unless user provided explicit env vars or forced prompt).
+if [[ -f "$CONF_FILE" && "${FORCE_PROMPT:-0}" != "1" && -z "$CLI_K3S_URL" && -z "$CLI_K3S_TOKEN" ]]; then
+  echo "Cached worker join config found in $CONF_FILE:"
+  echo "  K3S_URL=${K3S_URL:-<unset>}"
+  echo "  K3S_TOKEN=$(mask_secret "${K3S_TOKEN:-}")"
+  read -r -p "Reuse cached config? [Y/n]: " reuse_saved
   if [[ "${reuse_saved:-}" =~ ^[Nn]$ ]]; then
     K3S_URL=""
     K3S_TOKEN=""
