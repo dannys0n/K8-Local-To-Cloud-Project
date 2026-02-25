@@ -87,6 +87,17 @@ echo "== Worker up (join cluster) =="
 
 apt_install curl ca-certificates
 
+# Ensure iptables tooling is present (k3s/CNI expects iptables-save/restore).
+if ! command -v iptables-save >/dev/null 2>&1 || ! command -v iptables-restore >/dev/null 2>&1; then
+  echo "[INFO] Host iptables-save/iptables-restore tools not found; installing iptables..."
+  apt_install iptables
+fi
+if ! command -v ip6tables-save >/dev/null 2>&1 || ! command -v ip6tables-restore >/dev/null 2>&1; then
+  echo "[INFO] Host ip6tables-save/ip6tables-restore tools not found; installing iptables..."
+  apt_install iptables
+fi
+
+
 CONF_DIR="/etc/k3s-lab"
 CONF_FILE="${CONF_DIR}/worker.env"
 CLI_K3S_URL="${K3S_URL:-}"
@@ -108,8 +119,13 @@ if [[ -n "$CLI_K3S_TOKEN" ]]; then
   K3S_TOKEN="$CLI_K3S_TOKEN"
 fi
 
-# Always prompt to reuse cached config if present (unless user provided explicit env vars or forced prompt).
-if [[ -f "$CONF_FILE" && "${FORCE_PROMPT:-0}" != "1" && -z "$CLI_K3S_URL" && -z "$CLI_K3S_TOKEN" ]]; then
+
+# If FORCE_PROMPT=1, ignore cached values and force re-entry.
+if [[ "${FORCE_PROMPT:-0}" == "1" ]]; then
+  K3S_URL=""
+  K3S_TOKEN=""
+# Otherwise, ask whether to reuse cached config (unless user provided explicit env vars).
+elif [[ -f "$CONF_FILE" && -z "$CLI_K3S_URL" && -z "$CLI_K3S_TOKEN" ]]; then
   echo "Cached worker join config found in $CONF_FILE:"
   echo "  K3S_URL=${K3S_URL:-<unset>}"
   echo "  K3S_TOKEN=$(mask_secret "${K3S_TOKEN:-}")"
