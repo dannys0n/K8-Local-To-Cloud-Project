@@ -6,7 +6,7 @@ ENV_EXPORTS := SERVER_IP SERVER_SSH_USER PI_WORKER_IP WORKER_SSH_USER SSH_KEY K3
 -include $(ENV_FILE)
 export $(ENV_EXPORTS)
 
-.PHONY: bootstrap platform nodes linux-pi ssh-setup sudo-setup port-cleanup
+.PHONY: bootstrap platform nodes linux-pi ssh-setup sudo-setup port-cleanup cleanup-cluster
 
 bootstrap:
 	./scripts/bootstrap.sh
@@ -25,6 +25,10 @@ sudo-setup:
 
 port-cleanup:
 	./scripts/port_cleanup.sh
+
+cleanup-cluster:
+	@: "$${NUKE_CONFIRM:?Set NUKE_CONFIRM=YES to confirm destructive cleanup}"
+	./scripts/cleanup_cluster.sh
 
 linux-pi:
 	@: "$${SERVER_IP:?Set SERVER_IP in .env or pass SERVER_IP=...}"

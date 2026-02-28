@@ -62,6 +62,7 @@ Legacy `config/cluster.env` values are also supported if the file exists.
 - `make linux-pi`: install k3s server and join worker.
 - `make nodes`: quick `kubectl get nodes -o wide` using project kubeconfig.
 - `make platform`: install optional platform add-ons.
+- `make cleanup-cluster NUKE_CONFIRM=YES`: uninstall k3s from worker/server and remove local project kubeconfig.
 
 ## Troubleshooting
 - `Permission denied (publickey,password)`:
