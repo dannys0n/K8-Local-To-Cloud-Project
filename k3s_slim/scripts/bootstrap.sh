@@ -249,6 +249,7 @@ else
     echo " - worker: $ip"
     k3sup join \
       --server-ip "$SERVER_IP" \
+      --server-user "$SERVER_SSH_USER" \
       --ip "$ip" \
       --user "$WORKER_SSH_USER" \
       --sudo "$K3SUP_USE_SUDO" \
