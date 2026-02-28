@@ -18,6 +18,7 @@ Options (CLI flags override config values):
   --server-ip <ip>             k3s server node IP (required)
   --server-user <user>         SSH user for the server node (required)
   --ssh-key <path>             SSH private key path (required)
+  --use-sudo <true|false>      Use sudo on remote nodes (default: true)
   --worker-ip <ip>             Worker IP (repeatable)
   --worker-ips "<ip1 ip2>"      Space-separated worker IP list
   --worker-user <user>         SSH user for workers (default: pi)
@@ -42,6 +43,7 @@ CLI_WORKER_IPS=""
 CLI_K3S_EXTRA_ARGS=""
 CLI_K3S_VERSION=""
 CLI_K3SUP_VERSION=""
+CLI_K3SUP_USE_SUDO=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -58,6 +60,11 @@ while [[ $# -gt 0 ]]; do
     --ssh-key)
       [[ $# -ge 2 ]] || die "--ssh-key requires a value"
       CLI_SSH_KEY="$2"
+      shift 2
+      ;;
+    --use-sudo)
+      [[ $# -ge 2 ]] || die "--use-sudo requires a value (true|false)"
+      CLI_K3SUP_USE_SUDO="$2"
       shift 2
       ;;
     --worker-ip)
@@ -119,6 +126,7 @@ fi
 [[ -n "$CLI_K3S_EXTRA_ARGS" ]] && K3S_EXTRA_ARGS="$CLI_K3S_EXTRA_ARGS"
 [[ -n "$CLI_K3S_VERSION" ]] && K3S_VERSION="$CLI_K3S_VERSION"
 [[ -n "$CLI_K3SUP_VERSION" ]] && K3SUP_VERSION="$CLI_K3SUP_VERSION"
+[[ -n "$CLI_K3SUP_USE_SUDO" ]] && K3SUP_USE_SUDO="$CLI_K3SUP_USE_SUDO"
 
 : "${SERVER_IP:?SERVER_IP is required (set in config/cluster.env or via --server-ip)}"
 : "${SERVER_SSH_USER:?SERVER_SSH_USER is required (set in config/cluster.env or via --server-user)}"
@@ -129,6 +137,10 @@ fi
 : "${K3S_VERSION:=}"
 : "${K3SUP_VERSION:=}"
 : "${K3S_API_ENDPOINT:=$SERVER_IP}"
+: "${K3SUP_USE_SUDO:=true}"
+
+[[ "$K3SUP_USE_SUDO" == "true" || "$K3SUP_USE_SUDO" == "false" ]] || \
+  die "K3SUP_USE_SUDO must be 'true' or 'false' (got: $K3SUP_USE_SUDO)"
 
 SSH_KEY="${SSH_KEY/#\~/$HOME}"
 [[ -f "$SSH_KEY" ]] || die "SSH key file does not exist: $SSH_KEY"
@@ -148,6 +160,21 @@ check_ssh_access() {
     -o ConnectTimeout=5 \
     "${host_user}@${host_ip}" true >/dev/null 2>&1; then
     die "SSH auth failed for ${host_user}@${host_ip}. Install your public key on that node first (example: ssh-copy-id -i ${SSH_KEY}.pub ${host_user}@${host_ip})"
+  fi
+}
+
+check_sudo_access() {
+  local host_ip="$1"
+  local host_user="$2"
+
+  [[ "$K3SUP_USE_SUDO" == "true" ]] || return 0
+
+  if ! ssh -i "$SSH_KEY" \
+    -o BatchMode=yes \
+    -o StrictHostKeyChecking=accept-new \
+    -o ConnectTimeout=5 \
+    "${host_user}@${host_ip}" 'sudo -n true' >/dev/null 2>&1; then
+    die "Passwordless sudo is required for ${host_user}@${host_ip}. Run 'make sudo-setup', or set it manually in /etc/sudoers.d, or set K3SUP_USE_SUDO=false and use root SSH."
   fi
 }
 
@@ -178,6 +205,12 @@ for ip in $WORKER_IPS; do
   check_ssh_access "$ip" "$WORKER_SSH_USER"
 done
 
+echo "Checking sudo access on nodes ..."
+check_sudo_access "$SERVER_IP" "$SERVER_SSH_USER"
+for ip in $WORKER_IPS; do
+  check_sudo_access "$ip" "$WORKER_SSH_USER"
+done
+
 install_k3sup_if_missing
 
 echo "Installing k3s server on $SERVER_IP ..."
@@ -194,6 +227,7 @@ K3SUP_INSTALL_ARGS=(
   --tls-san "$K3S_API_ENDPOINT"
   --local-path "$KUBECONFIG_PATH"
   --context "$CONTEXT_NAME"
+  --sudo "$K3SUP_USE_SUDO"
   --k3s-extra-args "$K3S_SERVER_ARGS"
 )
 
@@ -217,6 +251,7 @@ else
       --server-ip "$SERVER_IP" \
       --ip "$ip" \
       --user "$WORKER_SSH_USER" \
+      --sudo "$K3SUP_USE_SUDO" \
       --ssh-key "$SSH_KEY"
   done
 fi

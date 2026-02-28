@@ -32,11 +32,18 @@ Notes:
   ```bash
   make ssh-setup # create key (if missing) and copy it to server + worker
   ```
+- Sudo setup from `.env`:
+  ```bash
+  make sudo-setup # enable passwordless sudo on server + worker (if needed)
+  ```
+- Sudo note:
+  `k3sup` needs non-interactive sudo by default. If you see `sudo: Authentication failed`, either enable passwordless sudo for your SSH users or use root SSH and set `K3SUP_USE_SUDO=false` in `.env`.
 - Makefile with `.env`:
   ```bash
   cp .env.example .env
   # edit .env
   make ssh-setup
+  make sudo-setup
   make linux-pi
   ```
   You can still override any value inline:
