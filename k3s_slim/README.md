@@ -34,6 +34,11 @@ make sudo-setup
 make linux-pi
 ```
 
+`make linux-pi` automatically runs a port cleanup step first (`scripts/port_cleanup.sh`).
+By default it frees `7946` on server/worker (common Docker Swarm vs MetalLB conflict).
+You can override with `SERVER_PORT_CLEANUP_PORTS` / `WORKER_PORT_CLEANUP_PORTS` in `.env`.
+Port cleanup will stop a systemd service if it owns the port, otherwise it terminates the process.
+
 ## 3) Verify
 ```bash
 kubectl get nodes -o wide
@@ -53,6 +58,7 @@ Legacy `config/cluster.env` values are also supported if the file exists.
 ## Make targets
 - `make ssh-setup`: create SSH key (if missing) and copy to server + worker.
 - `make sudo-setup`: enable passwordless sudo for SSH users on server + worker.
+- `make port-cleanup`: free configured required ports on server + worker.
 - `make linux-pi`: install k3s server and join worker.
 - `make nodes`: quick `kubectl get nodes -o wide` using project kubeconfig.
 - `make platform`: install optional platform add-ons.
