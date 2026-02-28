@@ -1,96 +1,65 @@
-# k3s homelab cluster (k3sup + Helm)
+# k3s slim (Linux server + Pi worker)
 
-Goal: a small, easy-to-understand multi-node k3s setup with automation.
+Minimal automation to build a small k3s cluster with `k3sup`.
 
-This repo is split into two concerns:
+## What this does
+- Sets up SSH key access to server and worker.
+- Sets up passwordless sudo for those SSH users (if needed).
+- Installs k3s server and joins worker.
+- Writes kubeconfig to `config/kubeconfig`.
+- Automatically symlinks `~/.kube/config` to that file (backs up existing non-symlink config first).
 
-1) **Bootstrap (imperative)**: create/join the cluster via SSH using `k3sup`.
-2) **Platform + apps (declarative)**: install add-ons with Helm and deploy manifests under `k8s/`.
+## Prereqs
+- Run from your Linux control machine.
+- Node IPs reachable via SSH.
+- `kubectl`, `helm`, and `ssh` tools installed locally.
 
-## Prereqs (on your laptop/desktop)
-- SSH access to all nodes (key-based login recommended)
-- `kubectl` installed
-- `helm` installed
-- `k3sup` installed (or let `scripts/bootstrap.sh` install it)
-
-## Fast path: Linux server + Pi5 worker
-Run bootstrap directly with flags (no config file required):
-
+## 1) Configure `.env`
 ```bash
-./scripts/bootstrap.sh \
-  --server-ip 192.168.1.10 \
-  --server-user danny \
-  --worker-ip 192.168.1.20 \
-  --worker-user pi5 \
-  --ssh-key ~/.ssh/id_ed25519
+cp .env.example .env
 ```
 
-Notes:
-- `--api-endpoint` defaults to the server IP, so it is optional for a simple LAN setup.
-- Add more workers by repeating `--worker-ip`.
-- SSH setup from `.env`:
-  ```bash
-  make ssh-setup # create key (if missing) and copy it to server + worker
-  ```
-- Sudo setup from `.env`:
-  ```bash
-  make sudo-setup # enable passwordless sudo on server + worker (if needed)
-  ```
-- Sudo note:
-  `k3sup` needs non-interactive sudo by default. If you see `sudo: Authentication failed`, either enable passwordless sudo for your SSH users or use root SSH and set `K3SUP_USE_SUDO=false` in `.env`.
-- Makefile with `.env`:
-  ```bash
-  cp .env.example .env
-  # edit .env
-  make ssh-setup
-  make sudo-setup
-  make linux-pi
-  ```
-  You can still override any value inline:
-  ```bash
-  make linux-pi SERVER_IP=192.168.1.10 SERVER_SSH_USER=danny PI_WORKER_IP=192.168.1.20
-  ```
+Edit `.env`:
+- `SERVER_IP`
+- `SERVER_SSH_USER`
+- `PI_WORKER_IP`
+- `WORKER_SSH_USER` (SSH username on the worker; this is not hostname)
+- `SSH_KEY` (default is usually fine)
+- `K3SUP_USE_SUDO=true` (default)
 
-## Quickstart
-1) Create config:
-   ```bash
-   cp config/cluster.env.example config/cluster.env
-   # edit config/cluster.env
-   ```
+## 2) Run cluster setup
+```bash
+make ssh-setup
+make sudo-setup
+make linux-pi
+```
 
-2) (Optional) If you are overwriting an old layout, remove legacy folders:
-   ```bash
-   ./scripts/prune_old_layout.sh
-   ```
+## 3) Verify
+```bash
+kubectl get nodes -o wide
+kubectl get pods -A -o wide
+```
 
-3) Bootstrap the cluster:
-   ```bash
-   ./scripts/bootstrap.sh
-   ```
-   Or override values at runtime:
-   ```bash
-   ./scripts/bootstrap.sh --server-ip 192.168.1.10 --server-user danny --worker-ip 192.168.1.20 --ssh-key ~/.ssh/id_ed25519
-   ```
+`kubectl` should work directly because `make linux-pi` links `~/.kube/config` for you.
 
-4) Install platform add-ons (optional, safe to re-run):
-   ```bash
-   ./scripts/platform.sh
-   ```
+## Optional add-ons
+```bash
+make platform
+```
 
-5) Verify:
-   ```bash
-   export KUBECONFIG="$(pwd)/config/kubeconfig"
-   kubectl get nodes -o wide
-   ```
+This uses `config/cluster.env` flags for metrics-server / MetalLB / ingress / cert-manager.
 
-## What gets installed by default
-- k3s server + agents (via `k3sup`)
-- Nothing else unless you enable it in `config/cluster.env` (see `platform.sh`)
+## Make targets
+- `make ssh-setup`: create SSH key (if missing) and copy to server + worker.
+- `make sudo-setup`: enable passwordless sudo for SSH users on server + worker.
+- `make linux-pi`: install k3s server and join worker.
+- `make nodes`: quick `kubectl get nodes -o wide` using project kubeconfig.
+- `make platform`: install optional platform add-ons.
 
-## Common workflows
-- Re-run bootstrap after adding a new worker IP to `WORKER_IPS`.
-- Put your app manifests in `k8s/` (or install via Helm in `scripts/platform.sh`).
-
-## Notes
-- `config/kubeconfig` is intentionally gitignored (cluster-admin credentials).
-- For bare-metal LoadBalancer IPs, enable MetalLB (see `config/cluster.env.example`).
+## Troubleshooting
+- `Permission denied (publickey,password)`:
+  run `make ssh-setup`.
+- `sudo: Authentication failed`:
+  run `make sudo-setup`, or use root SSH users and set `K3SUP_USE_SUDO=false`.
+- `kubectl` tries `localhost:8080`:
+  your kubeconfig is not active; rerun `make linux-pi` or check `~/.kube/config` symlink.

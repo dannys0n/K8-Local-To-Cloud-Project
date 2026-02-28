@@ -199,6 +199,24 @@ install_k3sup_if_missing() {
   command -v k3sup >/dev/null 2>&1 || die "k3sup install failed"
 }
 
+link_default_kubeconfig() {
+  local default_dir="$HOME/.kube"
+  local default_path="$default_dir/config"
+  local backup_path=""
+
+  mkdir -p "$default_dir"
+
+  if [[ -e "$default_path" && ! -L "$default_path" ]]; then
+    backup_path="${default_path}.bak.$(date +%Y%m%d%H%M%S)"
+    mv "$default_path" "$backup_path"
+    echo "Backed up existing kubeconfig: $backup_path"
+  fi
+
+  ln -sfn "$KUBECONFIG_PATH" "$default_path"
+  chmod 600 "$KUBECONFIG_PATH" >/dev/null 2>&1 || true
+  echo "Linked default kubeconfig: $default_path -> $KUBECONFIG_PATH"
+}
+
 echo "Checking SSH access to nodes ..."
 check_ssh_access "$SERVER_IP" "$SERVER_SSH_USER"
 for ip in $WORKER_IPS; do
@@ -257,6 +275,8 @@ else
   done
 fi
 
+link_default_kubeconfig
+
 echo
 echo "Cluster context: $CONTEXT_NAME"
 kubectl config use-context "$CONTEXT_NAME" >/dev/null
@@ -264,4 +284,5 @@ kubectl config use-context "$CONTEXT_NAME" >/dev/null
 echo
 echo "Done. Verify with:"
 echo "  export KUBECONFIG=\"$KUBECONFIG_PATH\""
+echo "  # or use default: ~/.kube/config (auto-linked)"
 echo "  kubectl get nodes -o wide"
