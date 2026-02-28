@@ -1,4 +1,6 @@
 # Local environment / secrets
+.env
+!.env.example
 config/cluster.env
 config/kubeconfig
 config/*.pem

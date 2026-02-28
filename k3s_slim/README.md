@@ -13,6 +13,32 @@ This repo is split into two concerns:
 - `helm` installed
 - `k3sup` installed (or let `scripts/bootstrap.sh` install it)
 
+## Fast path: Linux server + Pi5 worker
+Run bootstrap directly with flags (no config file required):
+
+```bash
+./scripts/bootstrap.sh \
+  --server-ip 192.168.1.10 \
+  --server-user danny \
+  --worker-ip 192.168.1.20 \
+  --worker-user pi5 \
+  --ssh-key ~/.ssh/id_ed25519
+```
+
+Notes:
+- `--api-endpoint` defaults to the server IP, so it is optional for a simple LAN setup.
+- Add more workers by repeating `--worker-ip`.
+- Makefile with `.env`:
+  ```bash
+  cp .env.example .env
+  # edit .env
+  make linux-pi
+  ```
+  You can still override any value inline:
+  ```bash
+  make linux-pi SERVER_IP=192.168.1.10 SERVER_SSH_USER=danny PI_WORKER_IP=192.168.1.20
+  ```
+
 ## Quickstart
 1) Create config:
    ```bash
@@ -28,6 +54,10 @@ This repo is split into two concerns:
 3) Bootstrap the cluster:
    ```bash
    ./scripts/bootstrap.sh
+   ```
+   Or override values at runtime:
+   ```bash
+   ./scripts/bootstrap.sh --server-ip 192.168.1.10 --server-user danny --worker-ip 192.168.1.20 --ssh-key ~/.ssh/id_ed25519
    ```
 
 4) Install platform add-ons (optional, safe to re-run):
