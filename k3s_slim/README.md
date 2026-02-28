@@ -47,7 +47,8 @@ kubectl get pods -A -o wide
 make platform
 ```
 
-This uses `config/cluster.env` flags for metrics-server / MetalLB / ingress / cert-manager.
+This uses `.env` flags for metrics-server / MetalLB / ingress / cert-manager.
+Legacy `config/cluster.env` values are also supported if the file exists.
 
 ## Make targets
 - `make ssh-setup`: create SSH key (if missing) and copy to server + worker.
