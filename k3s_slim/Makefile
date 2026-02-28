@@ -27,7 +27,6 @@ port-cleanup:
 	./scripts/port_cleanup.sh
 
 cleanup-cluster:
-	@: "$${NUKE_CONFIRM:?Set NUKE_CONFIRM=YES to confirm destructive cleanup}"
 	./scripts/cleanup_cluster.sh
 
 linux-pi:

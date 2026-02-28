@@ -17,9 +17,6 @@ source "$ENV_FILE"
 : "${PI_WORKER_IP:?Set PI_WORKER_IP in .env}"
 : "${WORKER_SSH_USER:=pi}"
 : "${SSH_KEY:=$HOME/.ssh/id_ed25519}"
-: "${NUKE_CONFIRM:=}"
-
-[[ "$NUKE_CONFIRM" == "YES" ]] || die "This is destructive. Re-run with NUKE_CONFIRM=YES."
 
 SSH_KEY="${SSH_KEY/#\~/$HOME}"
 [[ -f "$SSH_KEY" ]] || die "SSH key file does not exist: $SSH_KEY"
@@ -32,7 +29,8 @@ uninstall_remote_node() {
   local host_label="$3"
 
   echo "${host_label}: uninstalling k3s on ${host_user}@${host_ip}"
-  ssh -tt -i "$SSH_KEY" \
+  ssh -T -i "$SSH_KEY" \
+    -o BatchMode=yes \
     -o StrictHostKeyChecking=accept-new \
     -o ConnectTimeout=5 \
     "${host_user}@${host_ip}" \
