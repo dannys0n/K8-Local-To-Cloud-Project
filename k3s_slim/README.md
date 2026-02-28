@@ -28,10 +28,15 @@ Run bootstrap directly with flags (no config file required):
 Notes:
 - `--api-endpoint` defaults to the server IP, so it is optional for a simple LAN setup.
 - Add more workers by repeating `--worker-ip`.
+- SSH setup from `.env`:
+  ```bash
+  make ssh-setup # create key (if missing) and copy it to server + worker
+  ```
 - Makefile with `.env`:
   ```bash
   cp .env.example .env
   # edit .env
+  make ssh-setup
   make linux-pi
   ```
   You can still override any value inline:

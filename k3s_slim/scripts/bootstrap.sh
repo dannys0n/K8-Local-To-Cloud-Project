@@ -10,7 +10,7 @@ die() { echo "ERROR: $*" >&2; exit 1; }
 need_cmd() { command -v "$1" >/dev/null 2>&1 || die "Missing '$1'. Install it first."; }
 
 print_usage() {
-  cat <<EOF
+  cat <<EOF2
 Usage:
   ./scripts/bootstrap.sh [options]
 
@@ -30,7 +30,7 @@ Options (CLI flags override config values):
 Config fallback:
   If config/cluster.env exists, values are loaded from it.
   Any CLI option overrides config values.
-EOF
+EOF2
 }
 
 CLI_SERVER_IP=""
@@ -138,6 +138,19 @@ need_cmd kubectl
 # Helm is only required for platform.sh, not for bootstrap.
 # k3sup can be auto-installed below.
 
+check_ssh_access() {
+  local host_ip="$1"
+  local host_user="$2"
+
+  if ! ssh -i "$SSH_KEY" \
+    -o BatchMode=yes \
+    -o StrictHostKeyChecking=accept-new \
+    -o ConnectTimeout=5 \
+    "${host_user}@${host_ip}" true >/dev/null 2>&1; then
+    die "SSH auth failed for ${host_user}@${host_ip}. Install your public key on that node first (example: ssh-copy-id -i ${SSH_KEY}.pub ${host_user}@${host_ip})"
+  fi
+}
+
 install_k3sup_if_missing() {
   if command -v k3sup >/dev/null 2>&1; then
     return 0
@@ -158,6 +171,12 @@ install_k3sup_if_missing() {
 
   command -v k3sup >/dev/null 2>&1 || die "k3sup install failed"
 }
+
+echo "Checking SSH access to nodes ..."
+check_ssh_access "$SERVER_IP" "$SERVER_SSH_USER"
+for ip in $WORKER_IPS; do
+  check_ssh_access "$ip" "$WORKER_SSH_USER"
+done
 
 install_k3sup_if_missing
 
