@@ -1,0 +1,28 @@
+redis:
+  enabled: true
+  persistence:
+    enabled: false
+
+metalLB:
+  enabled: true
+  addressPools:
+    - name: default-pool
+      addresses:
+        - 192.168.88.240-192.168.88.250
+  l2Advertisements:
+    - name: default
+      ipAddressPools:
+        - default-pool
+
+deployables:
+  - name: echo-api
+    image: hashicorp/http-echo:1.0.0
+    args:
+      - -text=hello from the base template
+    ports:
+      - name: http
+        containerPort: 5678
+        servicePort: 80
+    service:
+      enabled: true
+      type: LoadBalancer

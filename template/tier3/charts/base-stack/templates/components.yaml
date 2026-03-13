@@ -1,0 +1,228 @@
+{{- if .Values.redis.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "base-stack.fullname" . }}-redis
+  labels:
+    {{- include "base-stack.labels" . | nindent 4 }}
+    app.kubernetes.io/component: redis
+  {{- with .Values.redis.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.redis.service.type }}
+  selector:
+    {{- include "base-stack.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: redis
+  ports:
+    - name: redis
+      port: {{ .Values.redis.port }}
+      targetPort: redis
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "base-stack.fullname" . }}-redis
+  labels:
+    {{- include "base-stack.labels" . | nindent 4 }}
+    app.kubernetes.io/component: redis
+spec:
+  serviceName: {{ include "base-stack.fullname" . }}-redis
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "base-stack.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: redis
+  template:
+    metadata:
+      labels:
+        {{- include "base-stack.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: redis
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.redis.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: redis
+          image: {{ .Values.redis.image | quote }}
+          imagePullPolicy: {{ .Values.redis.imagePullPolicy }}
+          {{- with .Values.redis.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          ports:
+            - name: redis
+              containerPort: {{ .Values.redis.port }}
+          {{- with .Values.redis.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- if .Values.redis.persistence.enabled }}
+          volumeMounts:
+            - name: redis-data
+              mountPath: /data
+          {{- end }}
+      {{- if .Values.redis.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: redis-data
+      spec:
+        accessModes:
+          {{- toYaml .Values.redis.persistence.accessModes | nindent 10 }}
+        resources:
+          requests:
+            storage: {{ .Values.redis.persistence.size }}
+        {{- with .Values.redis.persistence.storageClassName }}
+        storageClassName: {{ . | quote }}
+        {{- end }}
+      {{- end }}
+{{- end }}
+
+{{- if .Values.metalLB.enabled }}
+{{- range $pool := .Values.metalLB.addressPools }}
+---
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: {{ $pool.name }}
+  namespace: {{ default "metallb-system" $.Values.metalLB.namespace }}
+  labels:
+    {{- include "base-stack.labels" $ | nindent 4 }}
+spec:
+  addresses:
+    {{- required (printf "metalLB.addressPools[%s].addresses is required" $pool.name) $pool.addresses | toYaml | nindent 4 }}
+{{- end }}
+{{- range $advertisement := .Values.metalLB.l2Advertisements }}
+---
+apiVersion: metallb.io/v1beta1
+kind: L2Advertisement
+metadata:
+  name: {{ $advertisement.name }}
+  namespace: {{ default "metallb-system" $.Values.metalLB.namespace }}
+  labels:
+    {{- include "base-stack.labels" $ | nindent 4 }}
+spec:
+  {{- with $advertisement.ipAddressPools }}
+  ipAddressPools:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+{{- end }}
+{{- end }}
+
+{{- range $deployable := .Values.deployables }}
+{{- if ne (default true $deployable.enabled) false }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "base-stack.deployableFullname" (dict "root" $ "item" $deployable) }}
+  labels:
+    {{- include "base-stack.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: {{ $deployable.name }}
+spec:
+  replicas: {{ default 1 $deployable.replicas }}
+  selector:
+    matchLabels:
+      {{- include "base-stack.selectorLabels" $ | nindent 6 }}
+      app.kubernetes.io/component: {{ $deployable.name }}
+  template:
+    metadata:
+      labels:
+        {{- include "base-stack.selectorLabels" $ | nindent 8 }}
+        app.kubernetes.io/component: {{ $deployable.name }}
+      {{- with $deployable.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      {{- with $.Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $deployable.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $deployable.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $deployable.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $deployable.volumes }}
+      volumes:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: {{ $deployable.name }}
+          image: {{ required (printf "deployables[%s].image is required" $deployable.name) $deployable.image | quote }}
+          imagePullPolicy: {{ default "IfNotPresent" $deployable.imagePullPolicy }}
+          {{- with $deployable.command }}
+          command:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with $deployable.args }}
+          args:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with $deployable.env }}
+          env:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with $deployable.envFrom }}
+          envFrom:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with $deployable.ports }}
+          ports:
+            {{- range $index, $port := . }}
+            - name: {{ default (printf "port-%d" $index) $port.name }}
+              containerPort: {{ $port.containerPort }}
+              protocol: {{ default "TCP" $port.protocol }}
+            {{- end }}
+          {{- end }}
+          {{- with $deployable.volumeMounts }}
+          volumeMounts:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with $deployable.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+{{- if and $deployable.ports (hasKey $deployable "service") (ne (default true $deployable.service.enabled) false) }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "base-stack.deployableFullname" (dict "root" $ "item" $deployable) }}
+  labels:
+    {{- include "base-stack.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: {{ $deployable.name }}
+  {{- with $deployable.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ default "ClusterIP" $deployable.service.type }}
+  selector:
+    {{- include "base-stack.selectorLabels" $ | nindent 4 }}
+    app.kubernetes.io/component: {{ $deployable.name }}
+  ports:
+    {{- range $index, $port := $deployable.ports }}
+    - name: {{ default (printf "port-%d" $index) $port.name }}
+      port: {{ default $port.containerPort $port.servicePort }}
+      targetPort: {{ default (default (printf "port-%d" $index) $port.name) $port.targetPort }}
+      protocol: {{ default "TCP" $port.protocol }}
+    {{- end }}
+{{- end }}
+{{- end }}
+{{- end }}

@@ -1,0 +1,6 @@
+apiVersion: v2
+name: base-stack
+description: Generic base stack for cluster services and reusable deployables.
+type: application
+version: 0.1.0
+appVersion: "1.0.0"

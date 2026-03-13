@@ -1,0 +1,40 @@
+nameOverride: ""
+fullnameOverride: ""
+
+commonLabels: {}
+imagePullSecrets: []
+
+redis:
+  enabled: true
+  image: redis:7.2-alpine
+  imagePullPolicy: IfNotPresent
+  port: 6379
+  service:
+    type: ClusterIP
+    annotations: {}
+  persistence:
+    enabled: false
+    accessModes:
+      - ReadWriteOnce
+    size: 1Gi
+    storageClassName: ""
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+  podSecurityContext:
+    seccompProfile:
+      type: RuntimeDefault
+  securityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop:
+        - ALL
+
+metalLB:
+  enabled: false
+  namespace: metallb-system
+  addressPools: []
+  l2Advertisements: []
+
+deployables: []
