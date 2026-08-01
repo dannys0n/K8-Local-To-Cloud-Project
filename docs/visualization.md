@@ -1,5 +1,24 @@
 # Live connection visibility
 
+## Aggregate dashboard
+
+Run the development-only dashboard from the repository root:
+
+```bash
+python tools/dashboard.py
+```
+
+Open `http://127.0.0.1:8080`. The page discovers all HAProxy pods, combines
+their current frontend and backend counters, and lists active sessions reported
+by HAProxy's Runtime API. It uses the current `kubectl` context and binds only
+to local loopback by default. The Runtime API also binds only to loopback inside
+each HAProxy pod and is not exposed by a Kubernetes Service.
+
+The client address represents the network connection seen by HAProxy, not an
+application user identity. This lab's line protocol has no client identity.
+
+## Built-in per-replica page
+
 Open the built-in HAProxy statistics page:
 
 ```text

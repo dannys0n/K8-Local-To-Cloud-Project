@@ -41,6 +41,16 @@ Open the live HAProxy page:
 http://127.0.0.1:8404/stats
 ```
 
+Open the local aggregate connection dashboard (requires Python and a running
+`kubectl` context):
+
+```powershell
+python tools/dashboard.py
+```
+
+Then visit `http://127.0.0.1:8080`. Unlike HAProxy's per-replica statistics
+page, this combines every HAProxy pod and lists active client sessions.
+
 Inspect the cluster:
 
 ```powershell
