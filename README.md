@@ -3,15 +3,19 @@
 A small, replaceable application used to exercise Kubernetes infrastructure:
 
 ```text
-client -> NodePort/NLB -> HAProxy Deployment -> TCP Server StatefulSet -> PVC
+client -> NodePort/NLB -> HAProxy Deployment -> TCP Server StatefulSet
+                                              -> PostgreSQL + Redis
 ```
 
-It intentionally omits the eventual coordinator, database, ownership, fencing, authentication, and custom proxy logic.
+It intentionally omits a coordinator, ownership/fencing system, authentication,
+and custom proxy implementation.
 
 ## What runs
 
 - **HAProxy:** two replicas, raw TCP mode, live statistics page.
-- **TCP server:** five StatefulSet replicas with stable names and one PVC each.
+- **TCP server:** five diskless StatefulSet replicas with stable names.
+- **PostgreSQL:** authoritative location identity and counters; one PVC in kind.
+- **Redis:** ephemeral server-presence and counter-cache keys.
 - **Client entry:** `127.0.0.1:9000`, with an optional location handshake; an
   AWS NLB in the EKS overlay.
 - **Manifest management:** a shared Kustomize base plus kind and EKS overlays.
@@ -58,9 +62,10 @@ The location endpoints are deliberately simple and fixed for this lab:
 
 The client sends a small `@location` handshake that HAProxy uses to select the
 stable backend, then reconnects with the same handshake after a disconnect.
-The server identity and counter remain on that ordinal's PVC. A request whose
-response is lost during a disconnect may be retried, so this toy protocol is
-not an exactly-once protocol. Without `-Location`, port 9000 remains the
+The server identity and counter remain in PostgreSQL when a server pod is
+replaced. Redis presence keys expire and repopulate automatically. A request
+whose response is lost during a disconnect may be retried, so this toy protocol
+is not an exactly-once protocol. Without `-Location`, port 9000 remains the
 original round-robin endpoint.
 
 While the client is running, change locations or force a fresh connection:
@@ -147,4 +152,7 @@ See:
 
 ## Design boundaries
 
-This is an infrastructure template. HAProxy and the tiny server are placeholders. The stable reusable pieces are the Services, Deployments, StatefulSets, PVCs, probes, disruption budgets, topology rules, and kind/EKS overlays.
+This is an infrastructure template. HAProxy, the tiny server, and the local
+database deployments are placeholders. The reusable pieces are the Services,
+Deployments, StatefulSets, probes, disruption budgets, topology rules, and
+kind/EKS overlays. The credentials in the kind overlay are development-only.

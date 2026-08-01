@@ -15,9 +15,6 @@ spec:
       labels:
         app: tcp-server
     spec:
-      securityContext:
-        fsGroup: 65532
-        fsGroupChangePolicy: OnRootMismatch
       terminationGracePeriodSeconds: 10
       topologySpreadConstraints:
         - maxSkew: 1
@@ -37,8 +34,16 @@ spec:
                   fieldPath: metadata.name
             - name: LISTEN_ADDR
               value: ":7000"
-            - name: STATE_PATH
-              value: /data/counter
+            - name: POSTGRES_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: tcp-server-databases
+                  key: postgres-dsn
+            - name: REDIS_ADDR
+              valueFrom:
+                secretKeyRef:
+                  name: tcp-server-databases
+                  key: redis-addr
           ports:
             - name: tcp
               containerPort: 7000
@@ -60,15 +65,3 @@ spec:
             limits:
               cpu: 250m
               memory: 128Mi
-          volumeMounts:
-            - name: data
-              mountPath: /data
-  volumeClaimTemplates:
-    - metadata:
-        name: data
-      spec:
-        accessModes:
-          - ReadWriteOnce
-        resources:
-          requests:
-            storage: 256Mi

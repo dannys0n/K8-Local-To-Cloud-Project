@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,20 +11,21 @@ import (
 	"net"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
+
+	_ "github.com/lib/pq"
+	"github.com/redis/go-redis/v9"
 )
 
 type server struct {
-	name      string
-	location  string
-	statePath string
-	mu        sync.Mutex
-	counter   uint64
+	name     string
+	location string
+	db       *sql.DB
+	redis    *redis.Client
 }
 
 type response struct {
@@ -36,16 +38,28 @@ type response struct {
 
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	listenAddr := envOrDefault("LISTEN_ADDR", ":7000")
-	statePath := envOrDefault("STATE_PATH", "/data/counter")
-	name := envOrDefault("POD_NAME", hostname())
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
 
-	s := &server{name: name, location: locationFor(name), statePath: statePath}
-	if err := s.load(); err != nil {
-		logger.Error("load state", "error", err)
+	name := envOrDefault("POD_NAME", hostname())
+	location := locationFor(name)
+	db, cache, err := connectDatabases(ctx, logger)
+	if err != nil {
+		logger.Error("connect databases", "error", err)
 		os.Exit(1)
 	}
+	defer db.Close()
+	defer cache.Close()
 
+	s := &server{name: name, location: location, db: db, redis: cache}
+	counter, err := s.register(ctx)
+	if err != nil {
+		logger.Error("register server", "error", err)
+		os.Exit(1)
+	}
+	go s.heartbeat(ctx, logger)
+
+	listenAddr := envOrDefault("LISTEN_ADDR", ":7000")
 	listener, err := net.Listen("tcp", listenAddr)
 	if err != nil {
 		logger.Error("listen", "address", listenAddr, "error", err)
@@ -53,11 +67,7 @@ func main() {
 	}
 	defer listener.Close()
 
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
-
-	logger.Info("server ready", "server", s.name, "address", listenAddr, "counter", s.counter)
-
+	logger.Info("server ready", "server", s.name, "location", s.location, "address", listenAddr, "counter", counter)
 	go func() {
 		<-ctx.Done()
 		_ = listener.Close()
@@ -73,7 +83,6 @@ func main() {
 			logger.Warn("accept connection", "error", err)
 			continue
 		}
-
 		connections.Add(1)
 		go func() {
 			defer connections.Done()
@@ -82,7 +91,90 @@ func main() {
 	}
 
 	connections.Wait()
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_ = s.redis.Del(cleanupCtx, s.presenceKey()).Err()
 	logger.Info("server stopped", "server", s.name)
+}
+
+func connectDatabases(ctx context.Context, logger *slog.Logger) (*sql.DB, *redis.Client, error) {
+	postgresDSN := strings.TrimSpace(os.Getenv("POSTGRES_DSN"))
+	redisAddr := strings.TrimSpace(os.Getenv("REDIS_ADDR"))
+	if postgresDSN == "" || redisAddr == "" {
+		return nil, nil, errors.New("POSTGRES_DSN and REDIS_ADDR are required")
+	}
+
+	db, err := sql.Open("postgres", postgresDSN)
+	if err != nil {
+		return nil, nil, err
+	}
+	db.SetMaxOpenConns(10)
+	db.SetMaxIdleConns(5)
+	cache := redis.NewClient(&redis.Options{Addr: redisAddr})
+
+	startupCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+	for {
+		postgresErr := db.PingContext(startupCtx)
+		if postgresErr == nil {
+			break
+		}
+		logger.Info("waiting for postgres", "error", postgresErr)
+		select {
+		case <-startupCtx.Done():
+			db.Close()
+			cache.Close()
+			return nil, nil, fmt.Errorf("database startup timeout: %w", startupCtx.Err())
+		case <-time.After(time.Second):
+		}
+	}
+	if err := cache.Ping(startupCtx).Err(); err != nil {
+		logger.Warn("redis unavailable; continuing without cache", "error", err)
+	}
+
+	const schema = `
+		CREATE TABLE IF NOT EXISTS tcp_server_state (
+			server_id TEXT PRIMARY KEY,
+			location TEXT NOT NULL,
+			counter BIGINT NOT NULL DEFAULT 0 CHECK (counter >= 0),
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)`
+	if _, err := db.ExecContext(startupCtx, schema); err != nil {
+		db.Close()
+		cache.Close()
+		return nil, nil, fmt.Errorf("create schema: %w", err)
+	}
+	return db, cache, nil
+}
+
+func (s *server) register(ctx context.Context) (uint64, error) {
+	const query = `
+		INSERT INTO tcp_server_state (server_id, location)
+		VALUES ($1, $2)
+		ON CONFLICT (server_id) DO UPDATE
+		SET location = EXCLUDED.location, updated_at = NOW()
+		RETURNING counter`
+	var counter uint64
+	if err := s.db.QueryRowContext(ctx, query, s.name, s.location).Scan(&counter); err != nil {
+		return 0, err
+	}
+	_ = s.redis.Set(ctx, s.counterKey(), counter, 0).Err()
+	return counter, nil
+}
+
+func (s *server) heartbeat(ctx context.Context, logger *slog.Logger) {
+	ticker := time.NewTicker(3 * time.Second)
+	defer ticker.Stop()
+	for {
+		if err := s.redis.Set(ctx, s.presenceKey(), s.location, 10*time.Second).Err(); err != nil && ctx.Err() == nil {
+			logger.Warn("refresh redis presence", "server", s.name, "error", err)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
 }
 
 func (s *server) handleConnection(ctx context.Context, conn net.Conn, logger *slog.Logger) {
@@ -104,14 +196,7 @@ func (s *server) handleConnection(ctx context.Context, conn net.Conn, logger *sl
 	scanner := bufio.NewScanner(conn)
 	scanner.Buffer(make([]byte, 4096), 64*1024)
 	writer := bufio.NewWriter(conn)
-
 	for scanner.Scan() {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-		}
-
 		message := strings.TrimSpace(scanner.Text())
 		if message == "" {
 			continue
@@ -119,36 +204,32 @@ func (s *server) handleConnection(ctx context.Context, conn net.Conn, logger *sl
 
 		responseMessage := message
 		var count uint64
+		var err error
 		if requested, found := strings.CutPrefix(message, "@location "); found {
 			if requested != "any" && requested != s.location {
 				_, _ = fmt.Fprintf(writer, `{"error":"wrong location","server":%q,"location":%q}`+"\n", s.name, s.location)
 				_ = writer.Flush()
 				return
 			}
-			count = s.currentCounter()
+			count, err = s.currentCounter(ctx)
 			responseMessage = "connected"
 		} else {
-			var err error
-			count, err = s.increment()
-			if err != nil {
-				logger.Error("persist counter", "server", s.name, "error", err)
-				_, _ = fmt.Fprintln(writer, `{"error":"failed to persist counter"}`)
-				_ = writer.Flush()
-				return
-			}
+			count, err = s.increment(ctx)
+		}
+		if err != nil {
+			logger.Error("database operation", "server", s.name, "error", err)
+			_, _ = fmt.Fprintln(writer, `{"error":"database unavailable"}`)
+			_ = writer.Flush()
+			return
 		}
 
 		body, err := json.Marshal(response{
-			Server:   s.name,
-			Location: s.location,
-			Counter:  count,
-			Message:  responseMessage,
-			Time:     time.Now().UTC().Format(time.RFC3339Nano),
+			Server: s.name, Location: s.location, Counter: count,
+			Message: responseMessage, Time: time.Now().UTC().Format(time.RFC3339Nano),
 		})
 		if err != nil {
 			return
 		}
-
 		if _, err := writer.Write(append(body, '\n')); err != nil {
 			return
 		}
@@ -156,17 +237,32 @@ func (s *server) handleConnection(ctx context.Context, conn net.Conn, logger *sl
 			return
 		}
 	}
-
 	if err := scanner.Err(); err != nil {
 		logger.Debug("connection read ended", "remote", remote, "error", err)
 	}
 }
 
-func (s *server) currentCounter() uint64 {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.counter
+func (s *server) currentCounter(ctx context.Context) (uint64, error) {
+	var counter uint64
+	err := s.db.QueryRowContext(ctx, `SELECT counter FROM tcp_server_state WHERE server_id = $1`, s.name).Scan(&counter)
+	return counter, err
 }
+
+func (s *server) increment(ctx context.Context) (uint64, error) {
+	var counter uint64
+	err := s.db.QueryRowContext(ctx, `
+		UPDATE tcp_server_state
+		SET counter = counter + 1, updated_at = NOW()
+		WHERE server_id = $1
+		RETURNING counter`, s.name).Scan(&counter)
+	if err == nil {
+		_ = s.redis.Set(ctx, s.counterKey(), counter, 0).Err()
+	}
+	return counter, err
+}
+
+func (s *server) presenceKey() string { return "tcp-lab:server:" + s.name + ":presence" }
+func (s *server) counterKey() string  { return "tcp-lab:server:" + s.name + ":counter" }
 
 func locationFor(serverName string) string {
 	locations := []string{"los-angeles", "new-york", "london", "singapore", "frankfurt"}
@@ -179,46 +275,6 @@ func locationFor(serverName string) string {
 		return "unknown"
 	}
 	return locations[ordinal]
-}
-
-func (s *server) load() error {
-	data, err := os.ReadFile(s.statePath)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-
-	value := strings.TrimSpace(string(data))
-	if value == "" {
-		return nil
-	}
-	counter, err := strconv.ParseUint(value, 10, 64)
-	if err != nil {
-		return fmt.Errorf("parse counter: %w", err)
-	}
-	s.counter = counter
-	return nil
-}
-
-func (s *server) increment() (uint64, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	s.counter++
-	if err := os.MkdirAll(filepath.Dir(s.statePath), 0o750); err != nil {
-		return 0, err
-	}
-
-	temporary := s.statePath + ".tmp"
-	if err := os.WriteFile(temporary, []byte(strconv.FormatUint(s.counter, 10)+"\n"), 0o640); err != nil {
-		return 0, err
-	}
-	if err := os.Rename(temporary, s.statePath); err != nil {
-		return 0, err
-	}
-	return s.counter, nil
 }
 
 func envOrDefault(name, fallback string) string {

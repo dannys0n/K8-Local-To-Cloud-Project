@@ -117,9 +117,28 @@ def server_location(haproxy_server: str) -> str:
     return LOCATIONS[index] if 0 <= index < len(LOCATIONS) else "unknown"
 
 
+def session_location(values: dict) -> str:
+    backend = values.get("be", "")
+    if backend.startswith("location_"):
+        return backend.removeprefix("location_").replace("_", "-")
+    location = server_location(values.get("srv", ""))
+    return location if location != "unknown" else "pending"
+
+
+def session_server(values: dict, location: str) -> str:
+    server = logical_server(values.get("srv", ""))
+    if server.startswith("tcp-server-"):
+        return server
+    if location in LOCATIONS:
+        return f"tcp-server-{LOCATIONS.index(location)}"
+    return "pending"
+
+
 def inspect_pod(pod: dict) -> dict:
     pod = dict(pod)
     pod.update(clients=0, backend_sessions=0, total_accepted=0, backends=[], sessions=[], error="")
+    targets = {}
+    identities = {}
     try:
         stats = run(
             "kubectl", "exec", "-n", NAMESPACE, pod["name"], "--",
@@ -129,6 +148,14 @@ def inspect_pod(pod: dict) -> dict:
             if len(row) < 18:
                 continue
             proxy, server = row[0].lstrip("# "), row[1]
+            address = row[73] if len(row) > 73 else ""
+            if (proxy == "tcp_servers" or proxy.startswith("location_")) and server.startswith("server"):
+                targets[f"{proxy}/{server}"] = address
+                if proxy.startswith("location_") and server_location(server) != "unknown" and address:
+                    identities[address] = {
+                        "server": logical_server(server),
+                        "location": server_location(server),
+                    }
             if proxy.startswith("client_") and server == "FRONTEND":
                 pod["clients"] += int(row[4] or 0)
                 pod["total_accepted"] += int(row[7] or 0)
@@ -139,7 +166,7 @@ def inspect_pod(pod: dict) -> dict:
                     "proxy": pod["name"], "server": logical_server(server),
                     "location": server_location(server),
                     "current": int(row[4] or 0), "total": int(row[7] or 0),
-                    "status": row[17], "address": row[73] if len(row) > 73 else "",
+                    "status": row[17], "address": address,
                 })
 
         sessions = run(
@@ -151,8 +178,13 @@ def inspect_pod(pod: dict) -> dict:
             if not values.get("fe", "").startswith("client_"):
                 continue
             values["proxy"] = pod["name"]
-            values["server"] = logical_server(values.get("srv", "unknown"))
-            values["location"] = server_location(values.get("srv", ""))
+            address = targets.get(f'{values.get("be", "")}/{values.get("srv", "")}', "")
+            identity = identities.get(address)
+            if identity:
+                values.update(identity)
+            else:
+                values["location"] = session_location(values)
+                values["server"] = session_server(values, values["location"])
             pod["sessions"].append(values)
     except Exception as error:
         pod["error"] = str(error)

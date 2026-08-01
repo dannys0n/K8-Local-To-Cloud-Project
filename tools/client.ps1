@@ -21,7 +21,8 @@ function Open-Connection {
             $Client = [System.Net.Sockets.TcpClient]::new()
             $Client.Connect($ServerHost, $Port)
             $Stream = $Client.GetStream()
-            $Writer = [System.IO.StreamWriter]::new($Stream, [System.Text.Encoding]::UTF8, 1024, $true)
+            $Utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+            $Writer = [System.IO.StreamWriter]::new($Stream, $Utf8NoBom, 1024, $true)
             $Reader = [System.IO.StreamReader]::new($Stream, [System.Text.Encoding]::UTF8, $false, 1024, $true)
             $Writer.AutoFlush = $true
             $Writer.WriteLine("@location $Location")

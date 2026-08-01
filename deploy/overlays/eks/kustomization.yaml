@@ -5,13 +5,6 @@ resources:
 patches:
   - path: haproxy-loadbalancer-patch.yaml
   - path: haproxy-replicas-patch.yaml
-  - target:
-      group: apps
-      version: v1
-      kind: StatefulSet
-      name: tcp-server
-      namespace: tcp-lab
-    path: server-storage-patch.yaml
 images:
   - name: simple-tcp-server
     newName: 000000000000.dkr.ecr.us-west-2.amazonaws.com/simple-tcp-server
