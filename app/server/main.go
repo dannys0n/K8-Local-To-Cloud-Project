@@ -20,16 +20,18 @@ import (
 
 type server struct {
 	name      string
+	location  string
 	statePath string
 	mu        sync.Mutex
 	counter   uint64
 }
 
 type response struct {
-	Server  string `json:"server"`
-	Counter uint64 `json:"counter"`
-	Message string `json:"message"`
-	Time    string `json:"time"`
+	Server   string `json:"server"`
+	Location string `json:"location"`
+	Counter  uint64 `json:"counter"`
+	Message  string `json:"message"`
+	Time     string `json:"time"`
 }
 
 func main() {
@@ -38,7 +40,7 @@ func main() {
 	statePath := envOrDefault("STATE_PATH", "/data/counter")
 	name := envOrDefault("POD_NAME", hostname())
 
-	s := &server{name: name, statePath: statePath}
+	s := &server{name: name, location: locationFor(name), statePath: statePath}
 	if err := s.load(); err != nil {
 		logger.Error("load state", "error", err)
 		os.Exit(1)
@@ -85,6 +87,16 @@ func main() {
 
 func (s *server) handleConnection(ctx context.Context, conn net.Conn, logger *slog.Logger) {
 	defer conn.Close()
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = conn.Close()
+		case <-done:
+		}
+	}()
+
 	remote := conn.RemoteAddr().String()
 	logger.Info("client connected", "server", s.name, "remote", remote)
 	defer logger.Info("client disconnected", "server", s.name, "remote", remote)
@@ -105,19 +117,33 @@ func (s *server) handleConnection(ctx context.Context, conn net.Conn, logger *sl
 			continue
 		}
 
-		count, err := s.increment()
-		if err != nil {
-			logger.Error("persist counter", "server", s.name, "error", err)
-			_, _ = fmt.Fprintln(writer, `{"error":"failed to persist counter"}`)
-			_ = writer.Flush()
-			return
+		responseMessage := message
+		var count uint64
+		if requested, found := strings.CutPrefix(message, "@location "); found {
+			if requested != "any" && requested != s.location {
+				_, _ = fmt.Fprintf(writer, `{"error":"wrong location","server":%q,"location":%q}`+"\n", s.name, s.location)
+				_ = writer.Flush()
+				return
+			}
+			count = s.currentCounter()
+			responseMessage = "connected"
+		} else {
+			var err error
+			count, err = s.increment()
+			if err != nil {
+				logger.Error("persist counter", "server", s.name, "error", err)
+				_, _ = fmt.Fprintln(writer, `{"error":"failed to persist counter"}`)
+				_ = writer.Flush()
+				return
+			}
 		}
 
 		body, err := json.Marshal(response{
-			Server:  s.name,
-			Counter: count,
-			Message: message,
-			Time:    time.Now().UTC().Format(time.RFC3339Nano),
+			Server:   s.name,
+			Location: s.location,
+			Counter:  count,
+			Message:  responseMessage,
+			Time:     time.Now().UTC().Format(time.RFC3339Nano),
 		})
 		if err != nil {
 			return
@@ -134,6 +160,25 @@ func (s *server) handleConnection(ctx context.Context, conn net.Conn, logger *sl
 	if err := scanner.Err(); err != nil {
 		logger.Debug("connection read ended", "remote", remote, "error", err)
 	}
+}
+
+func (s *server) currentCounter() uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.counter
+}
+
+func locationFor(serverName string) string {
+	locations := []string{"los-angeles", "new-york", "london", "singapore", "frankfurt"}
+	separator := strings.LastIndexByte(serverName, '-')
+	if separator < 0 {
+		return "unknown"
+	}
+	ordinal, err := strconv.Atoi(serverName[separator+1:])
+	if err != nil || ordinal < 0 || ordinal >= len(locations) {
+		return "unknown"
+	}
+	return locations[ordinal]
 }
 
 func (s *server) load() error {

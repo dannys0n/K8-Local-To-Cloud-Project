@@ -24,6 +24,11 @@ kubectl port-forward -n tcp-lab service/haproxy-stats 8404:8404
 
 Then open `http://127.0.0.1:8404/stats`.
 
+The NLB Service publishes port `9000`. Location-aware clients begin with the
+small lab `@location` handshake, which HAProxy inspects to select a stable
+StatefulSet identity. A larger or dynamic location catalog would require a real
+routing layer rather than fixed HAProxy rules.
+
 ## Storage limitation
 
 Each server pod owns one `ReadWriteOnce` volume. EBS volumes are Availability-Zone scoped. This lab proves StatefulSet/PVC behavior, not cross-AZ replication of application data. A real application should place durable shared state in an appropriate replicated datastore.

@@ -11,8 +11,9 @@ It intentionally omits the eventual coordinator, database, ownership, fencing, a
 ## What runs
 
 - **HAProxy:** two replicas, raw TCP mode, live statistics page.
-- **TCP server:** three StatefulSet replicas with stable names and one PVC each.
-- **Client entry:** `127.0.0.1:9000` on kind; an AWS NLB in the EKS overlay.
+- **TCP server:** five StatefulSet replicas with stable names and one PVC each.
+- **Client entry:** `127.0.0.1:9000`, with an optional location handshake; an
+  AWS NLB in the EKS overlay.
 - **Manifest management:** a shared Kustomize base plus kind and EKS overlays.
 
 ## Prerequisites
@@ -34,6 +35,33 @@ powershell -ExecutionPolicy Bypass -File scripts/up.ps1
 powershell -ExecutionPolicy Bypass -File tools/smoke.ps1
 powershell -ExecutionPolicy Bypass -File tools/client.ps1
 ```
+
+Select a stable virtual location:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools/client.ps1 -Location los-angeles
+powershell -ExecutionPolicy Bypass -File tools/client.ps1 -Location new-york
+powershell -ExecutionPolicy Bypass -File tools/client.ps1 -Location london
+powershell -ExecutionPolicy Bypass -File tools/client.ps1 -Location singapore
+powershell -ExecutionPolicy Bypass -File tools/client.ps1 -Location frankfurt
+```
+
+The location endpoints are deliberately simple and fixed for this lab:
+
+| Location | kind port | StatefulSet identity |
+|---|---:|---|
+| Los Angeles | 9000 | `tcp-server-0` |
+| New York | 9000 | `tcp-server-1` |
+| London | 9000 | `tcp-server-2` |
+| Singapore | 9000 | `tcp-server-3` |
+| Frankfurt | 9000 | `tcp-server-4` |
+
+The client sends a small `@location` handshake that HAProxy uses to select the
+stable backend, then reconnects with the same handshake after a disconnect.
+The server identity and counter remain on that ordinal's PVC. A request whose
+response is lost during a disconnect may be retried, so this toy protocol is
+not an exactly-once protocol. Without `-Location`, port 9000 remains the
+original round-robin endpoint.
 
 Open the live HAProxy page:
 
@@ -82,7 +110,7 @@ Delete everything:
 Send a line such as `hello` and receive one JSON line:
 
 ```json
-{"server":"tcp-server-0","counter":1,"message":"hello","time":"2026-07-31T00:00:00Z"}
+{"server":"tcp-server-0","location":"los-angeles","counter":1,"message":"hello","time":"2026-07-31T00:00:00Z"}
 ```
 
 A single persistent client connection stays on one HAProxy pod and one selected backend server. Open multiple clients to observe distribution among servers.

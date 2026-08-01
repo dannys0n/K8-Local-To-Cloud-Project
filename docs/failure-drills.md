@@ -25,11 +25,17 @@ HAProxy discovers new server endpoints through the headless Service DNS.
 
 ## Server persistence
 
-1. Send several messages and note the returned server and counter.
-2. Delete that specific server pod.
-3. Wait for the StatefulSet to recreate it.
-4. Make new connections until HAProxy routes one to that server.
-5. Confirm its counter continues from the stored value.
+1. Start a location client, for example `tools/client.ps1 -Location new-york`.
+2. Send several messages and note `tcp-server-1`, `new-york`, and its counter.
+3. Delete `tcp-server-1` while leaving the client open.
+4. Send another message. The client retries while the endpoint is unavailable.
+5. Wait for the StatefulSet to recreate the pod.
+6. Confirm the client reconnects to `tcp-server-1` and its counter continues
+   from the value stored on the existing PVC.
+
+The original TCP socket cannot survive a pod failure. The lab minimizes the
+visible interruption by reconnecting to the same stable logical endpoint. A
+message in flight at disconnect can be processed more than once.
 
 ## Worker failure
 

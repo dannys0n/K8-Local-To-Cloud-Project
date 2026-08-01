@@ -117,14 +117,14 @@ def inspect_pod(pod: dict) -> dict:
             if len(row) < 18:
                 continue
             proxy, server = row[0].lstrip("# "), row[1]
-            if proxy == "client_tcp" and server == "FRONTEND":
-                pod["clients"] = int(row[4] or 0)
-                pod["total_accepted"] = int(row[7] or 0)
-            elif proxy == "tcp_servers" and server == "BACKEND":
-                pod["backend_sessions"] = int(row[4] or 0)
-            elif proxy == "tcp_servers" and server.startswith("server") and row[17].startswith("UP"):
+            if proxy.startswith("client_") and server == "FRONTEND":
+                pod["clients"] += int(row[4] or 0)
+                pod["total_accepted"] += int(row[7] or 0)
+            elif (proxy == "tcp_servers" or proxy.startswith("location_")) and server == "BACKEND":
+                pod["backend_sessions"] += int(row[4] or 0)
+            elif (proxy == "tcp_servers" or proxy.startswith("location_")) and server.startswith("server") and row[17].startswith("UP"):
                 pod["backends"].append({
-                    "proxy": pod["name"], "name": server,
+                    "proxy": pod["name"], "name": f"{proxy}/{server}",
                     "current": int(row[4] or 0), "total": int(row[7] or 0),
                     "status": row[17], "address": row[73] if len(row) > 73 else "",
                 })
@@ -135,7 +135,7 @@ def inspect_pod(pod: dict) -> dict:
         )
         for line in sessions.splitlines():
             values = dict(KEY_VALUE.findall(line))
-            if values.get("fe") != "client_tcp":
+            if not values.get("fe", "").startswith("client_"):
                 continue
             values["proxy"] = pod["name"]
             pod["sessions"].append(values)

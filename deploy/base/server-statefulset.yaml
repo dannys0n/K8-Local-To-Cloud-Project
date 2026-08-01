@@ -5,7 +5,7 @@ metadata:
   namespace: tcp-lab
 spec:
   serviceName: tcp-server-headless
-  replicas: 3
+  replicas: 5
   podManagementPolicy: Parallel
   selector:
     matchLabels:
@@ -22,7 +22,7 @@ spec:
       topologySpreadConstraints:
         - maxSkew: 1
           topologyKey: kubernetes.io/hostname
-          whenUnsatisfiable: ScheduleAnyway
+          whenUnsatisfiable: DoNotSchedule
           labelSelector:
             matchLabels:
               app: tcp-server
