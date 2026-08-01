@@ -1,0 +1,26 @@
+param(
+    [int]$Messages = 5,
+    [string]$ServerHost = "127.0.0.1",
+    [int]$Port = 9000
+)
+
+$ErrorActionPreference = "Stop"
+$Client = [System.Net.Sockets.TcpClient]::new()
+$Client.Connect($ServerHost, $Port)
+$Stream = $Client.GetStream()
+$Writer = [System.IO.StreamWriter]::new($Stream, [System.Text.Encoding]::UTF8, 1024, $true)
+$Reader = [System.IO.StreamReader]::new($Stream, [System.Text.Encoding]::UTF8, $false, 1024, $true)
+$Writer.AutoFlush = $true
+try {
+    1..$Messages | ForEach-Object {
+        $Writer.WriteLine("smoke-$_")
+        $Response = $Reader.ReadLine()
+        if ([string]::IsNullOrWhiteSpace($Response)) { throw "No response received" }
+        Write-Host $Response
+    }
+} finally {
+    $Writer.Dispose()
+    $Reader.Dispose()
+    $Stream.Dispose()
+    $Client.Dispose()
+}

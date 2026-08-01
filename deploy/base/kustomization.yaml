@@ -1,0 +1,15 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - namespace.yaml
+  - server-headless-service.yaml
+  - server-statefulset.yaml
+  - haproxy-deployment.yaml
+  - haproxy-service.yaml
+  - haproxy-stats-service.yaml
+  - pod-disruption-budgets.yaml
+configMapGenerator:
+  - name: haproxy-config
+    namespace: tcp-lab
+    files:
+      - haproxy.cfg
