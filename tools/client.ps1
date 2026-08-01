@@ -6,6 +6,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$Locations = @("any", "los-angeles", "new-york", "london", "singapore", "frankfurt")
 
 function Close-Connection($Connection) {
     if ($null -eq $Connection) { return }
@@ -27,7 +28,7 @@ function Open-Connection {
             $Hello = $Reader.ReadLine() | ConvertFrom-Json
             if ($Location -ne "any" -and $Hello.location -ne $Location) { throw "Location handshake failed" }
             Write-Host "Connected to $($Hello.server) ($($Hello.location)) via ${ServerHost}:$Port."
-            return @{ Client = $Client; Writer = $Writer; Reader = $Reader }
+            return @{ Client = $Client; Writer = $Writer; Reader = $Reader; Hello = $Hello }
         } catch {
             if ($null -ne $Client) { $Client.Dispose() }
             Write-Warning "Connect failed: $($_.Exception.Message). Retrying in 1 second."
@@ -36,12 +37,49 @@ function Open-Connection {
     }
 }
 
-Write-Host "Location: $Location. Enter messages; Ctrl+C exits."
-$Connection = $null
+Write-Host "Commands: /location NAME, /reconnect, /status, /locations, /help"
+Write-Host "Selected location: $Location. Enter messages; Ctrl+C exits."
+$Connection = Open-Connection
 try {
     while ($true) {
         $Message = Read-Host ">"
         if ([string]::IsNullOrWhiteSpace($Message)) { continue }
+        if ($Message -eq "/help") {
+            Write-Host "/location NAME  switch location and reconnect"
+            Write-Host "/reconnect      replace the current TCP connection"
+            Write-Host "/status         show the selected and connected identity"
+            Write-Host "/locations      list valid locations"
+            continue
+        }
+        if ($Message -eq "/locations") {
+            Write-Host ($Locations -join ", ")
+            continue
+        }
+        if ($Message -eq "/status") {
+            if ($null -eq $Connection) {
+                Write-Host "Selected: $Location; connected: disconnected"
+            } else {
+                Write-Host "Selected: $Location; connected: $($Connection.Hello.server) ($($Connection.Hello.location))"
+            }
+            continue
+        }
+        if ($Message -eq "/reconnect" -or $Message -match "^/location\s+(\S+)\s*$") {
+            if ($Message -ne "/reconnect") {
+                $Requested = $Matches[1]
+                if ($Locations -notcontains $Requested) {
+                    Write-Warning "Unknown location: $Requested. Use /locations."
+                    continue
+                }
+                $Location = $Requested
+            }
+            Close-Connection $Connection
+            $Connection = Open-Connection
+            continue
+        }
+        if ($Message.StartsWith("/")) {
+            Write-Warning "Unknown command. Use /help."
+            continue
+        }
         while ($true) {
             try {
                 if ($null -eq $Connection) { $Connection = Open-Connection }

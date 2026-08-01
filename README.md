@@ -63,6 +63,20 @@ response is lost during a disconnect may be retried, so this toy protocol is
 not an exactly-once protocol. Without `-Location`, port 9000 remains the
 original round-robin endpoint.
 
+While the client is running, change locations or force a fresh connection:
+
+```text
+/location london
+/location singapore
+/reconnect
+/status
+```
+
+`/location` closes the existing socket and connects to the selected stable
+server. `/reconnect` keeps the location but creates a new connection, which can
+land on either HAProxy replica. Use the aggregate dashboard to see the proxy and
+backend change.
+
 Open the live HAProxy page:
 
 ```text

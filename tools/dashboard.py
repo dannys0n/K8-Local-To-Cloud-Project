@@ -13,6 +13,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 NAMESPACE = "tcp-lab"
 LABEL = "app=haproxy"
 KEY_VALUE = re.compile(r"(?:^|\s)([a-zA-Z_]+)=([^\s]+)")
+LOCATIONS = ("los-angeles", "new-york", "london", "singapore", "frankfurt")
 
 
 PAGE = r"""<!doctype html>
@@ -47,8 +48,8 @@ PAGE = r"""<!doctype html>
     <div class="card">Backend sessions<div class="value" id="backends">–</div></div>
   </div>
   <div class="panel"><h2>Per proxy</h2><table><thead><tr><th>Proxy</th><th>Pod IP</th><th>Node</th><th>Clients</th><th>Backend</th><th>Total accepted</th><th>Status</th></tr></thead><tbody id="proxyRows"></tbody></table></div>
-  <div class="panel"><h2>Active client sessions</h2><table><thead><tr><th>Proxy</th><th>Client address</th><th>Frontend</th><th>Backend</th><th>Server</th><th>Age</th><th>Protocol</th></tr></thead><tbody id="sessionRows"></tbody></table></div>
-  <div class="panel"><h2>Backend distribution</h2><table><thead><tr><th>Proxy</th><th>HAProxy server</th><th>Endpoint</th><th>Current</th><th>Total</th><th>Status</th></tr></thead><tbody id="backendRows"></tbody></table></div>
+  <div class="panel"><h2>Active client sessions</h2><table><thead><tr><th>Proxy</th><th>Client address</th><th>Location</th><th>Server</th><th>Age</th><th>Protocol</th></tr></thead><tbody id="sessionRows"></tbody></table></div>
+  <div class="panel"><h2>Backend distribution</h2><table><thead><tr><th>Server</th><th>Location</th><th>Endpoint</th><th>Clients</th><th>Seen by proxies</th><th>Status</th></tr></thead><tbody id="backendRows"></tbody></table></div>
   <p class="muted" id="updated"></p>
 <script>
 const cell = (row, value, cls='') => { const td=document.createElement('td'); td.textContent=value ?? '–'; if(cls)td.className=cls; row.appendChild(td); };
@@ -62,8 +63,8 @@ async function refresh(){
     document.getElementById('clients').textContent=data.total_clients;
     document.getElementById('backends').textContent=data.total_backends;
     fill('proxyRows', data.proxies, ['name','ip','node','clients','backend_sessions','total_accepted',p=>p.error?'ERROR':'OK']);
-    fill('sessionRows', data.sessions, ['proxy','src','fe','be','srv','age','proto']);
-    fill('backendRows', data.backends, ['proxy','name','address','current','total','status']);
+    fill('sessionRows', data.sessions, ['proxy','src','location','server','age','proto']);
+    fill('backendRows', data.backends, ['server','location','address','current','proxies','status']);
     document.getElementById('updated').textContent='Updated '+new Date().toLocaleTimeString();
   } catch(error) { document.getElementById('error').textContent=error.message; }
 }
@@ -105,6 +106,17 @@ def list_pods() -> list[dict]:
     return result
 
 
+def logical_server(haproxy_server: str) -> str:
+    match = re.fullmatch(r"server(\d+)", haproxy_server)
+    return f"tcp-server-{int(match.group(1)) - 1}" if match else haproxy_server
+
+
+def server_location(haproxy_server: str) -> str:
+    match = re.fullmatch(r"server(\d+)", haproxy_server)
+    index = int(match.group(1)) - 1 if match else -1
+    return LOCATIONS[index] if 0 <= index < len(LOCATIONS) else "unknown"
+
+
 def inspect_pod(pod: dict) -> dict:
     pod = dict(pod)
     pod.update(clients=0, backend_sessions=0, total_accepted=0, backends=[], sessions=[], error="")
@@ -122,9 +134,10 @@ def inspect_pod(pod: dict) -> dict:
                 pod["total_accepted"] += int(row[7] or 0)
             elif (proxy == "tcp_servers" or proxy.startswith("location_")) and server == "BACKEND":
                 pod["backend_sessions"] += int(row[4] or 0)
-            elif (proxy == "tcp_servers" or proxy.startswith("location_")) and server.startswith("server") and row[17].startswith("UP"):
+            elif proxy.startswith("location_") and server_location(server) != "unknown":
                 pod["backends"].append({
-                    "proxy": pod["name"], "name": f"{proxy}/{server}",
+                    "proxy": pod["name"], "server": logical_server(server),
+                    "location": server_location(server),
                     "current": int(row[4] or 0), "total": int(row[7] or 0),
                     "status": row[17], "address": row[73] if len(row) > 73 else "",
                 })
@@ -138,6 +151,8 @@ def inspect_pod(pod: dict) -> dict:
             if not values.get("fe", "").startswith("client_"):
                 continue
             values["proxy"] = pod["name"]
+            values["server"] = logical_server(values.get("srv", "unknown"))
+            values["location"] = server_location(values.get("srv", ""))
             pod["sessions"].append(values)
     except Exception as error:
         pod["error"] = str(error)
@@ -148,12 +163,36 @@ def snapshot() -> dict:
     pods = list_pods()
     with ThreadPoolExecutor(max_workers=max(1, len(pods))) as pool:
         proxies = list(pool.map(inspect_pod, pods))
+    unique_backends = {}
+    for backend in (item for proxy in proxies for item in proxy["backends"]):
+        server = backend["server"]
+        current = unique_backends.setdefault(server, {
+            "server": server,
+            "location": backend["location"],
+            "address": backend["address"],
+            "current": 0,
+            "proxies": set(),
+            "statuses": [],
+        })
+        current["proxies"].add(backend["proxy"])
+        current["statuses"].append(backend["status"])
+        if backend["address"]:
+            current["address"] = backend["address"]
+    for session in (item for proxy in proxies for item in proxy["sessions"]):
+        if session["server"] in unique_backends:
+            unique_backends[session["server"]]["current"] += 1
+    backends = sorted(unique_backends.values(), key=lambda item: item["server"])
+    for backend in backends:
+        backend["proxies"] = ", ".join(sorted(backend["proxies"]))
+        up = sum(status.startswith("UP") for status in backend.pop("statuses"))
+        backend["status"] = "UP" if up == len(proxies) else ("DEGRADED" if up else "DOWN")
+
     return {
         "proxies": proxies,
         "total_clients": sum(p["clients"] for p in proxies),
         "total_backends": sum(p["backend_sessions"] for p in proxies),
         "sessions": [session for p in proxies for session in p["sessions"]],
-        "backends": [backend for p in proxies for backend in p["backends"]],
+        "backends": backends,
         "errors": [f'{p["name"]}: {p["error"]}' for p in proxies if p["error"]],
     }
 

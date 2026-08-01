@@ -22,7 +22,7 @@ def connect(host: str, port: int, location: str):
             if location != "any" and hello.get("location") != location:
                 raise ConnectionError(f"location handshake failed: {hello}")
             print(f"Connected to {hello['server']} ({hello['location']}) via {host}:{port}.")
-            return sock, stream
+            return sock, stream, hello
         except (OSError, ValueError) as error:
             if sock:
                 sock.close()
@@ -37,17 +37,51 @@ def main() -> int:
     parser.add_argument("--port", type=int, default=9000)
     args = parser.parse_args()
 
-    print(f"Location: {args.location}. Enter messages; Ctrl+C exits.")
-    sock = stream = None
+    print("Commands: /location NAME, /reconnect, /status, /locations, /help")
+    print(f"Selected location: {args.location}. Enter messages; Ctrl+C exits.")
+    sock = stream = hello = None
     try:
+        sock, stream, hello = connect(args.host, args.port, args.location)
         for line in sys.stdin:
             message = line.strip()
             if not message:
                 continue
+            if message == "/help":
+                print("/location NAME  switch location and reconnect")
+                print("/reconnect      replace the current TCP connection")
+                print("/status         show the selected and connected identity")
+                print("/locations      list valid locations")
+                continue
+            if message == "/locations":
+                print(", ".join(LOCATIONS))
+                continue
+            if message == "/status":
+                connected = (
+                    f"{hello['server']} ({hello['location']})" if hello else "disconnected"
+                )
+                print(f"Selected: {args.location}; connected: {connected}")
+                continue
+            if message == "/reconnect" or message.startswith("/location "):
+                if message.startswith("/location "):
+                    requested = message.removeprefix("/location ").strip()
+                    if requested not in LOCATIONS:
+                        print(f"Unknown location: {requested}. Use /locations.")
+                        continue
+                    args.location = requested
+                if stream:
+                    stream.close()
+                if sock:
+                    sock.close()
+                sock = stream = hello = None
+                sock, stream, hello = connect(args.host, args.port, args.location)
+                continue
+            if message.startswith("/"):
+                print("Unknown command. Use /help.")
+                continue
             while True:
                 try:
                     if stream is None:
-                        sock, stream = connect(args.host, args.port, args.location)
+                        sock, stream, hello = connect(args.host, args.port, args.location)
                     stream.write(message.encode("utf-8") + b"\n")
                     response = stream.readline()
                     if not response:
@@ -61,6 +95,7 @@ def main() -> int:
                     if sock:
                         sock.close()
                     sock = stream = None
+                    hello = None
                     time.sleep(1)
     finally:
         if stream:
