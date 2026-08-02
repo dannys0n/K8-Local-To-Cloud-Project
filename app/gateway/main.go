@@ -50,19 +50,20 @@ type session struct {
 }
 
 type gateway struct {
-	instance       string
-	serverHost     string
-	serverPort     string
-	discoveryEvery time.Duration
-	routeTimeout   time.Duration
-	backendTimeout time.Duration
-	logger         *slog.Logger
-	mu             sync.RWMutex
-	routes         map[string]backend
-	sessions       map[string]session
-	accepted       atomic.Uint64
-	nextSession    atomic.Uint64
-	nextAny        atomic.Uint64
+	instance         string
+	serverHost       string
+	serverPort       string
+	discoveryEvery   time.Duration
+	discoveryTimeout time.Duration
+	routeTimeout     time.Duration
+	backendTimeout   time.Duration
+	logger           *slog.Logger
+	mu               sync.RWMutex
+	routes           map[string]backend
+	sessions         map[string]session
+	accepted         atomic.Uint64
+	nextSession      atomic.Uint64
+	nextAny          atomic.Uint64
 }
 
 type backendConnection struct {
@@ -82,6 +83,11 @@ func main() {
 		logger.Error("invalid discovery interval", "error", err)
 		os.Exit(1)
 	}
+	discoveryTimeout, err := durationFromEnv("DISCOVERY_TIMEOUT", 500*time.Millisecond)
+	if err != nil {
+		logger.Error("invalid discovery timeout", "error", err)
+		os.Exit(1)
+	}
 	routeTimeout, err := durationFromEnv("ROUTE_TIMEOUT", 10*time.Second)
 	if err != nil {
 		logger.Error("invalid route timeout", "error", err)
@@ -97,7 +103,7 @@ func main() {
 		instance:       envOrDefault("POD_NAME", hostname()),
 		serverHost:     envOrDefault("SERVER_HOST", "tcp-server-headless"),
 		serverPort:     envOrDefault("SERVER_PORT", "7000"),
-		discoveryEvery: discoveryEvery, routeTimeout: routeTimeout,
+		discoveryEvery: discoveryEvery, discoveryTimeout: discoveryTimeout, routeTimeout: routeTimeout,
 		backendTimeout: backendTimeout, logger: logger,
 		routes: make(map[string]backend), sessions: make(map[string]session),
 	}
@@ -281,7 +287,7 @@ func (g *gateway) discoverLoop(ctx context.Context) {
 }
 
 func (g *gateway) discover(ctx context.Context) {
-	lookupCtx, cancel := context.WithTimeout(ctx, g.backendTimeout)
+	lookupCtx, cancel := context.WithTimeout(ctx, g.discoveryTimeout)
 	addresses, err := net.DefaultResolver.LookupHost(lookupCtx, g.serverHost)
 	cancel()
 	if err != nil {
@@ -295,13 +301,13 @@ func (g *gateway) discover(ctx context.Context) {
 	for _, address := range addresses {
 		endpoint := net.JoinHostPort(address, g.serverPort)
 		go func() {
-			conn, err := net.DialTimeout("tcp", endpoint, g.backendTimeout)
+			conn, err := net.DialTimeout("tcp", endpoint, g.discoveryTimeout)
 			if err != nil {
 				results <- result{}
 				return
 			}
 			defer conn.Close()
-			_ = conn.SetDeadline(time.Now().Add(g.backendTimeout))
+			_ = conn.SetDeadline(time.Now().Add(g.discoveryTimeout))
 			if _, err = fmt.Fprintln(conn, "@discover"); err != nil {
 				results <- result{}
 				return

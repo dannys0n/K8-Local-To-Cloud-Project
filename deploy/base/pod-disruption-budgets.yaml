@@ -4,7 +4,7 @@ metadata:
   name: gateway
   namespace: tcp-lab
 spec:
-  minAvailable: 2
+  minAvailable: 3
   selector:
     matchLabels:
       app: gateway

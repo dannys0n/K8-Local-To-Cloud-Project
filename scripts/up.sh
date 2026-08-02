@@ -17,7 +17,14 @@ else
   echo "kind cluster '$CLUSTER' already exists."
 fi
 
-DATABASE_NODE="${CLUSTER}-worker2"
+DATABASE_NODE="${CLUSTER}-worker"
+mapfile -t EXISTING_DATABASE_NODES < <(kubectl get nodes -l tcp-lab.io/database=true -o name)
+for node in "${EXISTING_DATABASE_NODES[@]}"; do
+  if [[ "$node" != "node/$DATABASE_NODE" ]]; then
+    echo "Database node placement changed. Recreate the kind cluster before running up.sh so the node-local PostgreSQL volume is not stranded." >&2
+    exit 1
+  fi
+done
 echo "Labeling and tainting kind database node '$DATABASE_NODE'..."
 kubectl label node "$DATABASE_NODE" tcp-lab.io/database=true --overwrite
 kubectl taint node "$DATABASE_NODE" tcp-lab.io/database=true:NoSchedule --overwrite

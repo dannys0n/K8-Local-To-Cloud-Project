@@ -4,7 +4,7 @@ metadata:
   name: gateway
   namespace: tcp-lab
 spec:
-  replicas: 3
+  replicas: 4
   strategy:
     rollingUpdate:
       maxUnavailable: 0
@@ -22,15 +22,18 @@ spec:
         - key: node.kubernetes.io/not-ready
           operator: Exists
           effect: NoExecute
-          tolerationSeconds: 15
+          tolerationSeconds: 0
         - key: node.kubernetes.io/unreachable
           operator: Exists
           effect: NoExecute
-          tolerationSeconds: 15
+          tolerationSeconds: 0
       topologySpreadConstraints:
         - maxSkew: 1
           topologyKey: kubernetes.io/hostname
-          whenUnsatisfiable: ScheduleAnyway
+          whenUnsatisfiable: DoNotSchedule
+          nodeTaintsPolicy: Honor
+          matchLabelKeys:
+            - pod-template-hash
           labelSelector:
             matchLabels:
               app: gateway
@@ -52,9 +55,11 @@ spec:
             - name: SERVER_PORT
               value: "7000"
             - name: DISCOVERY_INTERVAL
+              value: "200ms"
+            - name: DISCOVERY_TIMEOUT
               value: "500ms"
             - name: ROUTE_TIMEOUT
-              value: "10s"
+              value: "5s"
             - name: BACKEND_TIMEOUT
               value: "3s"
           ports:
@@ -64,11 +69,17 @@ spec:
             - name: stats
               containerPort: 8404
               protocol: TCP
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: stats
+            periodSeconds: 1
+            timeoutSeconds: 1
+            failureThreshold: 90
           readinessProbe:
             httpGet:
               path: /healthz
               port: stats
-            initialDelaySeconds: 1
             periodSeconds: 1
             timeoutSeconds: 1
             failureThreshold: 2
@@ -76,7 +87,6 @@ spec:
             httpGet:
               path: /healthz
               port: stats
-            initialDelaySeconds: 3
             periodSeconds: 1
             timeoutSeconds: 1
             failureThreshold: 3

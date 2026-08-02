@@ -12,7 +12,7 @@ adding a coordinator or operator.
 
 ## What runs
 
-- **Gateway:** three generic Go replicas that preserve the client connection
+- **Gateway:** four generic Go replicas that preserve the client connection
   while switching downstream location servers at runtime.
 - **TCP server:** ten interchangeable Deployment replicas: five active location
   owners and five ready hot spares.
@@ -69,7 +69,7 @@ the stable backend. The same command can change backends later without replacing
 the client connection. After a gateway disconnect, the client reconnects with
 the same handshake.
 The logical server identity and counter remain in PostgreSQL when a pod is
-replaced. An expired three-second lease is claimed by an already-running spare;
+replaced. An expired 1.5-second lease is claimed by an already-running spare;
 the generation increases to fence the old owner. Redis presence keys expire and
 repopulate automatically. A request
 whose response is lost during a disconnect may be retried, so this toy protocol
@@ -173,23 +173,41 @@ database deployments are placeholders. The reusable pieces are the Services,
 Deployments, probes, disruption budgets, topology rules, and kind/EKS overlays.
 The credentials in the kind overlay are development-only.
 
-Kind labels `tcp-lab-worker2` as its database worker. PostgreSQL and Redis use
+Kind labels `tcp-lab-worker` (the first worker) as its database worker.
+PostgreSQL and Redis use
 hard affinity and tolerate its `NoSchedule` taint; gateways and servers cannot
 schedule there. The kind PostgreSQL PVC is node-local and cannot follow its pod
 to another node without a shared storage class. The EKS overlay deploys no
 database pods and expects managed PostgreSQL and Redis-compatible services
 outside the worker pool.
+Changing the dedicated kind database worker requires recreating the cluster;
+the startup scripts reject an in-place move that would strand the local PVC.
 
 Kubernetes restores failed pods and nodes, but location recovery does not wait
-for node eviction. Ready spare pods poll PostgreSQL-backed leases every 500ms;
-after a three-second lease expires, one spare atomically claims the location and
+for node eviction. Ready spare pods poll PostgreSQL-backed leases every 250ms;
+after a 1.5-second lease expires, one spare atomically claims the location and
 increments its fencing generation. These lab defaults are configurable through
 `ASSIGNMENT_LEASE_DURATION` and `ASSIGNMENT_RENEW_INTERVAL`; production values
 must be validated against database and network latency. The replacement
 application remains responsible for resumable sessions and application-specific
 durability semantics.
 
+Startup probes give server and gateway containers up to 90 seconds to initialize
+without liveness restarts. Once startup succeeds, their readiness and liveness
+checks switch to aggressive runtime detection. Fresh kind clusters report node
+status every second, allow five seconds without a heartbeat, and immediately
+evict these application pods once the failed-node taint appears. Kind also
+raises both node-eviction rates so simultaneous worker losses are processed
+together instead of at the conservative default rate.
+
 Gateway health is independent from server ownership. Kubernetes readiness and
 liveness checks remove or restart an unhealthy gateway, and the EKS NLB checks
 gateway targets directly. Gateways discover every active location owner and do
-not claim, rebalance, or exclusively own servers.
+not claim, rebalance, or exclusively own servers. Hard hostname spreading keeps
+the ten server pods and four gateways distributed across kind's four general
+workers; spread counts the current rollout revision, and failed-node taints are
+honored so replacement pods can consolidate on survivors. The five ready server
+spares provide immediate location handoff, while Kubernetes promptly creates
+replacement pods to replenish that pool.
+Kubernetes does not automatically rebalance healthy pods when repaired workers
+return; the failure drill documents the explicit rolling rebalance command.

@@ -9,7 +9,7 @@ metadata:
     service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing
     service.beta.kubernetes.io/aws-load-balancer-healthcheck-protocol: TCP
     service.beta.kubernetes.io/aws-load-balancer-healthcheck-port: traffic-port
-    service.beta.kubernetes.io/aws-load-balancer-healthcheck-interval: "10"
+    service.beta.kubernetes.io/aws-load-balancer-healthcheck-interval: "5"
     service.beta.kubernetes.io/aws-load-balancer-healthcheck-healthy-threshold: "2"
     service.beta.kubernetes.io/aws-load-balancer-healthcheck-unhealthy-threshold: "2"
 spec:

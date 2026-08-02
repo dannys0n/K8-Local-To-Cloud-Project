@@ -43,8 +43,9 @@ The server-side TCP socket cannot survive a pod failure, but the client-to-gatew
 socket remains open. A message in flight at the server disconnect can be
 processed more than once because the toy protocol has no request IDs.
 
-The default ownership lease is three seconds and renews every 500ms. Gateways
-discover eligible backends every 500ms and re-resolve immediately after an error.
+The default ownership lease is 1.5 seconds and renews every 250ms. Gateways
+discover eligible backends every 200ms, with a separate 500ms discovery timeout,
+and re-resolve immediately after an error.
 The expected application-level handoff is therefore a few seconds and does not
 wait for Kubernetes to declare the worker `NotReady`. The generation change is
 the safety boundary: database writes from the former owner no longer match the
@@ -56,7 +57,7 @@ Find which worker hosts a proxy, then stop its kind node container:
 
 ```bash
 docker ps --format '{{.Names}}'
-docker stop tcp-lab-worker2
+docker stop tcp-lab-worker3
 ```
 
 Observe which pods reschedule:
@@ -70,12 +71,27 @@ uses a node-local PVC for PostgreSQL, so losing the PostgreSQL worker can leave
 the database unavailable until that worker returns.
 
 For an abrupt hardware-style failure, use `docker kill` instead of draining the
-node. Kubernetes normally takes about 40 seconds to mark a silent node unhealthy;
-the lab workloads then tolerate `NotReady` or `Unreachable` for another 15
-seconds before pod replacement. That slower loop replenishes the five-pod spare
-pool; it is not the location failover mechanism. This short eviction window is
-for failure testing. The EKS value should be chosen to match production network
-stability and recovery goals.
+node. Fresh kind clusters use one-second kubelet status updates and a five-second
+controller grace period. Application pods have zero additional tolerance for
+`NotReady` or `Unreachable`, so replacement begins as soon as the failed-node
+taint is applied. The controller permits ten failed-node evictions per second,
+including the small-cluster unhealthy-zone path, so simultaneous worker losses
+are not serialized by Kubernetes' conservative default rate. That slower loop
+replenishes the five-pod spare pool; it is not the location failover
+mechanism. EKS node repair remains a background capacity mechanism.
+
+Server and gateway startup probes allow up to 90 seconds for initialization and
+prevent readiness or liveness checks from running until startup succeeds. This
+does not delay healthy pods: the probe runs every second and completes as soon
+as the listening endpoint is available. Runtime checks are intentionally much
+faster after that boundary.
+
+Kubernetes does not move healthy replacement pods when a repaired node returns.
+After every general worker is `Ready`, restore the warm per-node distribution:
+
+```bash
+kubectl rollout restart deployment/tcp-server deployment/gateway -n tcp-lab
+```
 
 ## Database restarts
 

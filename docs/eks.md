@@ -33,14 +33,23 @@ PostgreSQL leases assign each identity to one server pod and fence stale owners
 with a monotonically increasing generation.
 
 The NLB registers gateway pod IPs directly and performs TCP health checks on the
-traffic port every ten seconds, requiring two successes or failures to change
+traffic port every five seconds, requiring two successes or failures to change
 target health. Kubernetes uses separate one-second HTTP checks against each
 gateway's local health endpoint for faster in-cluster readiness and liveness
 detection. Neither health mechanism changes server ownership.
 
-All worker nodes are general capacity. Zone and hostname spreading are soft
-preferences: replicas spread during normal operation but may consolidate onto
-one surviving worker when necessary.
+All worker nodes are general capacity. Zone and hostname spreading use a maximum
+skew of one and honor failed-node taints. Warm replicas spread during normal
+operation and replacement pods may consolidate across the remaining eligible
+workers after a failure.
+
+The workload startup probes protect up to 90 seconds of initialization before
+liveness checks can restart a container. The zero-second `NotReady` and
+`Unreachable` tolerations evict application pods as soon as the EKS control
+plane marks a node unhealthy. For infrastructure repair, use EKS managed node groups with node auto
+repair enabled and install the EKS node monitoring agent; keep enough existing
+worker capacity for replacement pods because launching a new EC2 node is not a
+realtime recovery path.
 
 ## Database availability
 

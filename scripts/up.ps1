@@ -24,7 +24,14 @@ try {
         Write-Host "kind cluster '$Cluster' already exists."
     }
 
-    $DatabaseNode = "$Cluster-worker2"
+    $DatabaseNode = "$Cluster-worker"
+    $ExistingDatabaseNodes = @(
+        (kubectl get nodes -l tcp-lab.io/database=true -o jsonpath='{.items[*].metadata.name}') -split '\s+' |
+            Where-Object { $_ }
+    )
+    if ($ExistingDatabaseNodes | Where-Object { $_ -ne $DatabaseNode }) {
+        throw "Database node placement changed. Recreate the kind cluster before running up.ps1 so the node-local PostgreSQL volume is not stranded."
+    }
     Write-Host "Labeling and tainting kind database node '$DatabaseNode'..."
     kubectl label node $DatabaseNode tcp-lab.io/database=true --overwrite
     kubectl taint node $DatabaseNode tcp-lab.io/database=true:NoSchedule --overwrite

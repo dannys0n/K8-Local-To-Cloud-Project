@@ -5,6 +5,7 @@ resources:
 patches:
   - path: gateway-loadbalancer-patch.yaml
   - path: gateway-replicas-patch.yaml
+  - path: server-spread-patch.yaml
 images:
   - name: simple-tcp-server
     newName: 000000000000.dkr.ecr.us-west-2.amazonaws.com/simple-tcp-server
