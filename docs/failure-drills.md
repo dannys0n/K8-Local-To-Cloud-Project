@@ -2,22 +2,24 @@
 
 These are infrastructure checks, not unit tests.
 
-## Proxy pod failure
+## Gateway pod failure
 
-Keep `tools/client.ps1` or `tools/client.py` connected, then delete one proxy:
+Keep `tools/client.ps1` or `tools/client.py` connected, then delete one gateway:
 
 ```bash
 kubectl get pods -n tcp-lab -l app=gateway
 kubectl delete pod -n tcp-lab <one-gateway-pod-name> --wait=false
 ```
 
-An existing TCP connection through the deleted proxy will close. A new client connection should work through the surviving proxy while Kubernetes creates a replacement.
+An existing TCP connection through the deleted gateway will close. A new client
+connection should work through a surviving gateway while Kubernetes creates a
+replacement.
 
 ## Independent scaling
 
 ```bash
 kubectl scale deployment/gateway -n tcp-lab --replicas=4
-kubectl scale deployment/tcp-server -n tcp-lab --replicas=8
+kubectl scale deployment/tcp-server -n tcp-lab --replicas=10
 kubectl get pods -n tcp-lab -w
 ```
 
@@ -53,7 +55,7 @@ authoritative assignment row.
 
 ## Worker failure
 
-Find which worker hosts a proxy, then stop its kind node container:
+Find which worker hosts a gateway, then stop its kind node container:
 
 ```bash
 docker ps --format '{{.Names}}'

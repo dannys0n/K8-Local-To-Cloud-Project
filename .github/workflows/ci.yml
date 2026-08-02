@@ -5,22 +5,38 @@ on:
   pull_request:
 
 jobs:
-  build:
+  validate:
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.23.x"
 
-      - name: Run make up
-        run: make up
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
 
-      - name: Run status
-        run: make status
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v4
 
-      - name: Run make down
-        if: always()
-        run: make down
+      - name: Test server build
+        working-directory: app/server
+        run: go test ./...
+
+      - name: Test gateway build
+        working-directory: app/gateway
+        run: go test ./...
+
+      - name: Run manifest regression checks
+        run: python -m unittest discover -s tests -v
+
+      - name: Render Kubernetes overlays
+        run: |
+          kubectl kustomize deploy/overlays/kind > /dev/null
+          kubectl kustomize deploy/overlays/eks > /dev/null

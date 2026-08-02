@@ -4,7 +4,6 @@ metadata:
   name: gateway
   namespace: tcp-lab
 spec:
-  replicas: 4
   template:
     spec:
       topologySpreadConstraints:

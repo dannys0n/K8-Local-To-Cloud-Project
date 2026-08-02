@@ -4,7 +4,7 @@ resources:
   - ../../base
 patches:
   - path: gateway-loadbalancer-patch.yaml
-  - path: gateway-replicas-patch.yaml
+  - path: gateway-spread-patch.yaml
   - path: server-spread-patch.yaml
 images:
   - name: simple-tcp-server

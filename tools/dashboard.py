@@ -45,13 +45,13 @@ PAGE = r"""<!doctype html>
   <div class="muted">All gateway replicas · refreshes every 2 seconds · read-only</div>
   <div id="error"></div>
   <div class="cards">
-    <div class="card">Proxy replicas<div class="value" id="proxies">–</div></div>
+    <div class="card">Gateway replicas<div class="value" id="gateways">–</div></div>
     <div class="card">Live clients<div class="value" id="clients">–</div></div>
     <div class="card">Backend sessions<div class="value" id="backends">–</div></div>
     <div class="card">Server pool<div class="value" id="pool">–</div></div>
     <div class="card">Hot spares<div class="value" id="spares">–</div></div>
   </div>
-  <div class="panel"><h2>Per gateway</h2><table><thead><tr><th>Gateway</th><th>Pod IP</th><th>Node</th><th>Clients</th><th>Backend</th><th>Total accepted</th><th>Status</th></tr></thead><tbody id="proxyRows"></tbody></table></div>
+  <div class="panel"><h2>Per gateway</h2><table><thead><tr><th>Gateway</th><th>Pod IP</th><th>Node</th><th>Clients</th><th>Backend</th><th>Total accepted</th><th>Status</th></tr></thead><tbody id="gatewayRows"></tbody></table></div>
   <div class="panel"><h2>Active client sessions</h2><table><thead><tr><th>Gateway</th><th>Client address</th><th>Location</th><th>Logical server</th><th>Instance</th><th>Generation</th><th>Age</th><th>Protocol</th></tr></thead><tbody id="sessionRows"></tbody></table></div>
   <div class="panel"><h2>Backend distribution</h2><table><thead><tr><th>Logical server</th><th>Location</th><th>Active instance</th><th>Node</th><th>Endpoint</th><th>Generation</th><th>Clients</th><th>Seen by gateways</th><th>Status</th></tr></thead><tbody id="backendRows"></tbody></table></div>
   <div class="panel"><h2>Data services</h2><table><thead><tr><th>Service</th><th>Instance</th><th>Node</th><th>Pod IP</th><th>Service endpoint</th><th>Restarts</th><th>Status</th></tr></thead><tbody id="dataRows"></tbody></table></div>
@@ -64,14 +64,14 @@ async function refresh(){
     const response=await fetch('/api/connections', {cache:'no-store'}); const data=await response.json();
     if(!response.ok) throw new Error(data.error || response.statusText);
     document.getElementById('error').textContent=data.errors.join(' · ');
-    document.getElementById('proxies').textContent=data.proxies.length;
+    document.getElementById('gateways').textContent=data.gateways.length;
     document.getElementById('clients').textContent=data.total_clients;
     document.getElementById('backends').textContent=data.total_backends;
     document.getElementById('pool').textContent=data.server_pods;
     document.getElementById('spares').textContent=data.hot_spares;
-    fill('proxyRows', data.proxies, ['name','ip','node','clients','backend_sessions','total_accepted',p=>p.error?'ERROR':'OK']);
-    fill('sessionRows', data.sessions, ['proxy','src','location','server','instance','generation','age','proto']);
-    fill('backendRows', data.backends, ['server','location','instance','node','address','generation','current','proxies','status']);
+    fill('gatewayRows', data.gateways, ['name','ip','node','clients','backend_sessions','total_accepted',p=>p.error?'ERROR':'OK']);
+    fill('sessionRows', data.sessions, ['gateway','src','location','server','instance','generation','age','proto']);
+    fill('backendRows', data.backends, ['server','location','instance','node','address','generation','current','gateways','status']);
     fill('dataRows', data.data_services, ['service','instance','node','ip','endpoint','restarts','status'], 'No in-cluster data services');
     document.getElementById('updated').textContent='Updated '+new Date().toLocaleTimeString();
   } catch(error) { document.getElementById('error').textContent=error.message; }
@@ -191,7 +191,7 @@ def inspect_pod(pod: dict) -> dict:
             started = datetime.fromisoformat(item["connected_at"].replace("Z", "+00:00"))
             age = max(0, int((now - started).total_seconds()))
             pod["sessions"].append({
-                "proxy": pod["name"], "src": item.get("client", ""),
+                "gateway": pod["name"], "src": item.get("client", ""),
                 "location": item.get("location", ""), "server": item.get("server", ""),
                 "instance": item.get("instance", ""), "address": item.get("address", ""),
                 "generation": item.get("generation", 0), "age": f"{age}s",
@@ -201,7 +201,7 @@ def inspect_pod(pod: dict) -> dict:
         pod["backend_sessions"] = len(pod["sessions"])
         for item in stats.get("routes", []):
             pod["backends"].append({
-                "proxy": pod["name"], "server": item.get("server", ""),
+                "gateway": pod["name"], "server": item.get("server", ""),
                 "location": item.get("location", ""), "instance": item.get("instance", ""),
                 "address": item.get("address", ""), "generation": item.get("generation", 0),
                 "status": "UP",
@@ -216,45 +216,45 @@ def snapshot() -> dict:
     server_pods = list_server_pods()
     data_services = list_data_services()
     with ThreadPoolExecutor(max_workers=max(1, len(pods))) as pool:
-        proxies = list(pool.map(inspect_pod, pods))
+        gateways = list(pool.map(inspect_pod, pods))
     unique_backends = {
         logical_server(location): {
             "server": logical_server(location), "location": location,
             "address": "", "instance": "", "node": "", "generation": 0, "current": 0,
-            "proxies": set(),
+            "gateways": set(),
         }
         for location in LOCATIONS
     }
-    for backend in (item for proxy in proxies for item in proxy["backends"]):
+    for backend in (item for gateway in gateways for item in gateway["backends"]):
         current = unique_backends[backend["server"]]
         if backend["status"] == "UP" and backend["generation"] >= current["generation"]:
             if backend["generation"] > current["generation"]:
-                current["proxies"].clear()
+                current["gateways"].clear()
             current["generation"] = backend["generation"]
-            current["proxies"].add(backend["proxy"])
+            current["gateways"].add(backend["gateway"])
             current["address"] = backend["address"]
             server_pod = server_pods.get(backend["address"].split(":")[0], {})
             current["instance"] = backend["instance"] or server_pod.get("name", "")
             current["node"] = server_pod.get("node", "")
-    for session in (item for proxy in proxies for item in proxy["sessions"]):
+    for session in (item for gateway in gateways for item in gateway["sessions"]):
         if session["server"] in unique_backends:
             unique_backends[session["server"]]["current"] += 1
     backends = sorted(unique_backends.values(), key=lambda item: item["server"])
     for backend in backends:
-        backend["proxies"] = ", ".join(sorted(backend["proxies"]))
-        up = len(backend["proxies"].split(", ")) if backend["proxies"] else 0
-        backend["status"] = "UP" if proxies and up == len(proxies) else ("DEGRADED" if up else "DOWN")
+        backend["gateways"] = ", ".join(sorted(backend["gateways"]))
+        up = len(backend["gateways"].split(", ")) if backend["gateways"] else 0
+        backend["status"] = "UP" if gateways and up == len(gateways) else ("DEGRADED" if up else "DOWN")
 
     return {
-        "proxies": proxies,
-        "total_clients": sum(p["clients"] for p in proxies),
-        "total_backends": sum(p["backend_sessions"] for p in proxies),
+        "gateways": gateways,
+        "total_clients": sum(p["clients"] for p in gateways),
+        "total_backends": sum(p["backend_sessions"] for p in gateways),
         "server_pods": len(server_pods),
         "hot_spares": max(0, len(server_pods) - len({b["instance"] for b in backends if b["instance"]})),
         "data_services": data_services,
-        "sessions": [session for p in proxies for session in p["sessions"]],
+        "sessions": [session for p in gateways for session in p["sessions"]],
         "backends": backends,
-        "errors": [f'{p["name"]}: {p["error"]}' for p in proxies if p["error"]],
+        "errors": [f'{p["name"]}: {p["error"]}' for p in gateways if p["error"]],
     }
 
 

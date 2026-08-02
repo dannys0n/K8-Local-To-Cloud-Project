@@ -157,7 +157,7 @@ kubectl get pods,svc,pvc,pdb -n tcp-lab -o wide
 kubectl logs -n tcp-lab deployment/gateway
 kubectl logs -n tcp-lab deployment/tcp-server
 kubectl scale deployment/gateway -n tcp-lab --replicas=4
-kubectl scale deployment/tcp-server -n tcp-lab --replicas=8
+kubectl scale deployment/tcp-server -n tcp-lab --replicas=10
 ```
 
 See:
