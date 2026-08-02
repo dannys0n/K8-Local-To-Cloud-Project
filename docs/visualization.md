@@ -10,7 +10,9 @@ python tools/dashboard.py
 
 Open `http://127.0.0.1:8080`. The page discovers all HAProxy pods, combines
 their current frontend and backend counters, and lists active sessions reported
-by HAProxy's Runtime API. It uses the current `kubectl` context and binds only
+by HAProxy's Runtime API. Backend rows are one per logical location and show the
+currently assigned physical server pod, while the summary shows available hot
+spares. It uses the current `kubectl` context and binds only
 to local loopback by default. The Runtime API also binds only to loopback inside
 each HAProxy pod and is not exposed by a Kubernetes Service.
 

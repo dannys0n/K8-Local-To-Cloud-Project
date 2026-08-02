@@ -8,10 +8,12 @@ $ErrorActionPreference = "Stop"
 $Client = [System.Net.Sockets.TcpClient]::new()
 $Client.Connect($ServerHost, $Port)
 $Stream = $Client.GetStream()
-$Writer = [System.IO.StreamWriter]::new($Stream, [System.Text.Encoding]::UTF8, 1024, $true)
+$Writer = [System.IO.StreamWriter]::new($Stream, [System.Text.UTF8Encoding]::new($false), 1024, $true)
 $Reader = [System.IO.StreamReader]::new($Stream, [System.Text.Encoding]::UTF8, $false, 1024, $true)
 $Writer.AutoFlush = $true
 try {
+    $Writer.WriteLine("@location any")
+    if ([string]::IsNullOrWhiteSpace($Reader.ReadLine())) { throw "Handshake failed" }
     1..$Messages | ForEach-Object {
         $Writer.WriteLine("smoke-$_")
         $Response = $Reader.ReadLine()

@@ -28,8 +28,14 @@ Then open `http://127.0.0.1:8404/stats`.
 
 The NLB Service publishes port `9000`. Location-aware clients begin with the
 small lab `@location` handshake, which HAProxy inspects to select a stable
-StatefulSet identity. A larger or dynamic location catalog would require a real
-routing layer rather than fixed HAProxy rules.
+logical identity. PostgreSQL leases assign each identity to one server pod and
+fence stale owners with a monotonically increasing generation. A larger or
+dynamic location catalog would require a real routing layer rather than fixed
+HAProxy rules.
+
+All worker nodes are general capacity. Zone and hostname spreading are soft
+preferences: replicas spread during normal operation but may consolidate onto
+one surviving worker when necessary.
 
 ## Database availability
 

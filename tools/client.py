@@ -19,6 +19,8 @@ def connect(host: str, port: int, location: str):
             stream.write(f"@location {location}\n".encode())
             response = stream.readline()
             hello = json.loads(response)
+            if hello.get("error"):
+                raise ConnectionError(hello["error"])
             if location != "any" and hello.get("location") != location:
                 raise ConnectionError(f"location handshake failed: {hello}")
             print(f"Connected to {hello['server']} ({hello['location']}) via {host}:{port}.")
@@ -86,9 +88,12 @@ def main() -> int:
                     response = stream.readline()
                     if not response:
                         raise ConnectionError("connection closed")
+                    body = json.loads(response)
+                    if body.get("error"):
+                        raise ConnectionError(body["error"])
                     print(response.decode("utf-8").rstrip())
                     break
-                except (OSError, ConnectionError) as error:
+                except (OSError, ValueError, ConnectionError) as error:
                     print(f"Disconnected ({error}); reconnecting.", file=sys.stderr)
                     if stream:
                         stream.close()

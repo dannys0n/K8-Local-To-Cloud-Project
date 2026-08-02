@@ -17,7 +17,7 @@ An existing TCP connection through the deleted proxy will close. A new client co
 
 ```bash
 kubectl scale deployment/haproxy -n tcp-lab --replicas=3
-kubectl scale statefulset/tcp-server -n tcp-lab --replicas=5
+kubectl scale deployment/tcp-server -n tcp-lab --replicas=8
 kubectl get pods -n tcp-lab -w
 ```
 
@@ -27,11 +27,16 @@ HAProxy discovers new server endpoints through the headless Service DNS.
 
 1. Start a location client, for example `tools/client.ps1 -Location new-york`.
 2. Send several messages and note `tcp-server-1`, `new-york`, and its counter.
-3. Delete `tcp-server-1` while leaving the client open.
-4. Send another message. The client retries while the endpoint is unavailable.
-5. Wait for the StatefulSet to recreate the pod.
-6. Confirm the client reconnects to `tcp-server-1` and its PostgreSQL counter
-   continues from the previous value.
+3. Find the physical owner and generation in PostgreSQL:
+
+   ```bash
+   kubectl exec -n tcp-lab postgres-0 -- psql -U tcp_lab -d tcp_lab -c "select * from tcp_server_assignment order by server_id"
+   ```
+
+4. Delete the owner pod while leaving the client open.
+5. Send another message. The client retries during the short lease/check delay.
+6. Confirm an existing spare owns `tcp-server-1`, the generation increased, and
+   the PostgreSQL counter continues from its previous value.
 
 The original TCP socket cannot survive a pod failure. The lab minimizes the
 visible interruption by reconnecting to the same stable logical endpoint. A
@@ -56,13 +61,19 @@ Server pods are diskless and can reschedule on another worker. Local kind still
 uses a node-local PVC for PostgreSQL, so losing the PostgreSQL worker can leave
 the database unavailable until that worker returns.
 
+For an abrupt hardware-style failure, use `docker kill` instead of draining the
+node. Kubernetes normally takes about 40 seconds to mark a silent node unhealthy;
+the lab workloads then tolerate `NotReady` or `Unreachable` for another 15
+seconds before replacement. This short window is for failure testing. The EKS
+value should be chosen to match production network stability and recovery goals.
+
 ## Database restarts
 
 Restart Redis and confirm its expiring presence keys repopulate:
 
 ```bash
 kubectl delete pod -n tcp-lab -l app=redis
-kubectl exec -n tcp-lab deployment/redis -- redis-cli --scan --pattern 'tcp-lab:server:*'
+kubectl exec -n tcp-lab deployment/redis -- redis-cli --scan --pattern 'tcp-lab:*'
 ```
 
 Restart PostgreSQL and confirm counters remain on its single kind PVC:

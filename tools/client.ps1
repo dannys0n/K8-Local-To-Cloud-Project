@@ -27,6 +27,7 @@ function Open-Connection {
             $Writer.AutoFlush = $true
             $Writer.WriteLine("@location $Location")
             $Hello = $Reader.ReadLine() | ConvertFrom-Json
+            if ($null -ne $Hello.error) { throw $Hello.error }
             if ($Location -ne "any" -and $Hello.location -ne $Location) { throw "Location handshake failed" }
             Write-Host "Connected to $($Hello.server) ($($Hello.location)) via ${ServerHost}:$Port."
             return @{ Client = $Client; Writer = $Writer; Reader = $Reader; Hello = $Hello }
@@ -87,6 +88,8 @@ try {
                 $Connection.Writer.WriteLine($Message)
                 $Response = $Connection.Reader.ReadLine()
                 if ($null -eq $Response) { throw "Connection closed" }
+                $Body = $Response | ConvertFrom-Json
+                if ($null -ne $Body.error) { throw $Body.error }
                 Write-Host $Response
                 break
             } catch {

@@ -1,12 +1,14 @@
 apiVersion: apps/v1
-kind: StatefulSet
+kind: Deployment
 metadata:
   name: tcp-server
   namespace: tcp-lab
 spec:
-  serviceName: tcp-server-headless
-  replicas: 5
-  podManagementPolicy: Parallel
+  replicas: 7
+  strategy:
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 2
   selector:
     matchLabels:
       app: tcp-server
@@ -16,10 +18,19 @@ spec:
         app: tcp-server
     spec:
       terminationGracePeriodSeconds: 10
+      tolerations:
+        - key: node.kubernetes.io/not-ready
+          operator: Exists
+          effect: NoExecute
+          tolerationSeconds: 15
+        - key: node.kubernetes.io/unreachable
+          operator: Exists
+          effect: NoExecute
+          tolerationSeconds: 15
       topologySpreadConstraints:
         - maxSkew: 1
           topologyKey: kubernetes.io/hostname
-          whenUnsatisfiable: DoNotSchedule
+          whenUnsatisfiable: ScheduleAnyway
           labelSelector:
             matchLabels:
               app: tcp-server
@@ -32,6 +43,10 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.name
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
             - name: LISTEN_ADDR
               value: ":7000"
             - name: POSTGRES_DSN

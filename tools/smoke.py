@@ -12,6 +12,9 @@ def main() -> int:
 
     with socket.create_connection((args.host, args.port), timeout=10) as sock:
         stream = sock.makefile("rwb", buffering=0)
+        stream.write(b"@location any\n")
+        if not stream.readline():
+            raise RuntimeError("connection closed during handshake")
         for index in range(1, args.messages + 1):
             stream.write(f"smoke-{index}\n".encode())
             response = stream.readline()

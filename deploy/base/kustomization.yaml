@@ -3,7 +3,7 @@ kind: Kustomization
 resources:
   - namespace.yaml
   - server-headless-service.yaml
-  - server-statefulset.yaml
+  - server-deployment.yaml
   - haproxy-deployment.yaml
   - haproxy-service.yaml
   - haproxy-stats-service.yaml

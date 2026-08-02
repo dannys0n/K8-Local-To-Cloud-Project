@@ -24,8 +24,8 @@ kind load docker-image "$IMAGE" --name "$CLUSTER"
 
 echo "Applying Kubernetes resources..."
 kubectl apply -k deploy/overlays/kind
-kubectl rollout restart statefulset/tcp-server -n tcp-lab
-kubectl rollout status statefulset/tcp-server -n tcp-lab --timeout=180s
+kubectl rollout restart deployment/tcp-server -n tcp-lab
+kubectl rollout status deployment/tcp-server -n tcp-lab --timeout=180s
 kubectl rollout status deployment/haproxy -n tcp-lab --timeout=180s
 
 echo

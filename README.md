@@ -3,18 +3,20 @@
 A small, replaceable application used to exercise Kubernetes infrastructure:
 
 ```text
-client -> NodePort/NLB -> HAProxy Deployment -> TCP Server StatefulSet
+client -> NodePort/NLB -> HAProxy Deployment -> TCP Server pool
                                               -> PostgreSQL + Redis
 ```
 
-It intentionally omits a coordinator, ownership/fencing system, authentication,
-and custom proxy implementation.
+It intentionally keeps ownership and fencing inside PostgreSQL instead of
+adding a coordinator, operator, or custom proxy.
 
 ## What runs
 
 - **HAProxy:** two replicas, raw TCP mode, live statistics page.
-- **TCP server:** five diskless StatefulSet replicas with stable names.
-- **PostgreSQL:** authoritative location identity and counters; one PVC in kind.
+- **TCP server:** seven interchangeable Deployment replicas: five active location
+  owners and two ready hot spares.
+- **PostgreSQL:** authoritative location identity, counters, leases, and ownership
+  generations; one PVC in kind.
 - **Redis:** ephemeral server-presence and counter-cache keys.
 - **Client entry:** `127.0.0.1:9000`, with an optional location handshake; an
   AWS NLB in the EKS overlay.
@@ -52,7 +54,7 @@ powershell -ExecutionPolicy Bypass -File tools/client.ps1 -Location frankfurt
 
 The location endpoints are deliberately simple and fixed for this lab:
 
-| Location | kind port | StatefulSet identity |
+| Location | kind port | Logical identity |
 |---|---:|---|
 | Los Angeles | 9000 | `tcp-server-0` |
 | New York | 9000 | `tcp-server-1` |
@@ -62,8 +64,10 @@ The location endpoints are deliberately simple and fixed for this lab:
 
 The client sends a small `@location` handshake that HAProxy uses to select the
 stable backend, then reconnects with the same handshake after a disconnect.
-The server identity and counter remain in PostgreSQL when a server pod is
-replaced. Redis presence keys expire and repopulate automatically. A request
+The logical server identity and counter remain in PostgreSQL when a pod is
+replaced. An expired six-second lease is claimed by an already-running spare;
+the generation increases to fence the old owner. Redis presence keys expire and
+repopulate automatically. A request
 whose response is lost during a disconnect may be retried, so this toy protocol
 is not an exactly-once protocol. Without `-Location`, port 9000 remains the
 original round-robin endpoint.
@@ -104,6 +108,12 @@ Inspect the cluster:
 powershell -ExecutionPolicy Bypass -File scripts/status.ps1
 ```
 
+Run the scheduling regression tests:
+
+```bash
+python -m unittest discover -s tests -v
+```
+
 Delete everything:
 
 ```powershell
@@ -129,7 +139,7 @@ Delete everything:
 Send a line such as `hello` and receive one JSON line:
 
 ```json
-{"server":"tcp-server-0","location":"los-angeles","counter":1,"message":"hello","time":"2026-07-31T00:00:00Z"}
+{"server":"tcp-server-0","location":"los-angeles","instance":"tcp-server-abc","generation":3,"counter":1,"message":"hello","time":"2026-07-31T00:00:00Z"}
 ```
 
 A single persistent client connection stays on one HAProxy pod and one selected backend server. Open multiple clients to observe distribution among servers.
@@ -139,9 +149,9 @@ A single persistent client connection stays on one HAProxy pod and one selected 
 ```bash
 kubectl get pods,svc,pvc,pdb -n tcp-lab -o wide
 kubectl logs -n tcp-lab deployment/haproxy
-kubectl logs -n tcp-lab tcp-server-0
+kubectl logs -n tcp-lab deployment/tcp-server
 kubectl scale deployment/haproxy -n tcp-lab --replicas=3
-kubectl scale statefulset/tcp-server -n tcp-lab --replicas=5
+kubectl scale deployment/tcp-server -n tcp-lab --replicas=8
 ```
 
 See:
@@ -154,5 +164,11 @@ See:
 
 This is an infrastructure template. HAProxy, the tiny server, and the local
 database deployments are placeholders. The reusable pieces are the Services,
-Deployments, StatefulSets, probes, disruption budgets, topology rules, and
-kind/EKS overlays. The credentials in the kind overlay are development-only.
+Deployments, probes, disruption budgets, topology rules, and kind/EKS overlays.
+The credentials in the kind overlay are development-only.
+
+Worker nodes have no workload-specific roles. Topology spreading is a scheduler
+preference, so healthy replicas spread when capacity exists but may all run on
+one surviving worker. The kind PostgreSQL PVC is the local exception: durable
+storage cannot follow its pod to another node without a shared storage class.
+The EKS overlay expects managed PostgreSQL outside the worker pool.
