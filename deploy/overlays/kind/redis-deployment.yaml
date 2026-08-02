@@ -13,7 +13,19 @@ spec:
       labels:
         app: redis
     spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: tcp-lab.io/database
+                    operator: In
+                    values: ["true"]
       tolerations:
+        - key: tcp-lab.io/database
+          operator: Equal
+          value: "true"
+          effect: NoSchedule
         - key: node.kubernetes.io/not-ready
           operator: Exists
           effect: NoExecute

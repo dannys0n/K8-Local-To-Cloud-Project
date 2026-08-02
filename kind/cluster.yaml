@@ -14,6 +14,13 @@ nodes:
         protocol: TCP
   - role: worker
   - role: worker
+    kubeadmConfigPatches:
+      - |
+        kind: JoinConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            node-labels: "tcp-lab.io/database=true"
+            register-with-taints: "tcp-lab.io/database=true:NoSchedule"
   - role: worker
   - role: worker
   - role: worker

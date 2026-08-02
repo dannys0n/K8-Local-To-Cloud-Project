@@ -24,6 +24,11 @@ try {
         Write-Host "kind cluster '$Cluster' already exists."
     }
 
+    $DatabaseNode = "$Cluster-worker2"
+    Write-Host "Labeling and tainting kind database node '$DatabaseNode'..."
+    kubectl label node $DatabaseNode tcp-lab.io/database=true --overwrite
+    kubectl taint node $DatabaseNode tcp-lab.io/database=true:NoSchedule --overwrite
+
     Write-Host "Building $ServerImage and $GatewayImage..."
     docker build -t $ServerImage app/server
     docker build -t $GatewayImage app/gateway

@@ -17,8 +17,9 @@ adding a coordinator or operator.
 - **TCP server:** ten interchangeable Deployment replicas: five active location
   owners and five ready hot spares.
 - **PostgreSQL:** authoritative location identity, counters, leases, and ownership
-  generations; one PVC in kind.
-- **Redis:** ephemeral server-presence and counter-cache keys.
+  generations; one PVC on the dedicated kind database worker.
+- **Redis:** ephemeral server-presence and counter-cache keys on the same kind
+  database worker.
 - **Client entry:** `127.0.0.1:9000`, with an optional location handshake; an
   AWS NLB in the EKS overlay.
 - **Manifest management:** a shared Kustomize base plus kind and EKS overlays.
@@ -172,11 +173,12 @@ database deployments are placeholders. The reusable pieces are the Services,
 Deployments, probes, disruption budgets, topology rules, and kind/EKS overlays.
 The credentials in the kind overlay are development-only.
 
-Worker nodes have no workload-specific roles. Topology spreading is a scheduler
-preference, so healthy replicas spread when capacity exists but may all run on
-one surviving worker. The kind PostgreSQL PVC is the local exception: durable
-storage cannot follow its pod to another node without a shared storage class.
-The EKS overlay expects managed PostgreSQL outside the worker pool.
+Kind labels `tcp-lab-worker2` as its database worker. PostgreSQL and Redis use
+hard affinity and tolerate its `NoSchedule` taint; gateways and servers cannot
+schedule there. The kind PostgreSQL PVC is node-local and cannot follow its pod
+to another node without a shared storage class. The EKS overlay deploys no
+database pods and expects managed PostgreSQL and Redis-compatible services
+outside the worker pool.
 
 Kubernetes restores failed pods and nodes, but location recovery does not wait
 for node eviction. Ready spare pods poll PostgreSQL-backed leases every 500ms;

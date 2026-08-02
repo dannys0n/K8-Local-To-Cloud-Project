@@ -17,6 +17,11 @@ else
   echo "kind cluster '$CLUSTER' already exists."
 fi
 
+DATABASE_NODE="${CLUSTER}-worker2"
+echo "Labeling and tainting kind database node '$DATABASE_NODE'..."
+kubectl label node "$DATABASE_NODE" tcp-lab.io/database=true --overwrite
+kubectl taint node "$DATABASE_NODE" tcp-lab.io/database=true:NoSchedule --overwrite
+
 echo "Building $SERVER_IMAGE and $GATEWAY_IMAGE..."
 docker build -t "$SERVER_IMAGE" app/server
 docker build -t "$GATEWAY_IMAGE" app/gateway
