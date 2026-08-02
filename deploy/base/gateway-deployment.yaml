@@ -1,19 +1,23 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: haproxy
+  name: gateway
   namespace: tcp-lab
 spec:
   replicas: 3
+  strategy:
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
   selector:
     matchLabels:
-      app: haproxy
+      app: gateway
   template:
     metadata:
       labels:
-        app: haproxy
+        app: gateway
     spec:
-      terminationGracePeriodSeconds: 30
+      terminationGracePeriodSeconds: 10
       tolerations:
         - key: node.kubernetes.io/not-ready
           operator: Exists
@@ -29,13 +33,30 @@ spec:
           whenUnsatisfiable: ScheduleAnyway
           labelSelector:
             matchLabels:
-              app: haproxy
+              app: gateway
       containers:
-        - name: haproxy
-          image: haproxy:3.4-alpine
-          args:
-            - -f
-            - /usr/local/etc/haproxy/haproxy.cfg
+        - name: gateway
+          image: tcp-gateway:dev
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: LISTEN_ADDR
+              value: ":9000"
+            - name: STATS_ADDR
+              value: ":8404"
+            - name: SERVER_HOST
+              value: tcp-server-headless
+            - name: SERVER_PORT
+              value: "7000"
+            - name: DISCOVERY_INTERVAL
+              value: "500ms"
+            - name: ROUTE_TIMEOUT
+              value: "10s"
+            - name: BACKEND_TIMEOUT
+              value: "3s"
           ports:
             - name: tcp
               containerPort: 9000
@@ -45,7 +66,7 @@ spec:
               protocol: TCP
           readinessProbe:
             httpGet:
-              path: /stats
+              path: /healthz
               port: stats
             initialDelaySeconds: 1
             periodSeconds: 1
@@ -53,7 +74,7 @@ spec:
             failureThreshold: 2
           livenessProbe:
             httpGet:
-              path: /stats
+              path: /healthz
               port: stats
             initialDelaySeconds: 3
             periodSeconds: 1
@@ -67,12 +88,3 @@ spec:
             limits:
               cpu: 250m
               memory: 128Mi
-          volumeMounts:
-            - name: config
-              mountPath: /usr/local/etc/haproxy/haproxy.cfg
-              subPath: haproxy.cfg
-              readOnly: true
-      volumes:
-        - name: config
-          configMap:
-            name: haproxy-config

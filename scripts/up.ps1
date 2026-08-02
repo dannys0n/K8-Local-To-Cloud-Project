@@ -1,7 +1,8 @@
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $PSScriptRoot
 $Cluster = "tcp-lab"
-$Image = "simple-tcp-server:dev"
+$ServerImage = "simple-tcp-server:dev"
+$GatewayImage = "tcp-gateway:dev"
 
 foreach ($Command in @("docker", "kind", "kubectl")) {
     if (-not (Get-Command $Command -ErrorAction SilentlyContinue)) {
@@ -23,23 +24,25 @@ try {
         Write-Host "kind cluster '$Cluster' already exists."
     }
 
-    Write-Host "Building $Image..."
-    docker build -t $Image app/server
+    Write-Host "Building $ServerImage and $GatewayImage..."
+    docker build -t $ServerImage app/server
+    docker build -t $GatewayImage app/gateway
 
     Write-Host "Loading image into kind..."
-    kind load docker-image $Image --name $Cluster
+    kind load docker-image $ServerImage $GatewayImage --name $Cluster
 
     Write-Host "Applying Kubernetes resources..."
     kubectl apply -k deploy/overlays/kind
     kubectl rollout restart deployment/tcp-server -n tcp-lab
+    kubectl rollout restart deployment/gateway -n tcp-lab
 
     kubectl rollout status deployment/tcp-server -n tcp-lab --timeout=180s
-    kubectl rollout status deployment/haproxy -n tcp-lab --timeout=180s
+    kubectl rollout status deployment/gateway -n tcp-lab --timeout=180s
 
     Write-Host ""
     Write-Host "Ready."
     Write-Host "TCP endpoint: 127.0.0.1:9000"
-    Write-Host "HAProxy stats: http://127.0.0.1:8404/stats"
+    Write-Host "Gateway stats: http://127.0.0.1:8404/"
     Write-Host "Run: powershell -ExecutionPolicy Bypass -File tools/client.ps1"
 } finally {
     Pop-Location

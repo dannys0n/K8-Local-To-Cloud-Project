@@ -47,7 +47,7 @@ try {
         $Message = Read-Host ">"
         if ([string]::IsNullOrWhiteSpace($Message)) { continue }
         if ($Message -eq "/help") {
-            Write-Host "/location NAME  switch location and reconnect"
+            Write-Host "/location NAME  switch backend without reconnecting"
             Write-Host "/reconnect      replace the current TCP connection"
             Write-Host "/status         show the selected and connected identity"
             Write-Host "/locations      list valid locations"
@@ -65,15 +65,26 @@ try {
             }
             continue
         }
-        if ($Message -eq "/reconnect" -or $Message -match "^/location\s+(\S+)\s*$") {
-            if ($Message -ne "/reconnect") {
-                $Requested = $Matches[1]
-                if ($Locations -notcontains $Requested) {
-                    Write-Warning "Unknown location: $Requested. Use /locations."
-                    continue
-                }
-                $Location = $Requested
+        if ($Message -match "^/location\s+(\S+)\s*$") {
+            $Requested = $Matches[1]
+            if ($Locations -notcontains $Requested) {
+                Write-Warning "Unknown location: $Requested. Use /locations."
+                continue
             }
+            try {
+                $Connection.Writer.WriteLine("@location $Requested")
+                $Hello = $Connection.Reader.ReadLine() | ConvertFrom-Json
+                if ($null -ne $Hello.error) { throw $Hello.error }
+                if ($Requested -ne "any" -and $Hello.location -ne $Requested) { throw "Location route failed" }
+                $Location = $Requested
+                $Connection.Hello = $Hello
+                Write-Host "Routed to $($Hello.server) ($($Hello.location)) on the existing client connection."
+            } catch {
+                Write-Warning "Route change failed: $($_.Exception.Message). Existing route retained."
+            }
+            continue
+        }
+        if ($Message -eq "/reconnect") {
             Close-Connection $Connection
             $Connection = Open-Connection
             continue

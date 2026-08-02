@@ -356,6 +356,20 @@ func (s *server) handleConnection(ctx context.Context, conn net.Conn, logger *sl
 		if message == "" {
 			continue
 		}
+		if message == "@discover" {
+			current := s.currentAssignment()
+			body := map[string]any{"status": "spare", "instance": s.podName}
+			if current != nil {
+				body["status"] = "active"
+				body["server"] = current.ServerID
+				body["location"] = current.Location
+				body["generation"] = current.Generation
+			}
+			encoded, _ := json.Marshal(body)
+			_, _ = writer.Write(append(encoded, '\n'))
+			_ = writer.Flush()
+			return
+		}
 		if requested, found := strings.CutPrefix(message, "@probe "); found {
 			current := s.currentAssignment()
 			status := "spare"

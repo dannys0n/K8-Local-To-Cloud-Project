@@ -1,0 +1,450 @@
+package main
+
+import (
+	"bufio"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net"
+	"net/http"
+	"os"
+	"os/signal"
+	"sort"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"syscall"
+	"time"
+)
+
+const statsPage = `<!doctype html><html><head><meta charset="utf-8"><title>Gateway stats</title><style>body{background:#0d1117;color:#e6edf3;font:14px monospace;margin:2rem}pre{background:#161b22;border:1px solid #30363d;padding:1rem;overflow:auto}</style></head><body><h1>Gateway replica</h1><p>Read-only live state; refreshes every two seconds.</p><pre id="data">loading</pre><script>async function r(){let x=await fetch('/stats',{cache:'no-store'});document.querySelector('#data').textContent=JSON.stringify(await x.json(),null,2)}r();setInterval(r,2000)</script></body></html>`
+
+type backend struct {
+	Server     string `json:"server"`
+	Location   string `json:"location"`
+	Instance   string `json:"instance"`
+	Address    string `json:"address"`
+	Generation int64  `json:"generation"`
+}
+
+type discoveryResponse struct {
+	Status     string `json:"status"`
+	Server     string `json:"server"`
+	Location   string `json:"location"`
+	Instance   string `json:"instance"`
+	Generation int64  `json:"generation"`
+}
+
+type session struct {
+	ID          string    `json:"id"`
+	Client      string    `json:"client"`
+	Location    string    `json:"location"`
+	Server      string    `json:"server"`
+	Instance    string    `json:"instance"`
+	Address     string    `json:"address"`
+	Generation  int64     `json:"generation"`
+	ConnectedAt time.Time `json:"connected_at"`
+	Protocol    string    `json:"protocol"`
+}
+
+type gateway struct {
+	instance       string
+	serverHost     string
+	serverPort     string
+	discoveryEvery time.Duration
+	routeTimeout   time.Duration
+	backendTimeout time.Duration
+	logger         *slog.Logger
+	mu             sync.RWMutex
+	routes         map[string]backend
+	sessions       map[string]session
+	accepted       atomic.Uint64
+	nextSession    atomic.Uint64
+	nextAny        atomic.Uint64
+}
+
+type backendConnection struct {
+	info   backend
+	conn   net.Conn
+	reader *bufio.Reader
+	writer *bufio.Writer
+}
+
+func main() {
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	discoveryEvery, err := durationFromEnv("DISCOVERY_INTERVAL", 500*time.Millisecond)
+	if err != nil {
+		logger.Error("invalid discovery interval", "error", err)
+		os.Exit(1)
+	}
+	routeTimeout, err := durationFromEnv("ROUTE_TIMEOUT", 10*time.Second)
+	if err != nil {
+		logger.Error("invalid route timeout", "error", err)
+		os.Exit(1)
+	}
+	backendTimeout, err := durationFromEnv("BACKEND_TIMEOUT", 3*time.Second)
+	if err != nil {
+		logger.Error("invalid backend timeout", "error", err)
+		os.Exit(1)
+	}
+
+	g := &gateway{
+		instance:       envOrDefault("POD_NAME", hostname()),
+		serverHost:     envOrDefault("SERVER_HOST", "tcp-server-headless"),
+		serverPort:     envOrDefault("SERVER_PORT", "7000"),
+		discoveryEvery: discoveryEvery, routeTimeout: routeTimeout,
+		backendTimeout: backendTimeout, logger: logger,
+		routes: make(map[string]backend), sessions: make(map[string]session),
+	}
+	go g.discoverLoop(ctx)
+	go g.serveHTTP(ctx, envOrDefault("STATS_ADDR", ":8404"))
+
+	listener, err := net.Listen("tcp", envOrDefault("LISTEN_ADDR", ":9000"))
+	if err != nil {
+		logger.Error("listen", "error", err)
+		os.Exit(1)
+	}
+	defer listener.Close()
+	go func() { <-ctx.Done(); _ = listener.Close() }()
+	logger.Info("gateway ready", "instance", g.instance, "server_host", g.serverHost)
+
+	var clients sync.WaitGroup
+	for {
+		conn, err := listener.Accept()
+		if err != nil {
+			if ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
+				break
+			}
+			logger.Warn("accept client", "error", err)
+			continue
+		}
+		clients.Add(1)
+		go func() {
+			defer clients.Done()
+			g.handleClient(ctx, conn)
+		}()
+	}
+	clients.Wait()
+}
+
+func (g *gateway) handleClient(ctx context.Context, client net.Conn) {
+	defer client.Close()
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = client.Close()
+		case <-done:
+		}
+	}()
+	id := fmt.Sprintf("%s-%d", g.instance, g.nextSession.Add(1))
+	g.accepted.Add(1)
+	clientReader := bufio.NewReader(client)
+	clientWriter := bufio.NewWriter(client)
+	var downstream *backendConnection
+	defer func() {
+		if downstream != nil {
+			downstream.conn.Close()
+		}
+		g.mu.Lock()
+		delete(g.sessions, id)
+		g.mu.Unlock()
+	}()
+
+	requested := ""
+	for {
+		line, err := clientReader.ReadString('\n')
+		if err != nil {
+			return
+		}
+		message := strings.TrimSpace(line)
+		if message == "" {
+			continue
+		}
+		if location, found := strings.CutPrefix(message, "@location "); found {
+			location = strings.TrimSpace(location)
+			candidate, hello, err := g.openRoute(ctx, location, nil)
+			if err != nil {
+				writeJSONError(clientWriter, err.Error())
+				continue
+			}
+			if downstream != nil {
+				downstream.conn.Close()
+			}
+			downstream = candidate
+			requested = location
+			g.updateSession(id, client.RemoteAddr().String(), candidate.info)
+			if _, err := clientWriter.Write(hello); err != nil || clientWriter.Flush() != nil {
+				return
+			}
+			continue
+		}
+		if downstream == nil {
+			writeJSONError(clientWriter, "send @location before application messages")
+			continue
+		}
+
+		response, err := g.exchange(downstream, message)
+		if err != nil || responseHasError(response) {
+			failed := downstream.info
+			downstream.conn.Close()
+			downstream = nil
+			candidate, _, routeErr := g.openRoute(ctx, requested, &failed)
+			if routeErr != nil {
+				writeJSONError(clientWriter, routeErr.Error())
+				continue
+			}
+			downstream = candidate
+			g.updateSession(id, client.RemoteAddr().String(), candidate.info)
+			response, err = g.exchange(downstream, message)
+		}
+		if err != nil {
+			writeJSONError(clientWriter, "backend request failed")
+			continue
+		}
+		if _, err := clientWriter.Write(response); err != nil || clientWriter.Flush() != nil {
+			return
+		}
+	}
+}
+
+func (g *gateway) openRoute(ctx context.Context, requested string, previous *backend) (*backendConnection, []byte, error) {
+	if requested == "" {
+		return nil, nil, errors.New("location is required")
+	}
+	deadline := time.Now().Add(g.routeTimeout)
+	for {
+		g.discover(ctx)
+		candidates := g.routeCandidates(requested, previous)
+		for _, candidate := range candidates {
+			connection, hello, err := g.connectBackend(candidate)
+			if err == nil {
+				return connection, hello, nil
+			}
+			g.removeRoute(candidate)
+		}
+		if time.Now().After(deadline) || ctx.Err() != nil {
+			return nil, nil, fmt.Errorf("location %q unavailable", requested)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+func (g *gateway) exchange(connection *backendConnection, message string) ([]byte, error) {
+	_ = connection.conn.SetDeadline(time.Now().Add(g.backendTimeout))
+	if _, err := connection.writer.WriteString(message + "\n"); err != nil {
+		return nil, err
+	}
+	if err := connection.writer.Flush(); err != nil {
+		return nil, err
+	}
+	return connection.reader.ReadBytes('\n')
+}
+
+func (g *gateway) connectBackend(info backend) (*backendConnection, []byte, error) {
+	conn, err := net.DialTimeout("tcp", info.Address, g.backendTimeout)
+	if err != nil {
+		return nil, nil, err
+	}
+	connection := &backendConnection{info: info, conn: conn, reader: bufio.NewReader(conn), writer: bufio.NewWriter(conn)}
+	hello, err := g.exchange(connection, "@location "+info.Location)
+	if err != nil {
+		conn.Close()
+		return nil, nil, err
+	}
+	var confirmed backend
+	if err := json.Unmarshal(hello, &confirmed); err != nil || confirmed.Server != info.Server || confirmed.Generation != info.Generation {
+		conn.Close()
+		return nil, nil, errors.New("backend ownership changed")
+	}
+	_ = conn.SetDeadline(time.Time{})
+	return connection, hello, nil
+}
+
+func (g *gateway) discoverLoop(ctx context.Context) {
+	ticker := time.NewTicker(g.discoveryEvery)
+	defer ticker.Stop()
+	for {
+		g.discover(ctx)
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+func (g *gateway) discover(ctx context.Context) {
+	lookupCtx, cancel := context.WithTimeout(ctx, g.backendTimeout)
+	addresses, err := net.DefaultResolver.LookupHost(lookupCtx, g.serverHost)
+	cancel()
+	if err != nil {
+		return
+	}
+	type result struct {
+		info backend
+		ok   bool
+	}
+	results := make(chan result, len(addresses))
+	for _, address := range addresses {
+		endpoint := net.JoinHostPort(address, g.serverPort)
+		go func() {
+			conn, err := net.DialTimeout("tcp", endpoint, g.backendTimeout)
+			if err != nil {
+				results <- result{}
+				return
+			}
+			defer conn.Close()
+			_ = conn.SetDeadline(time.Now().Add(g.backendTimeout))
+			if _, err = fmt.Fprintln(conn, "@discover"); err != nil {
+				results <- result{}
+				return
+			}
+			var discovered discoveryResponse
+			err = json.NewDecoder(conn).Decode(&discovered)
+			if err != nil || discovered.Status != "active" {
+				results <- result{}
+				return
+			}
+			results <- result{info: backend{Server: discovered.Server, Location: discovered.Location, Instance: discovered.Instance, Address: endpoint, Generation: discovered.Generation}, ok: true}
+		}()
+	}
+	found := make(map[string]backend)
+	for range addresses {
+		result := <-results
+		if current, exists := found[result.info.Location]; result.ok && (!exists || result.info.Generation > current.Generation) {
+			found[result.info.Location] = result.info
+		}
+	}
+	g.mu.Lock()
+	g.routes = found
+	g.mu.Unlock()
+}
+
+func (g *gateway) routeCandidates(requested string, previous *backend) []backend {
+	g.mu.RLock()
+	result := make([]backend, 0, len(g.routes))
+	if requested == "any" {
+		for _, route := range g.routes {
+			result = append(result, route)
+		}
+	} else if route, ok := g.routes[requested]; ok {
+		result = append(result, route)
+	}
+	g.mu.RUnlock()
+	sort.Slice(result, func(i, j int) bool { return result[i].Server < result[j].Server })
+	if requested == "any" && len(result) > 1 {
+		offset := int(g.nextAny.Add(1)-1) % len(result)
+		result = append(result[offset:], result[:offset]...)
+	}
+	if previous != nil {
+		filtered := result[:0]
+		for _, route := range result {
+			if route.Address != previous.Address || route.Generation > previous.Generation {
+				filtered = append(filtered, route)
+			}
+		}
+		result = filtered
+	}
+	return result
+}
+
+func (g *gateway) removeRoute(failed backend) {
+	g.mu.Lock()
+	if current, ok := g.routes[failed.Location]; ok && current.Address == failed.Address && current.Generation == failed.Generation {
+		delete(g.routes, failed.Location)
+	}
+	g.mu.Unlock()
+}
+
+func (g *gateway) updateSession(id, client string, route backend) {
+	g.mu.Lock()
+	connectedAt := time.Now().UTC()
+	if current, ok := g.sessions[id]; ok {
+		connectedAt = current.ConnectedAt
+	}
+	g.sessions[id] = session{ID: id, Client: client, Location: route.Location, Server: route.Server, Instance: route.Instance, Address: route.Address, Generation: route.Generation, ConnectedAt: connectedAt, Protocol: "TCP"}
+	g.mu.Unlock()
+}
+
+func (g *gateway) serveHTTP(ctx context.Context, address string) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/healthz", func(writer http.ResponseWriter, _ *http.Request) {
+		writer.WriteHeader(http.StatusOK)
+		_, _ = writer.Write([]byte("ok\n"))
+	})
+	mux.HandleFunc("/stats", func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		g.mu.RLock()
+		sessions := make([]session, 0, len(g.sessions))
+		for _, item := range g.sessions {
+			sessions = append(sessions, item)
+		}
+		routes := make([]backend, 0, len(g.routes))
+		for _, item := range g.routes {
+			routes = append(routes, item)
+		}
+		g.mu.RUnlock()
+		sort.Slice(sessions, func(i, j int) bool { return sessions[i].ID < sessions[j].ID })
+		sort.Slice(routes, func(i, j int) bool { return routes[i].Server < routes[j].Server })
+		_ = json.NewEncoder(writer).Encode(map[string]any{"instance": g.instance, "accepted": g.accepted.Load(), "sessions": sessions, "routes": routes})
+	})
+	mux.HandleFunc("/", func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = writer.Write([]byte(statsPage))
+	})
+	server := &http.Server{Addr: address, Handler: mux, ReadHeaderTimeout: 2 * time.Second}
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = server.Shutdown(shutdownCtx)
+	}()
+	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		g.logger.Error("stats server", "error", err)
+	}
+}
+
+func responseHasError(body []byte) bool {
+	var response struct {
+		Error string `json:"error"`
+	}
+	return json.Unmarshal(body, &response) == nil && response.Error != ""
+}
+
+func writeJSONError(writer *bufio.Writer, message string) {
+	body, _ := json.Marshal(map[string]string{"error": message})
+	_, _ = writer.Write(append(body, '\n'))
+	_ = writer.Flush()
+}
+
+func envOrDefault(name, fallback string) string {
+	if value := strings.TrimSpace(os.Getenv(name)); value != "" {
+		return value
+	}
+	return fallback
+}
+func durationFromEnv(name string, fallback time.Duration) (time.Duration, error) {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback, nil
+	}
+	duration, err := time.ParseDuration(value)
+	if err != nil || duration <= 0 {
+		return 0, fmt.Errorf("%s must be a positive Go duration: %q", name, value)
+	}
+	return duration, nil
+}
+func hostname() string {
+	value, err := os.Hostname()
+	if err != nil || value == "" {
+		return "unknown-gateway"
+	}
+	return value
+}

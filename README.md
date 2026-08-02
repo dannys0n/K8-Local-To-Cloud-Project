@@ -3,16 +3,17 @@
 A small, replaceable application used to exercise Kubernetes infrastructure:
 
 ```text
-client -> NodePort/NLB -> HAProxy Deployment -> TCP Server pool
+client -> NodePort/NLB -> Gateway Deployment -> TCP Server pool
                                               -> PostgreSQL + Redis
 ```
 
 It intentionally keeps ownership and fencing inside PostgreSQL instead of
-adding a coordinator, operator, or custom proxy.
+adding a coordinator or operator.
 
 ## What runs
 
-- **HAProxy:** three replicas, raw TCP mode, live statistics page.
+- **Gateway:** three generic Go replicas that preserve the client connection
+  while switching downstream location servers at runtime.
 - **TCP server:** ten interchangeable Deployment replicas: five active location
   owners and five ready hot spares.
 - **PostgreSQL:** authoritative location identity, counters, leases, and ownership
@@ -62,8 +63,10 @@ The location endpoints are deliberately simple and fixed for this lab:
 | Singapore | 9000 | `tcp-server-3` |
 | Frankfurt | 9000 | `tcp-server-4` |
 
-The client sends a small `@location` handshake that HAProxy uses to select the
-stable backend, then reconnects with the same handshake after a disconnect.
+The client sends a small `@location` handshake that the gateway uses to select
+the stable backend. The same command can change backends later without replacing
+the client connection. After a gateway disconnect, the client reconnects with
+the same handshake.
 The logical server identity and counter remain in PostgreSQL when a pod is
 replaced. An expired three-second lease is claimed by an already-running spare;
 the generation increases to fence the old owner. Redis presence keys expire and
@@ -81,15 +84,15 @@ While the client is running, change locations or force a fresh connection:
 /status
 ```
 
-`/location` closes the existing socket and connects to the selected stable
-server. `/reconnect` keeps the location but creates a new connection, which can
-land on any HAProxy replica. Use the aggregate dashboard to see the proxy and
-backend change.
+`/location` keeps the client socket open and asks its current gateway to switch
+the downstream server. `/reconnect` keeps the location but creates a new client
+connection, which can land on any gateway replica. Use the aggregate dashboard
+to see the gateway and backend independently.
 
-Open the live HAProxy page:
+Open the selected gateway replica's live page:
 
 ```text
-http://127.0.0.1:8404/stats
+http://127.0.0.1:8404/
 ```
 
 Open the local aggregate connection dashboard (requires Python and a running
@@ -99,8 +102,8 @@ Open the local aggregate connection dashboard (requires Python and a running
 python tools/dashboard.py
 ```
 
-Then visit `http://127.0.0.1:8080`. Unlike HAProxy's per-replica statistics
-page, this combines every HAProxy pod and lists active client sessions.
+Then visit `http://127.0.0.1:8080`. This combines every gateway pod and lists
+active client sessions, routes, generations, and backend instances.
 
 Inspect the cluster:
 
@@ -142,15 +145,17 @@ Send a line such as `hello` and receive one JSON line:
 {"server":"tcp-server-0","location":"los-angeles","instance":"tcp-server-abc","generation":3,"counter":1,"message":"hello","time":"2026-07-31T00:00:00Z"}
 ```
 
-A single persistent client connection stays on one HAProxy pod and one selected backend server. Open multiple clients to observe distribution among servers.
+A single persistent client connection stays on one gateway pod, while its
+selected backend server can change. Open multiple clients to observe both forms
+of distribution.
 
 ## Useful commands
 
 ```bash
 kubectl get pods,svc,pvc,pdb -n tcp-lab -o wide
-kubectl logs -n tcp-lab deployment/haproxy
+kubectl logs -n tcp-lab deployment/gateway
 kubectl logs -n tcp-lab deployment/tcp-server
-kubectl scale deployment/haproxy -n tcp-lab --replicas=4
+kubectl scale deployment/gateway -n tcp-lab --replicas=4
 kubectl scale deployment/tcp-server -n tcp-lab --replicas=8
 ```
 
@@ -162,7 +167,7 @@ See:
 
 ## Design boundaries
 
-This is an infrastructure template. HAProxy, the tiny server, and the local
+This is an infrastructure template. The small gateway, tiny server, and local
 database deployments are placeholders. The reusable pieces are the Services,
 Deployments, probes, disruption budgets, topology rules, and kind/EKS overlays.
 The credentials in the kind overlay are development-only.
@@ -182,9 +187,7 @@ must be validated against database and network latency. The replacement
 application remains responsible for resumable sessions and application-specific
 durability semantics.
 
-Proxy health is independent from server ownership. Kubernetes readiness and
-liveness checks remove or restart an unhealthy proxy, and the EKS NLB checks
-proxy targets directly. These signals must not claim or rebalance servers.
-Future exclusive proxy-to-server ownership must use its own PostgreSQL-backed
-lease and fencing generation so a replacement proxy can claim only an expired
-assignment atomically.
+Gateway health is independent from server ownership. Kubernetes readiness and
+liveness checks remove or restart an unhealthy gateway, and the EKS NLB checks
+gateway targets directly. Gateways discover every active location owner and do
+not claim, rebalance, or exclusively own servers.

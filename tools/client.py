@@ -16,13 +16,7 @@ def connect(host: str, port: int, location: str):
             sock = socket.create_connection((host, port), timeout=10)
             sock.settimeout(None)
             stream = sock.makefile("rwb", buffering=0)
-            stream.write(f"@location {location}\n".encode())
-            response = stream.readline()
-            hello = json.loads(response)
-            if hello.get("error"):
-                raise ConnectionError(hello["error"])
-            if location != "any" and hello.get("location") != location:
-                raise ConnectionError(f"location handshake failed: {hello}")
+            hello = route(stream, location)
             print(f"Connected to {hello['server']} ({hello['location']}) via {host}:{port}.")
             return sock, stream, hello
         except (OSError, ValueError) as error:
@@ -30,6 +24,19 @@ def connect(host: str, port: int, location: str):
                 sock.close()
             print(f"Connect failed ({error}); retrying in 1 second.", file=sys.stderr)
             time.sleep(1)
+
+
+def route(stream, location: str):
+    stream.write(f"@location {location}\n".encode())
+    response = stream.readline()
+    if not response:
+        raise ConnectionError("connection closed during route change")
+    hello = json.loads(response)
+    if hello.get("error"):
+        raise ConnectionError(hello["error"])
+    if location != "any" and hello.get("location") != location:
+        raise ConnectionError(f"location route failed: {hello}")
+    return hello
 
 
 def main() -> int:
@@ -49,7 +56,7 @@ def main() -> int:
             if not message:
                 continue
             if message == "/help":
-                print("/location NAME  switch location and reconnect")
+                print("/location NAME  switch backend without reconnecting")
                 print("/reconnect      replace the current TCP connection")
                 print("/status         show the selected and connected identity")
                 print("/locations      list valid locations")
@@ -63,13 +70,21 @@ def main() -> int:
                 )
                 print(f"Selected: {args.location}; connected: {connected}")
                 continue
-            if message == "/reconnect" or message.startswith("/location "):
-                if message.startswith("/location "):
-                    requested = message.removeprefix("/location ").strip()
-                    if requested not in LOCATIONS:
-                        print(f"Unknown location: {requested}. Use /locations.")
-                        continue
+            if message.startswith("/location "):
+                requested = message.removeprefix("/location ").strip()
+                if requested not in LOCATIONS:
+                    print(f"Unknown location: {requested}. Use /locations.")
+                    continue
+                try:
+                    if stream is None:
+                        sock, stream, hello = connect(args.host, args.port, args.location)
+                    hello = route(stream, requested)
                     args.location = requested
+                    print(f"Routed to {hello['server']} ({hello['location']}) on the existing client connection.")
+                except (OSError, ValueError, ConnectionError) as error:
+                    print(f"Route change failed ({error}); existing route retained.", file=sys.stderr)
+                continue
+            if message == "/reconnect":
                 if stream:
                     stream.close()
                 if sock:

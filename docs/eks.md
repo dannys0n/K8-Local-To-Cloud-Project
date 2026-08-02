@@ -4,39 +4,38 @@ The local lab is fully runnable. The EKS overlay assumes an existing EKS cluster
 
 - AWS Load Balancer Controller installed.
 - Worker capacity across multiple Availability Zones.
-- The server image pushed to ECR.
+- The server and gateway images pushed to ECR.
 - Managed PostgreSQL and Redis-compatible endpoints available to the cluster.
 - A `tcp-server-databases` Secret containing `postgres-dsn` and `redis-addr`.
 
 Before applying:
 
 1. Replace the example ECR repository in `deploy/overlays/eks/kustomization.yaml`.
-2. Build and push `app/server` to that ECR repository.
+2. Build and push `app/server` and `app/gateway` to their ECR repositories.
 3. Create the database Secret from your AWS-integrated secret workflow; do not
    copy the kind development credentials.
 4. Confirm the NLB annotations match your controller version and security requirements.
 5. Apply with `kubectl apply -k deploy/overlays/eks`.
-6. Read the external endpoint with `kubectl get service haproxy -n tcp-lab`.
+6. Read the external endpoint with `kubectl get service gateway -n tcp-lab`.
 
 The stats Service remains internal on EKS. Access it temporarily with:
 
 ```bash
-kubectl port-forward -n tcp-lab service/haproxy-stats 8404:8404
+kubectl port-forward -n tcp-lab service/gateway-stats 8404:8404
 ```
 
-Then open `http://127.0.0.1:8404/stats`.
+Then open `http://127.0.0.1:8404/`.
 
 The NLB Service publishes port `9000`. Location-aware clients begin with the
-small lab `@location` handshake, which HAProxy inspects to select a stable
-logical identity. PostgreSQL leases assign each identity to one server pod and
-fence stale owners with a monotonically increasing generation. A larger or
-dynamic location catalog would require a real routing layer rather than fixed
-HAProxy rules.
+small lab `@location` handshake. The gateway resolves it to the active location
+owner and can change downstream servers while preserving the client connection.
+PostgreSQL leases assign each identity to one server pod and fence stale owners
+with a monotonically increasing generation.
 
-The NLB registers proxy pod IPs directly and performs TCP health checks on the
+The NLB registers gateway pod IPs directly and performs TCP health checks on the
 traffic port every ten seconds, requiring two successes or failures to change
 target health. Kubernetes uses separate one-second HTTP checks against each
-proxy's local statistics endpoint for faster in-cluster readiness and liveness
+gateway's local health endpoint for faster in-cluster readiness and liveness
 detection. Neither health mechanism changes server ownership.
 
 All worker nodes are general capacity. Zone and hostname spreading are soft

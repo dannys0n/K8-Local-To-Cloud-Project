@@ -7,8 +7,8 @@ These are infrastructure checks, not unit tests.
 Keep `tools/client.ps1` or `tools/client.py` connected, then delete one proxy:
 
 ```bash
-kubectl get pods -n tcp-lab -l app=haproxy
-kubectl delete pod -n tcp-lab <one-haproxy-pod-name> --wait=false
+kubectl get pods -n tcp-lab -l app=gateway
+kubectl delete pod -n tcp-lab <one-gateway-pod-name> --wait=false
 ```
 
 An existing TCP connection through the deleted proxy will close. A new client connection should work through the surviving proxy while Kubernetes creates a replacement.
@@ -16,12 +16,12 @@ An existing TCP connection through the deleted proxy will close. A new client co
 ## Independent scaling
 
 ```bash
-kubectl scale deployment/haproxy -n tcp-lab --replicas=4
+kubectl scale deployment/gateway -n tcp-lab --replicas=4
 kubectl scale deployment/tcp-server -n tcp-lab --replicas=8
 kubectl get pods -n tcp-lab -w
 ```
 
-HAProxy discovers new server endpoints through the headless Service DNS.
+Every gateway discovers server endpoints through the headless Service DNS.
 
 ## Server persistence
 
@@ -34,16 +34,17 @@ HAProxy discovers new server endpoints through the headless Service DNS.
    ```
 
 4. Delete the owner pod while leaving the client open.
-5. Send another message. The client retries during the short lease/check delay.
+5. Send another message. The gateway retains the client connection, discovers
+   the replacement, switches its downstream connection, and retries.
 6. Confirm an existing spare owns `tcp-server-1`, the generation increased, and
    the PostgreSQL counter continues from its previous value.
 
-The original TCP socket cannot survive a pod failure. The lab minimizes the
-visible interruption by reconnecting to the same stable logical endpoint. A
-message in flight at disconnect can be processed more than once.
+The server-side TCP socket cannot survive a pod failure, but the client-to-gateway
+socket remains open. A message in flight at the server disconnect can be
+processed more than once because the toy protocol has no request IDs.
 
-The default ownership lease is three seconds and renews every 500ms. HAProxy
-checks eligible backends every 500ms and marks one down after two failed checks.
+The default ownership lease is three seconds and renews every 500ms. Gateways
+discover eligible backends every 500ms and re-resolve immediately after an error.
 The expected application-level handoff is therefore a few seconds and does not
 wait for Kubernetes to declare the worker `NotReady`. The generation change is
 the safety boundary: database writes from the former owner no longer match the

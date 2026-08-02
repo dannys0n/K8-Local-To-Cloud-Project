@@ -1,18 +1,16 @@
 #!/usr/bin/env python3
-"""Local, read-only dashboard aggregating every HAProxy pod in tcp-lab."""
+"""Local, read-only dashboard aggregating every gateway pod in tcp-lab."""
 
 import argparse
-import csv
 import json
-import re
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
 NAMESPACE = "tcp-lab"
-LABEL = "app=haproxy"
-KEY_VALUE = re.compile(r"(?:^|\s)([a-zA-Z_]+)=([^\s]+)")
+LABEL = "app=gateway"
 LOCATIONS = ("los-angeles", "new-york", "london", "singapore", "frankfurt")
 DATA_SERVICES = {
     "postgres": ("PostgreSQL", "postgres:5432"),
@@ -44,7 +42,7 @@ PAGE = r"""<!doctype html>
 </head>
 <body>
   <h1>TCP lab connections</h1>
-  <div class="muted">All HAProxy replicas · refreshes every 2 seconds · read-only</div>
+  <div class="muted">All gateway replicas · refreshes every 2 seconds · read-only</div>
   <div id="error"></div>
   <div class="cards">
     <div class="card">Proxy replicas<div class="value" id="proxies">–</div></div>
@@ -53,9 +51,9 @@ PAGE = r"""<!doctype html>
     <div class="card">Server pool<div class="value" id="pool">–</div></div>
     <div class="card">Hot spares<div class="value" id="spares">–</div></div>
   </div>
-  <div class="panel"><h2>Per proxy</h2><table><thead><tr><th>Proxy</th><th>Pod IP</th><th>Node</th><th>Clients</th><th>Backend</th><th>Total accepted</th><th>Status</th></tr></thead><tbody id="proxyRows"></tbody></table></div>
-  <div class="panel"><h2>Active client sessions</h2><table><thead><tr><th>Proxy</th><th>Client address</th><th>Location</th><th>Logical server</th><th>Instance</th><th>Age</th><th>Protocol</th></tr></thead><tbody id="sessionRows"></tbody></table></div>
-  <div class="panel"><h2>Backend distribution</h2><table><thead><tr><th>Logical server</th><th>Location</th><th>Active instance</th><th>Node</th><th>Endpoint</th><th>Clients</th><th>Seen by proxies</th><th>Status</th></tr></thead><tbody id="backendRows"></tbody></table></div>
+  <div class="panel"><h2>Per gateway</h2><table><thead><tr><th>Gateway</th><th>Pod IP</th><th>Node</th><th>Clients</th><th>Backend</th><th>Total accepted</th><th>Status</th></tr></thead><tbody id="proxyRows"></tbody></table></div>
+  <div class="panel"><h2>Active client sessions</h2><table><thead><tr><th>Gateway</th><th>Client address</th><th>Location</th><th>Logical server</th><th>Instance</th><th>Generation</th><th>Age</th><th>Protocol</th></tr></thead><tbody id="sessionRows"></tbody></table></div>
+  <div class="panel"><h2>Backend distribution</h2><table><thead><tr><th>Logical server</th><th>Location</th><th>Active instance</th><th>Node</th><th>Endpoint</th><th>Generation</th><th>Clients</th><th>Seen by gateways</th><th>Status</th></tr></thead><tbody id="backendRows"></tbody></table></div>
   <div class="panel"><h2>Data services</h2><table><thead><tr><th>Service</th><th>Instance</th><th>Node</th><th>Pod IP</th><th>Service endpoint</th><th>Restarts</th><th>Status</th></tr></thead><tbody id="dataRows"></tbody></table></div>
   <p class="muted" id="updated"></p>
 <script>
@@ -72,8 +70,8 @@ async function refresh(){
     document.getElementById('pool').textContent=data.server_pods;
     document.getElementById('spares').textContent=data.hot_spares;
     fill('proxyRows', data.proxies, ['name','ip','node','clients','backend_sessions','total_accepted',p=>p.error?'ERROR':'OK']);
-    fill('sessionRows', data.sessions, ['proxy','src','location','server','instance','age','proto']);
-    fill('backendRows', data.backends, ['server','location','instance','node','address','current','proxies','status']);
+    fill('sessionRows', data.sessions, ['proxy','src','location','server','instance','generation','age','proto']);
+    fill('backendRows', data.backends, ['server','location','instance','node','address','generation','current','proxies','status']);
     fill('dataRows', data.data_services, ['service','instance','node','ip','endpoint','restarts','status'], 'No in-cluster data services');
     document.getElementById('updated').textContent='Updated '+new Date().toLocaleTimeString();
   } catch(error) { document.getElementById('error').textContent=error.message; }
@@ -174,79 +172,40 @@ def list_data_services() -> list[dict]:
     return sorted(result, key=lambda item: (item["service"], item["instance"]))
 
 
-def backend_location(backend: str) -> str:
-    if backend.startswith("location_"):
-        return backend.removeprefix("location_").replace("_", "-")
-    return "pending"
-
-
 def logical_server(location: str) -> str:
     return f"tcp-server-{LOCATIONS.index(location)}" if location in LOCATIONS else "pending"
-
-
-def session_location(values: dict) -> str:
-    return backend_location(values.get("be", ""))
-
-
-def session_server(values: dict, location: str) -> str:
-    return logical_server(location)
 
 
 def inspect_pod(pod: dict) -> dict:
     pod = dict(pod)
     pod.update(clients=0, backend_sessions=0, total_accepted=0, backends=[], sessions=[], error="")
-    targets = {}
-    identities = {}
     try:
-        stats = run(
-            "kubectl", "exec", "-n", NAMESPACE, pod["name"], "--",
-            "wget", "-qO-", "http://127.0.0.1:8404/stats;csv",
+        raw = run(
+            "kubectl", "get", "--raw",
+            f'/api/v1/namespaces/{NAMESPACE}/pods/{pod["name"]}:8404/proxy/stats',
         )
-        for row in csv.reader(stats.splitlines()):
-            if len(row) < 18:
-                continue
-            proxy, server = row[0].lstrip("# "), row[1]
-            address = row[73] if len(row) > 73 else ""
-            if (proxy == "tcp_servers" or proxy.startswith("location_")) and server.startswith("server"):
-                targets[f"{proxy}/{server}"] = address
-                location = backend_location(proxy)
-                if location in LOCATIONS and row[17].startswith("UP") and address:
-                    identities[address] = {
-                        "server": logical_server(location),
-                        "location": location,
-                    }
-            if proxy.startswith("client_") and server == "FRONTEND":
-                pod["clients"] += int(row[4] or 0)
-                pod["total_accepted"] += int(row[7] or 0)
-            elif (proxy == "tcp_servers" or proxy.startswith("location_")) and server == "BACKEND":
-                pod["backend_sessions"] += int(row[4] or 0)
-            elif backend_location(proxy) in LOCATIONS and server.startswith("server"):
-                location = backend_location(proxy)
-                pod["backends"].append({
-                    "proxy": pod["name"], "server": logical_server(location),
-                    "location": location,
-                    "current": int(row[4] or 0), "total": int(row[7] or 0),
-                    "status": row[17], "address": address,
-                })
-
-        sessions = run(
-            "kubectl", "exec", "-n", NAMESPACE, pod["name"], "--", "sh", "-c",
-            "printf 'show sess\\n' | nc 127.0.0.1 9999",
-        )
-        for line in sessions.splitlines():
-            values = dict(KEY_VALUE.findall(line))
-            if not values.get("fe", "").startswith("client_"):
-                continue
-            values["proxy"] = pod["name"]
-            address = targets.get(f'{values.get("be", "")}/{values.get("srv", "")}', "")
-            values["address"] = address
-            identity = identities.get(address)
-            if identity:
-                values.update(identity)
-            else:
-                values["location"] = session_location(values)
-                values["server"] = session_server(values, values["location"])
-            pod["sessions"].append(values)
+        stats = json.loads(raw)
+        pod["total_accepted"] = int(stats.get("accepted", 0))
+        now = datetime.now(timezone.utc)
+        for item in stats.get("sessions", []):
+            started = datetime.fromisoformat(item["connected_at"].replace("Z", "+00:00"))
+            age = max(0, int((now - started).total_seconds()))
+            pod["sessions"].append({
+                "proxy": pod["name"], "src": item.get("client", ""),
+                "location": item.get("location", ""), "server": item.get("server", ""),
+                "instance": item.get("instance", ""), "address": item.get("address", ""),
+                "generation": item.get("generation", 0), "age": f"{age}s",
+                "proto": item.get("protocol", "TCP"),
+            })
+        pod["clients"] = len(pod["sessions"])
+        pod["backend_sessions"] = len(pod["sessions"])
+        for item in stats.get("routes", []):
+            pod["backends"].append({
+                "proxy": pod["name"], "server": item.get("server", ""),
+                "location": item.get("location", ""), "instance": item.get("instance", ""),
+                "address": item.get("address", ""), "generation": item.get("generation", 0),
+                "status": "UP",
+            })
     except Exception as error:
         pod["error"] = str(error)
     return pod
@@ -261,22 +220,23 @@ def snapshot() -> dict:
     unique_backends = {
         logical_server(location): {
             "server": logical_server(location), "location": location,
-            "address": "", "instance": "", "node": "", "current": 0,
+            "address": "", "instance": "", "node": "", "generation": 0, "current": 0,
             "proxies": set(),
         }
         for location in LOCATIONS
     }
     for backend in (item for proxy in proxies for item in proxy["backends"]):
         current = unique_backends[backend["server"]]
-        if backend["status"].startswith("UP"):
+        if backend["status"] == "UP" and backend["generation"] >= current["generation"]:
+            if backend["generation"] > current["generation"]:
+                current["proxies"].clear()
+            current["generation"] = backend["generation"]
             current["proxies"].add(backend["proxy"])
             current["address"] = backend["address"]
             server_pod = server_pods.get(backend["address"].split(":")[0], {})
-            current["instance"] = server_pod.get("name", "")
+            current["instance"] = backend["instance"] or server_pod.get("name", "")
             current["node"] = server_pod.get("node", "")
     for session in (item for proxy in proxies for item in proxy["sessions"]):
-        server_pod = server_pods.get(session.get("address", "").split(":")[0], {})
-        session["instance"] = server_pod.get("name", "")
         if session["server"] in unique_backends:
             unique_backends[session["server"]]["current"] += 1
     backends = sorted(unique_backends.values(), key=lambda item: item["server"])
@@ -290,7 +250,7 @@ def snapshot() -> dict:
         "total_clients": sum(p["clients"] for p in proxies),
         "total_backends": sum(p["backend_sessions"] for p in proxies),
         "server_pods": len(server_pods),
-        "hot_spares": max(0, len(server_pods) - sum(b["status"] != "DOWN" for b in backends)),
+        "hot_spares": max(0, len(server_pods) - len({b["instance"] for b in backends if b["instance"]})),
         "data_services": data_services,
         "sessions": [session for p in proxies for session in p["sessions"]],
         "backends": backends,
@@ -326,7 +286,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Aggregate live HAProxy connections")
+    parser = argparse.ArgumentParser(description="Aggregate live gateway connections")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8080)
     args = parser.parse_args()

@@ -3,9 +3,12 @@ kind: Kustomization
 resources:
   - ../../base
 patches:
-  - path: haproxy-loadbalancer-patch.yaml
-  - path: haproxy-replicas-patch.yaml
+  - path: gateway-loadbalancer-patch.yaml
+  - path: gateway-replicas-patch.yaml
 images:
   - name: simple-tcp-server
     newName: 000000000000.dkr.ecr.us-west-2.amazonaws.com/simple-tcp-server
+    newTag: latest
+  - name: tcp-gateway
+    newName: 000000000000.dkr.ecr.us-west-2.amazonaws.com/tcp-gateway
     newTag: latest

@@ -4,12 +4,7 @@ resources:
   - namespace.yaml
   - server-headless-service.yaml
   - server-deployment.yaml
-  - haproxy-deployment.yaml
-  - haproxy-service.yaml
-  - haproxy-stats-service.yaml
+  - gateway-deployment.yaml
+  - gateway-service.yaml
+  - gateway-stats-service.yaml
   - pod-disruption-budgets.yaml
-configMapGenerator:
-  - name: haproxy-config
-    namespace: tcp-lab
-    files:
-      - haproxy.cfg

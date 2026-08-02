@@ -7,7 +7,7 @@ ROOT = Path(__file__).resolve().parents[1]
 MANIFESTS = tuple((ROOT / "deploy").rglob("*.yaml"))
 LAB_WORKLOADS = (
     ROOT / "deploy/base/server-deployment.yaml",
-    ROOT / "deploy/base/haproxy-deployment.yaml",
+    ROOT / "deploy/base/gateway-deployment.yaml",
     ROOT / "deploy/overlays/kind/redis-deployment.yaml",
     ROOT / "deploy/overlays/kind/postgres-statefulset.yaml",
 )

@@ -8,5 +8,5 @@ resources:
   - redis-service.yaml
   - redis-deployment.yaml
 patches:
-  - path: haproxy-nodeport-patch.yaml
+  - path: gateway-nodeport-patch.yaml
   - path: stats-nodeport-patch.yaml
