@@ -14,6 +14,10 @@ NAMESPACE = "tcp-lab"
 LABEL = "app=haproxy"
 KEY_VALUE = re.compile(r"(?:^|\s)([a-zA-Z_]+)=([^\s]+)")
 LOCATIONS = ("los-angeles", "new-york", "london", "singapore", "frankfurt")
+DATA_SERVICES = {
+    "postgres": ("PostgreSQL", "postgres:5432"),
+    "redis": ("Redis", "redis:6379"),
+}
 
 
 PAGE = r"""<!doctype html>
@@ -50,12 +54,13 @@ PAGE = r"""<!doctype html>
     <div class="card">Hot spares<div class="value" id="spares">–</div></div>
   </div>
   <div class="panel"><h2>Per proxy</h2><table><thead><tr><th>Proxy</th><th>Pod IP</th><th>Node</th><th>Clients</th><th>Backend</th><th>Total accepted</th><th>Status</th></tr></thead><tbody id="proxyRows"></tbody></table></div>
-  <div class="panel"><h2>Active client sessions</h2><table><thead><tr><th>Proxy</th><th>Client address</th><th>Location</th><th>Server</th><th>Instance</th><th>Age</th><th>Protocol</th></tr></thead><tbody id="sessionRows"></tbody></table></div>
-  <div class="panel"><h2>Backend distribution</h2><table><thead><tr><th>Server</th><th>Location</th><th>Active instance</th><th>Endpoint</th><th>Clients</th><th>Seen by proxies</th><th>Status</th></tr></thead><tbody id="backendRows"></tbody></table></div>
+  <div class="panel"><h2>Active client sessions</h2><table><thead><tr><th>Proxy</th><th>Client address</th><th>Location</th><th>Logical server</th><th>Instance</th><th>Age</th><th>Protocol</th></tr></thead><tbody id="sessionRows"></tbody></table></div>
+  <div class="panel"><h2>Backend distribution</h2><table><thead><tr><th>Logical server</th><th>Location</th><th>Active instance</th><th>Node</th><th>Endpoint</th><th>Clients</th><th>Seen by proxies</th><th>Status</th></tr></thead><tbody id="backendRows"></tbody></table></div>
+  <div class="panel"><h2>Data services</h2><table><thead><tr><th>Service</th><th>Instance</th><th>Node</th><th>Pod IP</th><th>Service endpoint</th><th>Restarts</th><th>Status</th></tr></thead><tbody id="dataRows"></tbody></table></div>
   <p class="muted" id="updated"></p>
 <script>
 const cell = (row, value, cls='') => { const td=document.createElement('td'); td.textContent=value ?? '–'; if(cls)td.className=cls; row.appendChild(td); };
-const fill = (id, rows, fields) => { const body=document.getElementById(id); body.replaceChildren(); for(const item of rows){ const tr=document.createElement('tr'); for(const f of fields) cell(tr, typeof f==='function'?f(item):item[f]); body.appendChild(tr); } if(!rows.length){ const tr=document.createElement('tr'); const td=document.createElement('td'); td.colSpan=fields.length; td.className='muted'; td.textContent='No active connections'; tr.appendChild(td); body.appendChild(tr); } };
+const fill = (id, rows, fields, empty='No active connections') => { const body=document.getElementById(id); body.replaceChildren(); for(const item of rows){ const tr=document.createElement('tr'); for(const f of fields) cell(tr, typeof f==='function'?f(item):item[f]); body.appendChild(tr); } if(!rows.length){ const tr=document.createElement('tr'); const td=document.createElement('td'); td.colSpan=fields.length; td.className='muted'; td.textContent=empty; tr.appendChild(td); body.appendChild(tr); } };
 async function refresh(){
   try {
     const response=await fetch('/api/connections', {cache:'no-store'}); const data=await response.json();
@@ -68,7 +73,8 @@ async function refresh(){
     document.getElementById('spares').textContent=data.hot_spares;
     fill('proxyRows', data.proxies, ['name','ip','node','clients','backend_sessions','total_accepted',p=>p.error?'ERROR':'OK']);
     fill('sessionRows', data.sessions, ['proxy','src','location','server','instance','age','proto']);
-    fill('backendRows', data.backends, ['server','location','instance','address','current','proxies','status']);
+    fill('backendRows', data.backends, ['server','location','instance','node','address','current','proxies','status']);
+    fill('dataRows', data.data_services, ['service','instance','node','ip','endpoint','restarts','status'], 'No in-cluster data services');
     document.getElementById('updated').textContent='Updated '+new Date().toLocaleTimeString();
   } catch(error) { document.getElementById('error').textContent=error.message; }
 }
@@ -110,16 +116,62 @@ def list_pods() -> list[dict]:
     return result
 
 
-def list_server_pods() -> dict[str, str]:
+def list_server_pods() -> dict[str, dict[str, str]]:
     raw = run(
         "kubectl", "get", "pods", "-n", NAMESPACE, "-l", "app=tcp-server",
         "-o", "json",
     )
     return {
-        item.get("status", {}).get("podIP", ""): item.get("metadata", {}).get("name", "")
+        item.get("status", {}).get("podIP", ""): {
+            "name": item.get("metadata", {}).get("name", ""),
+            "node": item.get("spec", {}).get("nodeName", ""),
+        }
         for item in json.loads(raw).get("items", [])
         if item.get("status", {}).get("podIP")
     }
+
+
+def list_data_services() -> list[dict]:
+    raw = run(
+        "kubectl", "get", "pods", "-n", NAMESPACE,
+        "-l", "app in (postgres,redis)", "-o", "json",
+    )
+    result = []
+    for item in json.loads(raw).get("items", []):
+        metadata = item.get("metadata", {})
+        spec = item.get("spec", {})
+        status = item.get("status", {})
+        labels = metadata.get("labels", {})
+        app = labels.get("app", "")
+        if app not in DATA_SERVICES:
+            continue
+        ready = any(
+            condition.get("type") == "Ready" and condition.get("status") == "True"
+            for condition in status.get("conditions", [])
+        )
+        phase = status.get("phase", "Unknown")
+        if metadata.get("deletionTimestamp"):
+            health = "TERMINATING"
+        elif phase == "Running" and ready:
+            health = "UP"
+        elif phase == "Running":
+            health = "NOT READY"
+        else:
+            health = phase.upper()
+        service, endpoint = DATA_SERVICES[app]
+        result.append({
+            "service": service,
+            "instance": metadata.get("name", ""),
+            "node": spec.get("nodeName", ""),
+            "ip": status.get("podIP", ""),
+            "endpoint": endpoint,
+            "restarts": sum(
+                container.get("restartCount", 0)
+                for container in status.get("containerStatuses", [])
+            ),
+            "status": health,
+        })
+    return sorted(result, key=lambda item: (item["service"], item["instance"]))
 
 
 def backend_location(backend: str) -> str:
@@ -203,12 +255,13 @@ def inspect_pod(pod: dict) -> dict:
 def snapshot() -> dict:
     pods = list_pods()
     server_pods = list_server_pods()
+    data_services = list_data_services()
     with ThreadPoolExecutor(max_workers=max(1, len(pods))) as pool:
         proxies = list(pool.map(inspect_pod, pods))
     unique_backends = {
         logical_server(location): {
             "server": logical_server(location), "location": location,
-            "address": "", "instance": "", "current": 0,
+            "address": "", "instance": "", "node": "", "current": 0,
             "proxies": set(),
         }
         for location in LOCATIONS
@@ -218,9 +271,12 @@ def snapshot() -> dict:
         if backend["status"].startswith("UP"):
             current["proxies"].add(backend["proxy"])
             current["address"] = backend["address"]
-            current["instance"] = server_pods.get(backend["address"].split(":")[0], "")
+            server_pod = server_pods.get(backend["address"].split(":")[0], {})
+            current["instance"] = server_pod.get("name", "")
+            current["node"] = server_pod.get("node", "")
     for session in (item for proxy in proxies for item in proxy["sessions"]):
-        session["instance"] = server_pods.get(session.get("address", "").split(":")[0], "")
+        server_pod = server_pods.get(session.get("address", "").split(":")[0], {})
+        session["instance"] = server_pod.get("name", "")
         if session["server"] in unique_backends:
             unique_backends[session["server"]]["current"] += 1
     backends = sorted(unique_backends.values(), key=lambda item: item["server"])
@@ -235,6 +291,7 @@ def snapshot() -> dict:
         "total_backends": sum(p["backend_sessions"] for p in proxies),
         "server_pods": len(server_pods),
         "hot_spares": max(0, len(server_pods) - sum(b["status"] != "DOWN" for b in backends)),
+        "data_services": data_services,
         "sessions": [session for p in proxies for session in p["sessions"]],
         "backends": backends,
         "errors": [f'{p["name"]}: {p["error"]}' for p in proxies if p["error"]],

@@ -4,7 +4,7 @@ metadata:
   name: haproxy
   namespace: tcp-lab
 spec:
-  replicas: 2
+  replicas: 3
   selector:
     matchLabels:
       app: haproxy
@@ -44,15 +44,22 @@ spec:
               containerPort: 8404
               protocol: TCP
           readinessProbe:
-            tcpSocket:
-              port: tcp
+            httpGet:
+              path: /stats
+              port: stats
             initialDelaySeconds: 1
-            periodSeconds: 2
+            periodSeconds: 1
+            timeoutSeconds: 1
+            failureThreshold: 2
           livenessProbe:
-            tcpSocket:
-              port: tcp
-            initialDelaySeconds: 5
-            periodSeconds: 10
+            httpGet:
+              path: /stats
+              port: stats
+            initialDelaySeconds: 3
+            periodSeconds: 1
+            timeoutSeconds: 1
+            failureThreshold: 3
+            terminationGracePeriodSeconds: 2
           resources:
             requests:
               cpu: 25m

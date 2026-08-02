@@ -4,7 +4,7 @@ metadata:
   name: tcp-server
   namespace: tcp-lab
 spec:
-  replicas: 7
+  replicas: 10
   strategy:
     rollingUpdate:
       maxUnavailable: 0
@@ -49,6 +49,10 @@ spec:
                   fieldPath: metadata.uid
             - name: LISTEN_ADDR
               value: ":7000"
+            - name: ASSIGNMENT_LEASE_DURATION
+              value: "3s"
+            - name: ASSIGNMENT_RENEW_INTERVAL
+              value: "500ms"
             - name: POSTGRES_DSN
               valueFrom:
                 secretKeyRef:

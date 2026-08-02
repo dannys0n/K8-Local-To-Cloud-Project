@@ -4,7 +4,7 @@ metadata:
   name: haproxy
   namespace: tcp-lab
 spec:
-  minAvailable: 1
+  minAvailable: 2
   selector:
     matchLabels:
       app: haproxy
@@ -15,7 +15,7 @@ metadata:
   name: tcp-server
   namespace: tcp-lab
 spec:
-  minAvailable: 6
+  minAvailable: 9
   selector:
     matchLabels:
       app: tcp-server

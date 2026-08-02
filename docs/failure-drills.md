@@ -16,7 +16,7 @@ An existing TCP connection through the deleted proxy will close. A new client co
 ## Independent scaling
 
 ```bash
-kubectl scale deployment/haproxy -n tcp-lab --replicas=3
+kubectl scale deployment/haproxy -n tcp-lab --replicas=4
 kubectl scale deployment/tcp-server -n tcp-lab --replicas=8
 kubectl get pods -n tcp-lab -w
 ```
@@ -42,6 +42,13 @@ The original TCP socket cannot survive a pod failure. The lab minimizes the
 visible interruption by reconnecting to the same stable logical endpoint. A
 message in flight at disconnect can be processed more than once.
 
+The default ownership lease is three seconds and renews every 500ms. HAProxy
+checks eligible backends every 500ms and marks one down after two failed checks.
+The expected application-level handoff is therefore a few seconds and does not
+wait for Kubernetes to declare the worker `NotReady`. The generation change is
+the safety boundary: database writes from the former owner no longer match the
+authoritative assignment row.
+
 ## Worker failure
 
 Find which worker hosts a proxy, then stop its kind node container:
@@ -64,8 +71,10 @@ the database unavailable until that worker returns.
 For an abrupt hardware-style failure, use `docker kill` instead of draining the
 node. Kubernetes normally takes about 40 seconds to mark a silent node unhealthy;
 the lab workloads then tolerate `NotReady` or `Unreachable` for another 15
-seconds before replacement. This short window is for failure testing. The EKS
-value should be chosen to match production network stability and recovery goals.
+seconds before pod replacement. That slower loop replenishes the five-pod spare
+pool; it is not the location failover mechanism. This short eviction window is
+for failure testing. The EKS value should be chosen to match production network
+stability and recovery goals.
 
 ## Database restarts
 

@@ -11,10 +11,18 @@ python tools/dashboard.py
 Open `http://127.0.0.1:8080`. The page discovers all HAProxy pods, combines
 their current frontend and backend counters, and lists active sessions reported
 by HAProxy's Runtime API. Backend rows are one per logical location and show the
-currently assigned physical server pod, while the summary shows available hot
-spares. It uses the current `kubectl` context and binds only
+currently assigned physical server pod and worker node, while the summary shows
+available hot spares. `Logical server` is the durable location identity such as
+`tcp-server-1`; `Active instance` is the replaceable Kubernetes pod currently
+holding that identity. It uses the current `kubectl` context and binds only
 to local loopback by default. The Runtime API also binds only to loopback inside
 each HAProxy pod and is not exposed by a Kubernetes Service.
+
+The Data services table uses Kubernetes pod status to show the in-cluster
+PostgreSQL and Redis instances, their worker placement, pod IPs, stable Service
+endpoints, restart counts, and readiness. It does not inspect database contents
+or credentials. Managed EKS databases run outside the cluster and therefore do
+not appear in this local infrastructure table.
 
 The client address represents the network connection seen by HAProxy, not an
 application user identity. This lab's line protocol has no client identity.

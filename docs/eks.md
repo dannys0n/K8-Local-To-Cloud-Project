@@ -33,6 +33,12 @@ fence stale owners with a monotonically increasing generation. A larger or
 dynamic location catalog would require a real routing layer rather than fixed
 HAProxy rules.
 
+The NLB registers proxy pod IPs directly and performs TCP health checks on the
+traffic port every ten seconds, requiring two successes or failures to change
+target health. Kubernetes uses separate one-second HTTP checks against each
+proxy's local statistics endpoint for faster in-cluster readiness and liveness
+detection. Neither health mechanism changes server ownership.
+
 All worker nodes are general capacity. Zone and hostname spreading are soft
 preferences: replicas spread during normal operation but may consolidate onto
 one surviving worker when necessary.

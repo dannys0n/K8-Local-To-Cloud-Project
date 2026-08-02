@@ -20,7 +20,10 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-const leaseSeconds = 6
+const (
+	defaultLeaseDuration = 3 * time.Second
+	defaultRenewInterval = 500 * time.Millisecond
+)
 
 var locations = []struct {
 	serverID string
@@ -41,12 +44,14 @@ type assignment struct {
 }
 
 type server struct {
-	instanceID string
-	podName    string
-	db         *sql.DB
-	redis      *redis.Client
-	mu         sync.RWMutex
-	assignment *assignment
+	instanceID    string
+	podName       string
+	db            *sql.DB
+	redis         *redis.Client
+	leaseDuration time.Duration
+	renewInterval time.Duration
+	mu            sync.RWMutex
+	assignment    *assignment
 }
 
 type response struct {
@@ -74,7 +79,25 @@ func main() {
 	defer db.Close()
 	defer cache.Close()
 
-	s := &server{instanceID: instanceID, podName: podName, db: db, redis: cache}
+	leaseDuration, err := durationFromEnv("ASSIGNMENT_LEASE_DURATION", defaultLeaseDuration)
+	if err != nil {
+		logger.Error("invalid assignment lease duration", "error", err)
+		os.Exit(1)
+	}
+	renewInterval, err := durationFromEnv("ASSIGNMENT_RENEW_INTERVAL", defaultRenewInterval)
+	if err != nil {
+		logger.Error("invalid assignment renew interval", "error", err)
+		os.Exit(1)
+	}
+	if leaseDuration < 3*renewInterval {
+		logger.Error("assignment lease must cover at least three renew intervals", "lease", leaseDuration, "renew_interval", renewInterval)
+		os.Exit(1)
+	}
+
+	s := &server{
+		instanceID: instanceID, podName: podName, db: db, redis: cache,
+		leaseDuration: leaseDuration, renewInterval: renewInterval,
+	}
 	go s.manageAssignment(ctx, logger)
 	go s.heartbeat(ctx, logger)
 
@@ -85,7 +108,8 @@ func main() {
 		os.Exit(1)
 	}
 	defer listener.Close()
-	logger.Info("pool server ready", "instance", podName, "address", listenAddr)
+	logger.Info("pool server ready", "instance", podName, "address", listenAddr,
+		"assignment_lease", leaseDuration, "assignment_renew_interval", renewInterval)
 
 	go func() {
 		<-ctx.Done()
@@ -202,7 +226,7 @@ func createSchema(ctx context.Context, db *sql.DB) error {
 }
 
 func (s *server) manageAssignment(ctx context.Context, logger *slog.Logger) {
-	ticker := time.NewTicker(time.Second)
+	ticker := time.NewTicker(s.renewInterval)
 	defer ticker.Stop()
 	for {
 		current := s.currentAssignment()
@@ -251,7 +275,7 @@ func (s *server) claim(ctx context.Context) (*assignment, error) {
 		SELECT c.server_id, s.location, c.generation, c.lease_until
 		FROM claimed c JOIN tcp_server_state s USING (server_id)`
 	claimed := &assignment{}
-	err := s.db.QueryRowContext(ctx, query, s.instanceID, leaseSeconds).Scan(
+	err := s.db.QueryRowContext(ctx, query, s.instanceID, s.leaseDuration.Seconds()).Scan(
 		&claimed.ServerID, &claimed.Location, &claimed.Generation, &claimed.LeaseUntil,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -267,7 +291,7 @@ func (s *server) renew(ctx context.Context, current *assignment) (*assignment, e
 		WHERE server_id = $1 AND owner_instance_id = $2 AND generation = $3
 		RETURNING lease_until`
 	renewed := *current
-	err := s.db.QueryRowContext(ctx, query, current.ServerID, s.instanceID, current.Generation, leaseSeconds).Scan(&renewed.LeaseUntil)
+	err := s.db.QueryRowContext(ctx, query, current.ServerID, s.instanceID, current.Generation, s.leaseDuration.Seconds()).Scan(&renewed.LeaseUntil)
 	return &renewed, err
 }
 
@@ -465,6 +489,18 @@ func envOrDefault(name, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func durationFromEnv(name string, fallback time.Duration) (time.Duration, error) {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback, nil
+	}
+	duration, err := time.ParseDuration(value)
+	if err != nil || duration <= 0 {
+		return 0, fmt.Errorf("%s must be a positive Go duration: %q", name, value)
+	}
+	return duration, nil
 }
 
 func hostname() string {

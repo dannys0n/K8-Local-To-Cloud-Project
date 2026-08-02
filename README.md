@@ -12,9 +12,9 @@ adding a coordinator, operator, or custom proxy.
 
 ## What runs
 
-- **HAProxy:** two replicas, raw TCP mode, live statistics page.
-- **TCP server:** seven interchangeable Deployment replicas: five active location
-  owners and two ready hot spares.
+- **HAProxy:** three replicas, raw TCP mode, live statistics page.
+- **TCP server:** ten interchangeable Deployment replicas: five active location
+  owners and five ready hot spares.
 - **PostgreSQL:** authoritative location identity, counters, leases, and ownership
   generations; one PVC in kind.
 - **Redis:** ephemeral server-presence and counter-cache keys.
@@ -65,7 +65,7 @@ The location endpoints are deliberately simple and fixed for this lab:
 The client sends a small `@location` handshake that HAProxy uses to select the
 stable backend, then reconnects with the same handshake after a disconnect.
 The logical server identity and counter remain in PostgreSQL when a pod is
-replaced. An expired six-second lease is claimed by an already-running spare;
+replaced. An expired three-second lease is claimed by an already-running spare;
 the generation increases to fence the old owner. Redis presence keys expire and
 repopulate automatically. A request
 whose response is lost during a disconnect may be retried, so this toy protocol
@@ -83,7 +83,7 @@ While the client is running, change locations or force a fresh connection:
 
 `/location` closes the existing socket and connects to the selected stable
 server. `/reconnect` keeps the location but creates a new connection, which can
-land on either HAProxy replica. Use the aggregate dashboard to see the proxy and
+land on any HAProxy replica. Use the aggregate dashboard to see the proxy and
 backend change.
 
 Open the live HAProxy page:
@@ -150,7 +150,7 @@ A single persistent client connection stays on one HAProxy pod and one selected 
 kubectl get pods,svc,pvc,pdb -n tcp-lab -o wide
 kubectl logs -n tcp-lab deployment/haproxy
 kubectl logs -n tcp-lab deployment/tcp-server
-kubectl scale deployment/haproxy -n tcp-lab --replicas=3
+kubectl scale deployment/haproxy -n tcp-lab --replicas=4
 kubectl scale deployment/tcp-server -n tcp-lab --replicas=8
 ```
 
@@ -172,3 +172,19 @@ preference, so healthy replicas spread when capacity exists but may all run on
 one surviving worker. The kind PostgreSQL PVC is the local exception: durable
 storage cannot follow its pod to another node without a shared storage class.
 The EKS overlay expects managed PostgreSQL outside the worker pool.
+
+Kubernetes restores failed pods and nodes, but location recovery does not wait
+for node eviction. Ready spare pods poll PostgreSQL-backed leases every 500ms;
+after a three-second lease expires, one spare atomically claims the location and
+increments its fencing generation. These lab defaults are configurable through
+`ASSIGNMENT_LEASE_DURATION` and `ASSIGNMENT_RENEW_INTERVAL`; production values
+must be validated against database and network latency. The replacement
+application remains responsible for resumable sessions and application-specific
+durability semantics.
+
+Proxy health is independent from server ownership. Kubernetes readiness and
+liveness checks remove or restart an unhealthy proxy, and the EKS NLB checks
+proxy targets directly. These signals must not claim or rebalance servers.
+Future exclusive proxy-to-server ownership must use its own PostgreSQL-backed
+lease and fencing generation so a replacement proxy can claim only an expired
+assignment atomically.
