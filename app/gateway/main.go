@@ -24,23 +24,23 @@ import (
 const statsPage = `<!doctype html><html><head><meta charset="utf-8"><title>Gateway stats</title><style>body{background:#0d1117;color:#e6edf3;font:14px monospace;margin:2rem}pre{background:#161b22;border:1px solid #30363d;padding:1rem;overflow:auto}</style></head><body><h1>Gateway replica</h1><p>Read-only live state; refreshes every two seconds.</p><pre id="data">loading</pre><script>async function r(){let x=await fetch('/stats',{cache:'no-store'});document.querySelector('#data').textContent=JSON.stringify(await x.json(),null,2)}r();setInterval(r,2000)</script></body></html>`
 
 type backend struct {
-	Server     string                `json:"server"`
-	Location   string                `json:"location"`
-	Latitude   float64               `json:"latitude"`
-	Longitude  float64               `json:"longitude"`
-	Instance   string                `json:"instance"`
-	Address    string                `json:"address"`
-	Generation int64                 `json:"generation"`
+	Server     string  `json:"server"`
+	Location   string  `json:"location"`
+	Latitude   float64 `json:"latitude"`
+	Longitude  float64 `json:"longitude"`
+	Instance   string  `json:"instance"`
+	Address    string  `json:"address"`
+	Generation int64   `json:"generation"`
 }
 
 type discoveryResponse struct {
-	Status     string                `json:"status"`
-	Server     string                `json:"server"`
-	Location   string                `json:"location"`
-	Latitude   float64               `json:"latitude"`
-	Longitude  float64               `json:"longitude"`
-	Instance   string                `json:"instance"`
-	Generation int64                 `json:"generation"`
+	Status     string  `json:"status"`
+	Server     string  `json:"server"`
+	Location   string  `json:"location"`
+	Latitude   float64 `json:"latitude"`
+	Longitude  float64 `json:"longitude"`
+	Instance   string  `json:"instance"`
+	Generation int64   `json:"generation"`
 }
 
 type publicLocation struct {
@@ -217,8 +217,7 @@ func (g *gateway) handleClient(ctx context.Context, client net.Conn) {
 				writeJSONError(clientWriter, err.Error())
 				continue
 			}
-			g.discover(ctx)
-			location, err := g.nearestLocation(latitude, longitude)
+			location, err := g.locationFor(ctx, latitude, longitude)
 			if err != nil {
 				writeJSONError(clientWriter, err.Error())
 				continue
@@ -253,8 +252,7 @@ func (g *gateway) handleClient(ctx context.Context, client net.Conn) {
 				writeJSONError(clientWriter, err.Error())
 				continue
 			}
-			g.discover(ctx)
-			location, err := g.nearestLocation(latitude, longitude)
+			location, err := g.locationFor(ctx, latitude, longitude)
 			if err != nil {
 				writeJSONError(clientWriter, err.Error())
 				continue
@@ -279,7 +277,6 @@ func (g *gateway) handleClient(ctx context.Context, client net.Conn) {
 			continue
 		}
 		if message == "@locations" {
-			g.discover(ctx)
 			body, _ := json.Marshal(map[string]any{"gateway": g.instance, "locations": g.publicLocations()})
 			if _, err := clientWriter.Write(append(body, '\n')); err != nil || clientWriter.Flush() != nil {
 				return
@@ -363,7 +360,6 @@ func (g *gateway) openRoute(ctx context.Context, requested string, previous *bac
 	}
 	deadline := time.Now().Add(g.routeTimeout)
 	for {
-		g.discover(ctx)
 		candidates := g.routeCandidates(requested, previous)
 		for _, candidate := range candidates {
 			connection, hello, err := g.connectBackend(candidate)
@@ -375,6 +371,7 @@ func (g *gateway) openRoute(ctx context.Context, requested string, previous *bac
 		if time.Now().After(deadline) || ctx.Err() != nil {
 			return nil, nil, fmt.Errorf("location %q unavailable", requested)
 		}
+		g.discover(ctx)
 		time.Sleep(100 * time.Millisecond)
 	}
 }
@@ -549,6 +546,15 @@ func (g *gateway) nearestLocation(latitude, longitude float64) (string, error) {
 		}
 	}
 	return bestLocation, nil
+}
+
+func (g *gateway) locationFor(ctx context.Context, latitude, longitude float64) (string, error) {
+	location, err := g.nearestLocation(latitude, longitude)
+	if err == nil {
+		return location, nil
+	}
+	g.discover(ctx)
+	return g.nearestLocation(latitude, longitude)
 }
 
 func parsePosition(message string) (float64, float64, bool, error) {

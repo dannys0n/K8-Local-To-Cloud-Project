@@ -12,10 +12,10 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
-	"strconv"
 	"syscall"
 	"time"
 
@@ -46,12 +46,12 @@ var locations = []locationDefinition{
 }
 
 type assignment struct {
-	ServerID    string
-	Location    string
-	Latitude    float64
-	Longitude   float64
-	Generation  int64
-	LeaseUntil  time.Time
+	ServerID   string
+	Location   string
+	Latitude   float64
+	Longitude  float64
+	Generation int64
+	LeaseUntil time.Time
 }
 
 type server struct {
@@ -72,16 +72,16 @@ type server struct {
 }
 
 type response struct {
-	Server     string                `json:"server"`
-	Location   string                `json:"location"`
-	Latitude   float64               `json:"latitude"`
-	Longitude  float64               `json:"longitude"`
-	Instance   string                `json:"instance"`
-	Generation int64                 `json:"generation"`
-	Counter    uint64                `json:"counter"`
-	Message    string                `json:"message"`
-	Time       string                `json:"time"`
-	Tick       uint64                `json:"tick"`
+	Server          string  `json:"server"`
+	Location        string  `json:"location"`
+	Latitude        float64 `json:"latitude"`
+	Longitude       float64 `json:"longitude"`
+	Instance        string  `json:"instance"`
+	Generation      int64   `json:"generation"`
+	Counter         uint64  `json:"counter"`
+	Message         string  `json:"message"`
+	Time            string  `json:"time"`
+	Tick            uint64  `json:"tick"`
 	ClientUID       string  `json:"client_uid,omitempty"`
 	OperationID     string  `json:"operation_id,omitempty"`
 	ClientLatitude  float64 `json:"client_latitude"`
@@ -103,11 +103,11 @@ type durableCommand struct {
 }
 
 type durableResult struct {
-	counter uint64
-	latitude float64
+	counter   uint64
+	latitude  float64
 	longitude float64
-	tick    uint64
-	err     error
+	tick      uint64
+	err       error
 }
 
 type inputIntent struct {
@@ -123,6 +123,7 @@ type inputIntent struct {
 
 type inputCommand struct {
 	intent inputIntent
+	claim  bool
 	result chan inputResult
 }
 
@@ -132,28 +133,20 @@ type inputResult struct {
 	counter   uint64
 	sequence  uint64
 	tick      uint64
+	claim     bool
 	err       error
 	reroute   string
 }
 
 type entityState struct {
-	latitude  float64
-	longitude float64
-	counter   uint64
-	sequence  uint64
-	axisX     float64
-	axisY     float64
+	latitude      float64
+	longitude     float64
+	counter       uint64
+	sequence      uint64
+	axisX         float64
+	axisY         float64
 	lastInputTick uint64
-	dirty     bool
-	reroute   string
-}
-
-type entitySnapshot struct {
-	ServerID   string  `json:"server"`
-	Generation int64   `json:"generation"`
-	Latitude   float64 `json:"latitude"`
-	Longitude  float64 `json:"longitude"`
-	Sequence   uint64  `json:"sequence"`
+	reroute       string
 }
 
 func main() {
@@ -195,11 +188,12 @@ func main() {
 		instanceID: instanceID, podName: podName, db: db, redis: cache,
 		leaseDuration: leaseDuration, renewInterval: renewInterval, tickInterval: tickInterval,
 		durable: make(chan durableCommand, 4096),
-		inputs: make(chan inputCommand, 8192), entities: make(map[string]*entityState),
+		inputs:  make(chan inputCommand, 8192), entities: make(map[string]*entityState),
 	}
 	go s.manageAssignment(ctx, logger)
 	go s.heartbeat(ctx, logger)
 	go s.runTicks(ctx)
+	go s.runDurableCommands(ctx)
 
 	listenAddr := envOrDefault("LISTEN_ADDR", ":7000")
 	listener, err := net.Listen("tcp", listenAddr)
@@ -250,11 +244,20 @@ func (s *server) runTicks(ctx context.Context) {
 			return
 		case <-ticker.C:
 			currentTick := s.tick.Add(1)
-			s.commitDurableCommands(ctx, currentTick)
-			s.applyTransientInputs(ctx, currentTick)
-			if currentTick%2 == 0 {
-				s.snapshotEntities(ctx)
-			}
+			s.applyTransientInputs(currentTick)
+		}
+	}
+}
+
+func (s *server) runDurableCommands(ctx context.Context) {
+	ticker := time.NewTicker(s.tickInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.commitDurableCommands(ctx, s.tick.Load())
 		}
 	}
 }
@@ -363,7 +366,7 @@ func (s *server) finishDurableBatch(batch []durableCommand, counters []uint64, l
 	}
 }
 
-func (s *server) applyTransientInputs(ctx context.Context, tick uint64) {
+func (s *server) applyTransientInputs(tick uint64) {
 	commands := make([]inputCommand, 0, 256)
 	for len(commands) < 4096 {
 		select {
@@ -375,22 +378,12 @@ func (s *server) applyTransientInputs(ctx context.Context, tick uint64) {
 	}
 
 drained:
-	failed := make(map[int]error)
-	for index, command := range commands {
-		if err := s.ensureEntity(ctx, command.intent.ClientUID); err != nil {
-			failed[index] = err
-		}
-	}
 	s.entityMu.Lock()
-	for index, command := range commands {
-		if failed[index] != nil {
-			continue
-		}
+	for _, command := range commands {
 		entity := s.entities[command.intent.ClientUID]
 		if entity != nil && (command.intent.Sequence > entity.sequence || (command.intent.Resume && command.intent.Sequence >= entity.sequence)) {
 			entity.sequence = command.intent.Sequence
 			entity.lastInputTick = tick
-			entity.dirty = true
 			if command.intent.Teleport {
 				entity.latitude = command.intent.Latitude
 				entity.longitude = command.intent.Longitude
@@ -416,9 +409,6 @@ drained:
 		}
 		entity.latitude = math.Max(-90, math.Min(90, entity.latitude+entity.axisY*distance))
 		entity.longitude += entity.axisX * distance
-		if entity.axisX != 0 || entity.axisY != 0 {
-			entity.dirty = true
-		}
 		if entity.longitude > 180 {
 			entity.longitude -= 360
 		} else if entity.longitude < -180 {
@@ -434,17 +424,12 @@ drained:
 					entity.reroute = destination
 					entity.axisX = 0
 					entity.axisY = 0
-					entity.dirty = true
 				}
 			}
 		}
 	}
 	handoffs := make(map[string]string)
-	for index, command := range commands {
-		if err := failed[index]; err != nil {
-			command.result <- inputResult{tick: tick, err: err}
-			continue
-		}
+	for _, command := range commands {
 		if entity := s.entities[command.intent.ClientUID]; entity != nil {
 			reroute := entity.reroute
 			if reroute != "" {
@@ -452,7 +437,7 @@ drained:
 			}
 			command.result <- inputResult{
 				latitude: entity.latitude, longitude: entity.longitude, counter: entity.counter,
-				sequence: entity.sequence, tick: tick, reroute: reroute,
+				sequence: entity.sequence, tick: tick, claim: command.claim, reroute: reroute,
 			}
 		}
 	}
@@ -482,92 +467,35 @@ func nearestLocation(latitude, longitude float64) string {
 	return best
 }
 
-func (s *server) ensureEntity(ctx context.Context, clientUID string) error {
+func (s *server) ensureEntity(ctx context.Context, clientUID string, refreshCounter bool) (bool, error) {
 	s.entityMu.Lock()
 	_, exists := s.entities[clientUID]
 	s.entityMu.Unlock()
-	if exists {
-		return nil
+	if exists && !refreshCounter {
+		return false, nil
 	}
 	loaded := &entityState{}
-	current := s.currentAssignment()
-	if current != nil {
-		cacheCtx, cancelCache := context.WithTimeout(ctx, 250*time.Millisecond)
-		body, err := s.redis.Get(cacheCtx, "tcp-lab:entity:"+clientUID).Bytes()
-		cancelCache()
-		if err == nil {
-			var snapshot entitySnapshot
-			if json.Unmarshal(body, &snapshot) == nil && snapshot.ServerID == current.ServerID {
-				loaded.latitude = snapshot.Latitude
-				loaded.longitude = snapshot.Longitude
-				loaded.sequence = snapshot.Sequence
-			}
-		}
-	}
 	queryCtx, cancel := context.WithTimeout(ctx, time.Second)
 	defer cancel()
 	err := s.db.QueryRowContext(queryCtx, `
-		SELECT counter FROM client_state WHERE client_uid = $1`, clientUID).Scan(&loaded.counter)
-	if errors.Is(err, sql.ErrNoRows) {
-		err = nil
-	}
+		SELECT COALESCE(client.counter, 0), COALESCE(entity.latitude, 0), COALESCE(entity.longitude, 0)
+		FROM (SELECT $1::TEXT AS entity_uid) AS requested
+		LEFT JOIN client_state AS client ON client.client_uid = requested.entity_uid
+		LEFT JOIN entity_state AS entity ON entity.entity_uid = requested.entity_uid`, clientUID).
+		Scan(&loaded.counter, &loaded.latitude, &loaded.longitude)
 	if err != nil {
-		return err
+		return false, err
 	}
 	s.entityMu.Lock()
-	if _, exists := s.entities[clientUID]; !exists {
+	if entity, exists := s.entities[clientUID]; exists {
+		if refreshCounter {
+			entity.counter = loaded.counter
+		}
+	} else {
 		s.entities[clientUID] = loaded
 	}
 	s.entityMu.Unlock()
-	return nil
-}
-
-func (s *server) snapshotEntities(ctx context.Context) {
-	current := s.currentAssignment()
-	if current == nil {
-		return
-	}
-	type pendingSnapshot struct {
-		clientUID string
-		sequence  uint64
-		body      []byte
-	}
-	pending := make([]pendingSnapshot, 0)
-	s.entityMu.Lock()
-	for clientUID, entity := range s.entities {
-		if !entity.dirty {
-			continue
-		}
-		body, err := json.Marshal(entitySnapshot{
-			ServerID: current.ServerID, Generation: current.Generation,
-			Latitude: entity.latitude, Longitude: entity.longitude, Sequence: entity.sequence,
-		})
-		if err == nil {
-			pending = append(pending, pendingSnapshot{clientUID: clientUID, sequence: entity.sequence, body: body})
-			entity.dirty = false
-		}
-	}
-	s.entityMu.Unlock()
-	if len(pending) == 0 {
-		return
-	}
-	cacheCtx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
-	defer cancel()
-	pipeline := s.redis.Pipeline()
-	for _, snapshot := range pending {
-		pipeline.Set(cacheCtx, "tcp-lab:entity:"+snapshot.clientUID, snapshot.body, 5*time.Minute)
-	}
-	_, err := pipeline.Exec(cacheCtx)
-	if err == nil {
-		return
-	}
-	s.entityMu.Lock()
-	for _, snapshot := range pending {
-		if entity := s.entities[snapshot.clientUID]; entity != nil && entity.sequence == snapshot.sequence {
-			entity.dirty = true
-		}
-	}
-	s.entityMu.Unlock()
+	return !exists, nil
 }
 
 func connectDatabases(ctx context.Context, logger *slog.Logger) (*sql.DB, *redis.Client, error) {
@@ -642,6 +570,16 @@ func createSchema(ctx context.Context, db *sql.DB) error {
 			counter BIGINT NOT NULL DEFAULT 0 CHECK (counter >= 0),
 			latitude DOUBLE PRECISION NOT NULL DEFAULT 0,
 			longitude DOUBLE PRECISION NOT NULL DEFAULT 0,
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		);
+		CREATE TABLE IF NOT EXISTS entity_state (
+			entity_uid TEXT PRIMARY KEY,
+			server_id TEXT NOT NULL REFERENCES tcp_server_state(server_id),
+			location TEXT NOT NULL,
+			latitude DOUBLE PRECISION NOT NULL,
+			longitude DOUBLE PRECISION NOT NULL,
+			server_generation BIGINT NOT NULL,
+			entity_generation BIGINT NOT NULL DEFAULT 1,
 			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		);
 		CREATE TABLE IF NOT EXISTS client_operation (
@@ -928,7 +866,16 @@ func (s *server) handleConnection(ctx context.Context, conn net.Conn, logger *sl
 }
 
 func (s *server) handleInputCommand(ctx context.Context, writer *bufio.Writer, bound *assignment, intent inputIntent, logger *slog.Logger) bool {
-	command := inputCommand{intent: intent, result: make(chan inputResult, 1)}
+	created, err := s.ensureEntity(ctx, intent.ClientUID, intent.Teleport)
+	if err != nil {
+		s.writeDatabaseError(writer, logger, err)
+		return true
+	}
+	command := inputCommand{
+		intent: intent,
+		claim:  created || intent.Teleport,
+		result: make(chan inputResult, 1),
+	}
 	select {
 	case s.inputs <- command:
 	case <-ctx.Done():
@@ -944,10 +891,52 @@ func (s *server) handleInputCommand(ctx context.Context, writer *bufio.Writer, b
 			s.writeDatabaseError(writer, logger, result.err)
 			return true
 		}
+		if result.claim {
+			if err := s.storeEntityClaim(ctx, bound, intent.ClientUID, result.latitude, result.longitude); err != nil {
+				s.writeDatabaseError(writer, logger, err)
+				return true
+			}
+		}
 		return s.writeInputResponse(writer, bound, intent, result)
 	case <-ctx.Done():
 		return false
 	}
+}
+
+func (s *server) storeEntityClaim(ctx context.Context, current *assignment, entityUID string, latitude, longitude float64) error {
+	queryCtx, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	result, err := s.db.ExecContext(queryCtx, `
+		INSERT INTO entity_state (
+			entity_uid, server_id, location, latitude, longitude, server_generation
+		)
+		SELECT $1, assignment.server_id, state.location, $2, $3, assignment.generation
+		FROM tcp_server_assignment AS assignment
+		JOIN tcp_server_state AS state USING (server_id)
+		WHERE assignment.server_id = $4
+			AND assignment.owner_instance_id = $5
+			AND assignment.generation = $6
+			AND assignment.lease_until > NOW()
+		ON CONFLICT (entity_uid) DO UPDATE SET
+			server_id = EXCLUDED.server_id,
+			location = EXCLUDED.location,
+			latitude = EXCLUDED.latitude,
+			longitude = EXCLUDED.longitude,
+			server_generation = EXCLUDED.server_generation,
+			entity_generation = entity_state.entity_generation + 1,
+			updated_at = NOW()`,
+		entityUID, latitude, longitude, current.ServerID, s.instanceID, current.Generation)
+	if err != nil {
+		return err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows != 1 {
+		return errors.New("server lost ownership before entity claim")
+	}
+	return nil
 }
 
 func (s *server) handleDurableCommand(ctx context.Context, writer *bufio.Writer, bound *assignment, request durableRequest, logger *slog.Logger) bool {
@@ -1089,7 +1078,7 @@ func (s *server) writeResponse(writer *bufio.Writer, current *assignment, counte
 	body, err := json.Marshal(response{
 		Server: current.ServerID, Location: current.Location,
 		Latitude: current.Latitude, Longitude: current.Longitude,
-		Instance: s.podName,
+		Instance:   s.podName,
 		Generation: current.Generation, Counter: counter, Message: message,
 		Time: time.Now().UTC().Format(time.RFC3339Nano), Tick: s.tick.Load(),
 	})
