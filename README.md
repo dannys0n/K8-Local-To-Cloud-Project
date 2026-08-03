@@ -19,8 +19,8 @@ adding a coordinator or operator.
   authoritative simulation clock and includes its current tick in responses.
 - **PostgreSQL:** authoritative location identity, counters, leases, and ownership
   generations; one PVC on the dedicated kind database worker.
-- **Redis:** ephemeral server presence and dashboard visibility on the same kind
-  database worker. It is not part of authoritative client state.
+- **Redis:** ephemeral server presence and 20 Hz entity visibility on the same
+  kind database worker. It is not part of authoritative client state.
 - **Client entry:** `127.0.0.1:9000`; the browser map keeps one TCP connection
   through its local bridge. The EKS overlay uses an AWS NLB.
 - **Manifest management:** a shared Kustomize base plus kind and EKS overlays.
@@ -88,6 +88,13 @@ tick. Input stops automatically if no
 refresh arrives for eight ticks (400 ms). Movement is not written on each tick.
 PostgreSQL records the last server-claim coordinate as a recovery point and
 stores the durable counter independently.
+
+Active servers publish one best-effort visibility snapshot per tick and pull
+the combined snapshots into a local cache. Input responses include that cache,
+so the map renders other clients as cyan pins. Newer input sequences fence stale
+copies left behind by direct teleports. Idle clients send zero-axis heartbeats
+at 20 Hz, and entities disappear after one second without input. Redis failure
+only hides those markers; it cannot affect movement, ownership, or durable state.
 
 After every movement tick, the server checks the resulting coordinate against
 the geographic locations. When ownership changes, it returns a transient

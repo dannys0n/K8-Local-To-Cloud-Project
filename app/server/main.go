@@ -24,11 +24,12 @@ import (
 )
 
 const (
-	defaultLeaseDuration = 3 * time.Second
-	defaultRenewInterval = 500 * time.Millisecond
-	defaultTickInterval  = 50 * time.Millisecond
-	movementSpeed        = 40.0
-	inputTimeoutTicks    = 8
+	defaultLeaseDuration  = 3 * time.Second
+	defaultRenewInterval  = 500 * time.Millisecond
+	defaultTickInterval   = 50 * time.Millisecond
+	movementSpeed         = 40.0
+	inputTimeoutTicks     = 8
+	visibilityActiveTicks = 20
 )
 
 type locationDefinition struct {
@@ -68,27 +69,43 @@ type server struct {
 	inputs        chan inputCommand
 	entityMu      sync.Mutex
 	entities      map[string]*entityState
+	visibilityMu  sync.RWMutex
+	visible       []visibleEntity
 	mu            sync.RWMutex
 	assignment    *assignment
 }
 
 type response struct {
-	Server          string  `json:"server"`
-	Location        string  `json:"location"`
-	Latitude        float64 `json:"latitude"`
-	Longitude       float64 `json:"longitude"`
-	Instance        string  `json:"instance"`
-	Generation      int64   `json:"generation"`
-	Counter         uint64  `json:"counter"`
-	Message         string  `json:"message"`
-	Time            string  `json:"time"`
-	Tick            uint64  `json:"tick"`
-	ClientUID       string  `json:"client_uid,omitempty"`
-	OperationID     string  `json:"operation_id,omitempty"`
-	ClientLatitude  float64 `json:"client_latitude"`
-	ClientLongitude float64 `json:"client_longitude"`
-	InputSequence   uint64  `json:"input_sequence,omitempty"`
-	Reroute         string  `json:"reroute,omitempty"`
+	Server          string          `json:"server"`
+	Location        string          `json:"location"`
+	Latitude        float64         `json:"latitude"`
+	Longitude       float64         `json:"longitude"`
+	Instance        string          `json:"instance"`
+	Generation      int64           `json:"generation"`
+	Counter         uint64          `json:"counter"`
+	Message         string          `json:"message"`
+	Time            string          `json:"time"`
+	Tick            uint64          `json:"tick"`
+	ClientUID       string          `json:"client_uid,omitempty"`
+	OperationID     string          `json:"operation_id,omitempty"`
+	ClientLatitude  float64         `json:"client_latitude"`
+	ClientLongitude float64         `json:"client_longitude"`
+	InputSequence   uint64          `json:"input_sequence,omitempty"`
+	Reroute         string          `json:"reroute,omitempty"`
+	Entities        []visibleEntity `json:"entities,omitempty"`
+}
+
+type visibleEntity struct {
+	UID       string  `json:"uid"`
+	Latitude  float64 `json:"latitude"`
+	Longitude float64 `json:"longitude"`
+	Sequence  uint64  `json:"sequence"`
+}
+
+type visibilitySnapshot struct {
+	Generation int64           `json:"generation"`
+	UpdatedAt  int64           `json:"updated_at"`
+	Entities   []visibleEntity `json:"entities"`
 }
 
 type durableRequest struct {
@@ -195,6 +212,7 @@ func main() {
 	go s.heartbeat(ctx, logger)
 	go s.runTicks(ctx)
 	go s.runDurableCommands(ctx)
+	go s.runVisibility(ctx)
 
 	listenAddr := envOrDefault("LISTEN_ADDR", ":7000")
 	listener, err := net.Listen("tcp", listenAddr)
@@ -261,6 +279,94 @@ func (s *server) runDurableCommands(ctx context.Context) {
 			s.commitDurableCommands(ctx, s.tick.Load())
 		}
 	}
+}
+
+func (s *server) runVisibility(ctx context.Context) {
+	ticker := time.NewTicker(s.tickInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			current := s.currentAssignment()
+			if current == nil {
+				continue
+			}
+			visibilityCtx, cancel := context.WithTimeout(ctx, s.tickInterval)
+			s.publishVisibility(visibilityCtx, current)
+			s.pullVisibility(visibilityCtx)
+			cancel()
+		}
+	}
+}
+
+func (s *server) publishVisibility(ctx context.Context, current *assignment) {
+	s.entityMu.Lock()
+	entities := make([]visibleEntity, 0, len(s.entities))
+	currentTick := s.tick.Load()
+	for uid, entity := range s.entities {
+		if currentTick-entity.lastInputTick < visibilityActiveTicks {
+			entities = append(entities, visibleEntity{
+				UID: uid, Latitude: entity.latitude, Longitude: entity.longitude, Sequence: entity.sequence,
+			})
+		}
+	}
+	s.entityMu.Unlock()
+	body, err := json.Marshal(visibilitySnapshot{
+		Generation: current.Generation,
+		UpdatedAt:  time.Now().UnixMilli(),
+		Entities:   entities,
+	})
+	if err == nil {
+		_ = s.redis.HSet(ctx, "tcp-lab:visibility", current.ServerID, body).Err()
+	}
+}
+
+func (s *server) pullVisibility(ctx context.Context) {
+	values, err := s.redis.HGetAll(ctx, "tcp-lab:visibility").Result()
+	if err != nil {
+		s.visibilityMu.Lock()
+		s.visible = nil
+		s.visibilityMu.Unlock()
+		return
+	}
+	cutoff := time.Now().Add(-time.Second).UnixMilli()
+	latest := make(map[string]visibleEntity)
+	updated := make(map[string]int64)
+	for _, body := range values {
+		var snapshot visibilitySnapshot
+		if json.Unmarshal([]byte(body), &snapshot) != nil || snapshot.UpdatedAt < cutoff {
+			continue
+		}
+		for _, entity := range snapshot.Entities {
+			current, exists := latest[entity.UID]
+			if !exists || entity.Sequence > current.Sequence ||
+				(entity.Sequence == current.Sequence && snapshot.UpdatedAt > updated[entity.UID]) {
+				latest[entity.UID] = entity
+				updated[entity.UID] = snapshot.UpdatedAt
+			}
+		}
+	}
+	visible := make([]visibleEntity, 0, len(latest))
+	for _, entity := range latest {
+		visible = append(visible, entity)
+	}
+	s.visibilityMu.Lock()
+	s.visible = visible
+	s.visibilityMu.Unlock()
+}
+
+func (s *server) visibleEntities(excludeUID string) []visibleEntity {
+	s.visibilityMu.RLock()
+	entities := make([]visibleEntity, 0, len(s.visible))
+	for _, entity := range s.visible {
+		if entity.UID != excludeUID {
+			entities = append(entities, entity)
+		}
+	}
+	s.visibilityMu.RUnlock()
+	return entities
 }
 
 func (s *server) commitDurableCommands(ctx context.Context, tick uint64) {
@@ -1055,6 +1161,7 @@ func (s *server) writeInputResponse(writer *bufio.Writer, current *assignment, i
 		Time: time.Now().UTC().Format(time.RFC3339Nano), Tick: result.tick,
 		ClientUID: intent.ClientUID, ClientLatitude: result.latitude,
 		ClientLongitude: result.longitude, InputSequence: result.sequence, Reroute: result.reroute,
+		Entities: s.visibleEntities(intent.ClientUID),
 	})
 	if err != nil {
 		return false

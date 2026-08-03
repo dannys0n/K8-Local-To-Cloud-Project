@@ -24,6 +24,12 @@ spare server pods appear above it, and the selected gateway is connected to the
 client marker. These optional layers read the dashboard's localhost-only JSON;
 the gateway and server protocols do not expose Kubernetes inventory.
 
+Other connected clients are shown as cyan map pins. Active servers exchange
+best-effort visibility snapshots through Redis at 20 Hz, and normal input
+responses carry the current combined view. Input sequences discard stale
+pre-handoff copies, and entities expire after one second without a heartbeat.
+Visibility is never used for entity authority or recovery.
+
 The Data services table uses Kubernetes pod status to show the in-cluster
 PostgreSQL and Redis instances, their worker placement, pod IPs, stable Service
 endpoints, restart counts, and readiness. It does not inspect database contents
