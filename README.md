@@ -82,9 +82,10 @@ it twice.
 
 WASD sends transient `@input CLIENT_UID SEQUENCE X Y` intents at up to 40 Hz.
 The browser never sends a position for movement: the current logical server
-keeps only the newest sequence, normalizes diagonal input, and advances the
-client coordinate at 40 geographic degrees per second on its authoritative
-tick. Input stops automatically if no
+keeps only the newest sequence, normalizes diagonal input, and advances at 40
+projected degrees per second on its authoritative tick. Longitude wraps at the
+date line. Latitude moves in Leaflet's Web Mercator space and wraps between its
+north and south limits, keeping apparent map speed consistent. Input stops automatically if no
 refresh arrives for eight ticks (400 ms). Movement is not written on each tick.
 PostgreSQL records the last server-claim coordinate as a recovery point and
 stores the durable counter independently.

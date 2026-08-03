@@ -30,6 +30,7 @@ const (
 	movementSpeed         = 40.0
 	inputTimeoutTicks     = 8
 	visibilityActiveTicks = 20
+	mercatorLatitudeLimit = 85.05112878
 )
 
 type locationDefinition struct {
@@ -509,12 +510,21 @@ drained:
 		}
 	}
 	distance := movementSpeed * s.tickInterval.Seconds()
+	projectedDistance := distance * math.Pi / 180
 	for _, entity := range s.entities {
 		if tick-entity.lastInputTick >= inputTimeoutTicks {
 			entity.axisX = 0
 			entity.axisY = 0
 		}
-		entity.latitude = math.Max(-90, math.Min(90, entity.latitude+entity.axisY*distance))
+		latitude := math.Max(-mercatorLatitudeLimit, math.Min(mercatorLatitudeLimit, entity.latitude))
+		projectedY := math.Log(math.Tan(math.Pi/4 + latitude*math.Pi/360))
+		projectedY += entity.axisY * projectedDistance
+		if projectedY > math.Pi {
+			projectedY -= 2 * math.Pi
+		} else if projectedY < -math.Pi {
+			projectedY += 2 * math.Pi
+		}
+		entity.latitude = math.Atan(math.Sinh(projectedY)) * 180 / math.Pi
 		entity.longitude += entity.axisX * distance
 		if entity.longitude > 180 {
 			entity.longitude -= 360
