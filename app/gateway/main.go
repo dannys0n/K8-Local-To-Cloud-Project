@@ -231,7 +231,7 @@ func (g *gateway) handleClient(ctx context.Context, client net.Conn) {
 			response, err := g.exchange(candidate, message)
 			if err != nil || responseHasError(response) {
 				candidate.conn.Close()
-				writeJSONError(clientWriter, "durable teleport failed")
+				writeJSONError(clientWriter, "teleport failed")
 				continue
 			}
 			if downstream != nil {
@@ -308,6 +308,34 @@ func (g *gateway) handleClient(ctx context.Context, client net.Conn) {
 		if err != nil {
 			writeJSONError(clientWriter, "backend request failed")
 			continue
+		}
+		var handoff struct {
+			Reroute         string  `json:"reroute"`
+			ClientUID       string  `json:"client_uid"`
+			InputSequence   uint64  `json:"input_sequence"`
+			ClientLatitude  float64 `json:"client_latitude"`
+			ClientLongitude float64 `json:"client_longitude"`
+		}
+		if json.Unmarshal(response, &handoff) == nil && handoff.Reroute != "" {
+			candidate, _, routeErr := g.openRoute(ctx, handoff.Reroute, nil)
+			if routeErr != nil {
+				writeJSONError(clientWriter, routeErr.Error())
+				continue
+			}
+			resume := fmt.Sprintf("@resume %s %d %.8f %.8f", handoff.ClientUID, handoff.InputSequence, handoff.ClientLatitude, handoff.ClientLongitude)
+			resumed, resumeErr := g.exchange(candidate, resume)
+			if resumeErr != nil || responseHasError(resumed) {
+				candidate.conn.Close()
+				writeJSONError(clientWriter, "server handoff failed")
+				continue
+			}
+			downstream.conn.Close()
+			downstream = candidate
+			requested = handoff.Reroute
+			clientLatitude = handoff.ClientLatitude
+			clientLongitude = handoff.ClientLongitude
+			g.updateSession(id, client.RemoteAddr().String(), candidate.info, clientLatitude, clientLongitude)
+			response = resumed
 		}
 		response = g.withGatewayMetadata(response)
 		if _, err := clientWriter.Write(response); err != nil || clientWriter.Flush() != nil {
@@ -548,7 +576,7 @@ func parseTeleportRoute(message string) (float64, float64, bool, error) {
 	}
 	fields := strings.Fields(arguments)
 	if len(fields) != 4 {
-		return 0, 0, true, errors.New("teleport requires client UID, operation ID, latitude, and longitude")
+		return 0, 0, true, errors.New("teleport requires client UID, sequence, latitude, and longitude")
 	}
 	latitude, latitudeErr := strconv.ParseFloat(fields[2], 64)
 	longitude, longitudeErr := strconv.ParseFloat(fields[3], 64)

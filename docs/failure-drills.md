@@ -36,15 +36,15 @@ Every gateway discovers server endpoints through the headless Service DNS.
    ```
 
 4. Delete the owner pod while leaving the client open.
-5. Click again. The gateway retains the client connection, discovers the
-   replacement, switches its downstream connection, and the client retries any
-   unacknowledged operation ID.
+5. Move again. The gateway retains the client connection, discovers the
+   replacement, and the new server restores the recent Redis entity snapshot.
+   Any unacknowledged counter operation retries with the same operation ID.
 6. Confirm an existing spare owns `tcp-server-1`, the generation increased, and
    the PostgreSQL `client_state` counter continues from its previous value.
 
 The server-side TCP socket cannot survive a pod failure, but the client-to-gateway
-socket remains open. A message in flight at the server disconnect can be
-processed more than once because the toy protocol has no request IDs.
+socket remains open. Counter commands have operation IDs; transient inputs use
+monotonic sequences and may roll back to the latest Redis snapshot.
 
 The default ownership lease is 1.5 seconds and renews every 250ms. Gateways
 discover eligible backends every 200ms, with a separate 500ms discovery timeout,

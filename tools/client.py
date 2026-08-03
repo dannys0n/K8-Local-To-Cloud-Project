@@ -54,12 +54,12 @@ PAGE = r"""<!doctype html>
   <script>
     const map=L.map('map',{worldCopyJump:true,minZoom:2}).setView([25,0],2);
     L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:18,attribution:'&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'}).addTo(map);
-    let selectedMarker=null, connectionLine=null, serverLayers=[], locations=[], currentRoute=null, selectedPosition=null, draining=false,inputInFlight=false,inputDirty=true;
+    let selectedMarker=null, connectionLine=null, serverLayers=[], locations=[], currentRoute=null, selectedPosition=null, draining=false,inputInFlight=false,inputDirty=true,teleporting=false;
     const keys=new Set();
     const el=id=>document.getElementById(id);
     const clientUid=localStorage.getItem('tcp-lab-client-uid')||crypto.randomUUID();localStorage.setItem('tcp-lab-client-uid',clientUid);el('clientUid').textContent=clientUid;
     const inputSequenceKey=`tcp-lab-input-sequence-${clientUid}`;let inputSequence=Number(localStorage.getItem(inputSequenceKey)||0);
-    const pendingKey=`tcp-lab-pending-${clientUid}`;let pendingCommands=JSON.parse(localStorage.getItem(pendingKey)||'[]');
+    const pendingKey=`tcp-lab-pending-${clientUid}`;let pendingCommands=JSON.parse(localStorage.getItem(pendingKey)||'[]').filter(command=>command.kind==='increment');localStorage.setItem(pendingKey,JSON.stringify(pendingCommands));
     function showRoute(body){
       currentRoute=body;
       el('location').textContent=body.location||'—'; el('server').textContent=body.server||'—';
@@ -87,19 +87,22 @@ PAGE = r"""<!doctype html>
     }
     async function drainCommands(){
       if(draining)return;draining=true;
-      try{while(pendingCommands.length){const command=pendingCommands[0];const increment=command.kind==='increment';const path=increment?'/api/increment':'/api/location';const payload={client_uid:clientUid,operation_id:command.operation_id};if(!increment){payload.latitude=command.latitude;payload.longitude=command.longitude}const body=await request(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});showRoute(body);connection('ready');pendingCommands.shift();localStorage.setItem(pendingKey,JSON.stringify(pendingCommands));el('error').textContent=''}}
+      try{while(pendingCommands.length){const command=pendingCommands[0];const body=await request('/api/increment',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({client_uid:clientUid,operation_id:command.operation_id})});showRoute(body);connection('ready');pendingCommands.shift();localStorage.setItem(pendingKey,JSON.stringify(pendingCommands));el('error').textContent=''}}
       catch(error){el('error').textContent=error.message;refresh()}finally{draining=false}
     }
-    map.on('click',event=>{
+    map.on('click',async event=>{
+      if(teleporting)return;
       const {lat,lng}=event.latlng.wrap();selectedPosition=[lat,lng];el('coordinate').textContent=`${lat.toFixed(5)}, ${lng.toFixed(5)}`;el('error').textContent='';
       if(selectedMarker)selectedMarker.setLatLng([lat,lng]);else selectedMarker=L.marker([lat,lng]).addTo(map);
-      pendingCommands.push({kind:'teleport',operation_id:crypto.randomUUID(),latitude:lat,longitude:lng});localStorage.setItem(pendingKey,JSON.stringify(pendingCommands));drainCommands();
+      teleporting=true;inputSequence++;localStorage.setItem(inputSequenceKey,inputSequence);
+      try{const body=await request('/api/location',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({client_uid:clientUid,sequence:inputSequence,latitude:lat,longitude:lng})});showRoute(body);connection('ready')}
+      catch(error){el('error').textContent=error.message;refresh()}finally{teleporting=false;inputDirty=true}
     });
     el('increment').addEventListener('click',()=>{pendingCommands.push({kind:'increment',operation_id:crypto.randomUUID()});localStorage.setItem(pendingKey,JSON.stringify(pendingCommands));drainCommands()});
     function setKey(event,pressed){const key=event.key.toLowerCase();if(!'wasd'.includes(key))return;event.preventDefault();if(pressed)keys.add(key);else keys.delete(key);inputDirty=true}
     addEventListener('keydown',event=>setKey(event,true));addEventListener('keyup',event=>setKey(event,false));addEventListener('blur',()=>{keys.clear();inputDirty=true});
     async function sendInput(){
-      if(inputInFlight||pendingCommands.length||!currentRoute?.server)return;
+      if(inputInFlight||teleporting||pendingCommands.length||!currentRoute?.server)return;
       const x=(keys.has('d')?1:0)-(keys.has('a')?1:0),y=(keys.has('w')?1:0)-(keys.has('s')?1:0);
       if(x===0&&y===0&&!inputDirty)return;inputDirty=false;inputInFlight=true;
       try{inputSequence++;localStorage.setItem(inputSequenceKey,inputSequence);const body=await request('/api/input',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({client_uid:clientUid,sequence:inputSequence,x,y})});showRoute(body);selectedPosition=[body.client_latitude,body.client_longitude];el('coordinate').textContent=`${body.client_latitude.toFixed(5)}, ${body.client_longitude.toFixed(5)}`;if(selectedMarker)selectedMarker.setLatLng(selectedPosition);else selectedMarker=L.marker(selectedPosition).addTo(map)}
@@ -195,11 +198,11 @@ class GatewayClient:
                     self.connection = "ready"
             return body
 
-    def move(self, client_uid: str, operation_id: str, latitude: float, longitude: float):
+    def move(self, client_uid: str, sequence: int, latitude: float, longitude: float):
         allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.:")
-        if not client_uid or len(client_uid) > 128 or not operation_id or len(operation_id) > 128 or set(client_uid) - allowed or set(operation_id) - allowed:
-            raise ValueError("client and operation identifiers are invalid")
-        body = self.exchange(f"@teleport {client_uid} {operation_id} {latitude:.8f} {longitude:.8f}")
+        if not client_uid or len(client_uid) > 128 or set(client_uid) - allowed or sequence < 0:
+            raise ValueError("client identifier or input sequence is invalid")
+        body = self.exchange(f"@teleport {client_uid} {sequence} {latitude:.8f} {longitude:.8f}")
         with self.state_lock:
             self.latitude, self.longitude, self.route = latitude, longitude, body
             self.gateway = body.get("gateway")
@@ -288,7 +291,7 @@ def make_handler(client: GatewayClient):
                     latitude, longitude = float(payload["latitude"]), float(payload["longitude"])
                     if not (-90 <= latitude <= 90 and -180 <= longitude <= 180):
                         raise ValueError("coordinate is outside the world bounds")
-                    self.send_json(client.move(str(payload["client_uid"]), str(payload["operation_id"]), latitude, longitude))
+                    self.send_json(client.move(str(payload["client_uid"]), int(payload["sequence"]), latitude, longitude))
                 elif path == "/api/reconnect":
                     self.send_json(client.reconnect())
                 elif path == "/api/increment":

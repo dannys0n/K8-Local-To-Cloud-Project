@@ -87,19 +87,18 @@ type response struct {
 	ClientLatitude  float64 `json:"client_latitude"`
 	ClientLongitude float64 `json:"client_longitude"`
 	InputSequence   uint64  `json:"input_sequence,omitempty"`
+	Reroute         string  `json:"reroute,omitempty"`
 }
 
-type teleportCommand struct {
+type durableRequest struct {
 	Kind        string
 	ClientUID   string
 	OperationID string
-	Latitude    float64
-	Longitude   float64
 }
 
 type durableCommand struct {
 	assignment assignment
-	teleport   teleportCommand
+	request    durableRequest
 	result     chan durableResult
 }
 
@@ -116,6 +115,10 @@ type inputIntent struct {
 	Sequence  uint64
 	X         float64
 	Y         float64
+	Teleport  bool
+	Resume    bool
+	Latitude  float64
+	Longitude float64
 }
 
 type inputCommand struct {
@@ -130,6 +133,7 @@ type inputResult struct {
 	sequence  uint64
 	tick      uint64
 	err       error
+	reroute   string
 }
 
 type entityState struct {
@@ -140,6 +144,16 @@ type entityState struct {
 	axisX     float64
 	axisY     float64
 	lastInputTick uint64
+	dirty     bool
+	reroute   string
+}
+
+type entitySnapshot struct {
+	ServerID   string  `json:"server"`
+	Generation int64   `json:"generation"`
+	Latitude   float64 `json:"latitude"`
+	Longitude  float64 `json:"longitude"`
+	Sequence   uint64  `json:"sequence"`
 }
 
 func main() {
@@ -238,6 +252,9 @@ func (s *server) runTicks(ctx context.Context) {
 			currentTick := s.tick.Add(1)
 			s.commitDurableCommands(ctx, currentTick)
 			s.applyTransientInputs(ctx, currentTick)
+			if currentTick%2 == 0 {
+				s.snapshotEntities(ctx)
+			}
 		}
 	}
 }
@@ -287,14 +304,14 @@ func (s *server) applyDurableBatch(ctx context.Context, tick uint64, batch []dur
 		}
 		_, err = tx.ExecContext(queryCtx, `
 			INSERT INTO client_state (client_uid) VALUES ($1)
-			ON CONFLICT (client_uid) DO NOTHING`, queued.teleport.ClientUID)
+			ON CONFLICT (client_uid) DO NOTHING`, queued.request.ClientUID)
 		if err != nil {
 			break
 		}
 		err = tx.QueryRowContext(queryCtx, `
 			SELECT resulting_counter, latitude, longitude FROM client_operation
 			WHERE client_uid = $1 AND operation_id = $2`,
-			queued.teleport.ClientUID, queued.teleport.OperationID).
+			queued.request.ClientUID, queued.request.OperationID).
 			Scan(&results[index], &latitudes[index], &longitudes[index])
 		if err == nil {
 			continue
@@ -302,27 +319,18 @@ func (s *server) applyDurableBatch(ctx context.Context, tick uint64, batch []dur
 		if !errors.Is(err, sql.ErrNoRows) {
 			break
 		}
-		if queued.teleport.Kind == "increment" {
-			err = tx.QueryRowContext(queryCtx, `
-				UPDATE client_state SET counter = counter + 1, updated_at = NOW()
-				WHERE client_uid = $1
-				RETURNING counter, latitude, longitude`, queued.teleport.ClientUID).
-				Scan(&results[index], &latitudes[index], &longitudes[index])
-		} else {
-			err = tx.QueryRowContext(queryCtx, `
-				UPDATE client_state SET latitude = $2, longitude = $3, updated_at = NOW()
-				WHERE client_uid = $1
-				RETURNING counter, latitude, longitude`, queued.teleport.ClientUID,
-				queued.teleport.Latitude, queued.teleport.Longitude).
-				Scan(&results[index], &latitudes[index], &longitudes[index])
-		}
+		err = tx.QueryRowContext(queryCtx, `
+			UPDATE client_state SET counter = counter + 1, updated_at = NOW()
+			WHERE client_uid = $1
+			RETURNING counter, latitude, longitude`, queued.request.ClientUID).
+			Scan(&results[index], &latitudes[index], &longitudes[index])
 		if err != nil {
 			break
 		}
 		_, err = tx.ExecContext(queryCtx, `
 			INSERT INTO client_operation (client_uid, operation_id, operation_type, resulting_counter, latitude, longitude)
-			VALUES ($1, $2, $3, $4, $5, $6)`, queued.teleport.ClientUID, queued.teleport.OperationID,
-			queued.teleport.Kind, results[index], latitudes[index], longitudes[index])
+			VALUES ($1, $2, $3, $4, $5, $6)`, queued.request.ClientUID, queued.request.OperationID,
+			queued.request.Kind, results[index], latitudes[index], longitudes[index])
 		if err != nil {
 			break
 		}
@@ -343,17 +351,10 @@ func (s *server) finishDurableBatch(batch []durableCommand, counters []uint64, l
 			result.longitude = longitudes[index]
 			if applied[index] {
 				s.entityMu.Lock()
-				if queued.teleport.Kind == "increment" {
-					if entity := s.entities[queued.teleport.ClientUID]; entity != nil {
-						entity.counter = result.counter
-					} else {
-						s.entities[queued.teleport.ClientUID] = &entityState{latitude: result.latitude, longitude: result.longitude, counter: result.counter}
-					}
+				if entity := s.entities[queued.request.ClientUID]; entity != nil {
+					entity.counter = result.counter
 				} else {
-					s.entities[queued.teleport.ClientUID] = &entityState{
-						latitude: result.latitude, longitude: result.longitude,
-						counter: result.counter,
-					}
+					s.entities[queued.request.ClientUID] = &entityState{latitude: result.latitude, longitude: result.longitude, counter: result.counter}
 				}
 				s.entityMu.Unlock()
 			}
@@ -386,16 +387,24 @@ drained:
 			continue
 		}
 		entity := s.entities[command.intent.ClientUID]
-		if entity != nil && command.intent.Sequence > entity.sequence {
+		if entity != nil && (command.intent.Sequence > entity.sequence || (command.intent.Resume && command.intent.Sequence >= entity.sequence)) {
 			entity.sequence = command.intent.Sequence
 			entity.lastInputTick = tick
-			magnitude := math.Hypot(command.intent.X, command.intent.Y)
-			if magnitude > 1 {
-				entity.axisX = command.intent.X / magnitude
-				entity.axisY = command.intent.Y / magnitude
+			entity.dirty = true
+			if command.intent.Teleport {
+				entity.latitude = command.intent.Latitude
+				entity.longitude = command.intent.Longitude
+				entity.axisX = 0
+				entity.axisY = 0
 			} else {
-				entity.axisX = command.intent.X
-				entity.axisY = command.intent.Y
+				magnitude := math.Hypot(command.intent.X, command.intent.Y)
+				if magnitude > 1 {
+					entity.axisX = command.intent.X / magnitude
+					entity.axisY = command.intent.Y / magnitude
+				} else {
+					entity.axisX = command.intent.X
+					entity.axisY = command.intent.Y
+				}
 			}
 		}
 	}
@@ -407,25 +416,70 @@ drained:
 		}
 		entity.latitude = math.Max(-90, math.Min(90, entity.latitude+entity.axisY*distance))
 		entity.longitude += entity.axisX * distance
+		if entity.axisX != 0 || entity.axisY != 0 {
+			entity.dirty = true
+		}
 		if entity.longitude > 180 {
 			entity.longitude -= 360
 		} else if entity.longitude < -180 {
 			entity.longitude += 360
 		}
 	}
+	current := s.currentAssignment()
+	if current != nil {
+		for _, entity := range s.entities {
+			if entity.reroute == "" {
+				destination := nearestLocation(entity.latitude, entity.longitude)
+				if destination != current.Location {
+					entity.reroute = destination
+					entity.axisX = 0
+					entity.axisY = 0
+					entity.dirty = true
+				}
+			}
+		}
+	}
+	handoffs := make(map[string]string)
 	for index, command := range commands {
 		if err := failed[index]; err != nil {
 			command.result <- inputResult{tick: tick, err: err}
 			continue
 		}
 		if entity := s.entities[command.intent.ClientUID]; entity != nil {
+			reroute := entity.reroute
+			if reroute != "" {
+				handoffs[command.intent.ClientUID] = reroute
+			}
 			command.result <- inputResult{
 				latitude: entity.latitude, longitude: entity.longitude, counter: entity.counter,
-				sequence: entity.sequence, tick: tick,
+				sequence: entity.sequence, tick: tick, reroute: reroute,
 			}
 		}
 	}
+	for clientUID := range handoffs {
+		delete(s.entities, clientUID)
+	}
 	s.entityMu.Unlock()
+}
+
+func nearestLocation(latitude, longitude float64) string {
+	best := ""
+	bestDistance := math.Inf(1)
+	latitudeRadians := latitude * math.Pi / 180
+	for _, location := range locations {
+		locationLatitude := location.latitude * math.Pi / 180
+		deltaLatitude := locationLatitude - latitudeRadians
+		deltaLongitude := (location.longitude - longitude) * math.Pi / 180
+		a := math.Sin(deltaLatitude/2)*math.Sin(deltaLatitude/2) +
+			math.Cos(latitudeRadians)*math.Cos(locationLatitude)*math.Sin(deltaLongitude/2)*math.Sin(deltaLongitude/2)
+		a = math.Max(0, math.Min(1, a))
+		distance := 2 * math.Atan2(math.Sqrt(a), math.Sqrt(1-a))
+		if distance < bestDistance || (distance == bestDistance && location.location < best) {
+			bestDistance = distance
+			best = location.location
+		}
+	}
+	return best
 }
 
 func (s *server) ensureEntity(ctx context.Context, clientUID string) error {
@@ -435,12 +489,25 @@ func (s *server) ensureEntity(ctx context.Context, clientUID string) error {
 	if exists {
 		return nil
 	}
+	loaded := &entityState{}
+	current := s.currentAssignment()
+	if current != nil {
+		cacheCtx, cancelCache := context.WithTimeout(ctx, 250*time.Millisecond)
+		body, err := s.redis.Get(cacheCtx, "tcp-lab:entity:"+clientUID).Bytes()
+		cancelCache()
+		if err == nil {
+			var snapshot entitySnapshot
+			if json.Unmarshal(body, &snapshot) == nil && snapshot.ServerID == current.ServerID {
+				loaded.latitude = snapshot.Latitude
+				loaded.longitude = snapshot.Longitude
+				loaded.sequence = snapshot.Sequence
+			}
+		}
+	}
 	queryCtx, cancel := context.WithTimeout(ctx, time.Second)
 	defer cancel()
-	loaded := &entityState{}
 	err := s.db.QueryRowContext(queryCtx, `
-		SELECT latitude, longitude, counter FROM client_state WHERE client_uid = $1`, clientUID).
-		Scan(&loaded.latitude, &loaded.longitude, &loaded.counter)
+		SELECT counter FROM client_state WHERE client_uid = $1`, clientUID).Scan(&loaded.counter)
 	if errors.Is(err, sql.ErrNoRows) {
 		err = nil
 	}
@@ -453,6 +520,54 @@ func (s *server) ensureEntity(ctx context.Context, clientUID string) error {
 	}
 	s.entityMu.Unlock()
 	return nil
+}
+
+func (s *server) snapshotEntities(ctx context.Context) {
+	current := s.currentAssignment()
+	if current == nil {
+		return
+	}
+	type pendingSnapshot struct {
+		clientUID string
+		sequence  uint64
+		body      []byte
+	}
+	pending := make([]pendingSnapshot, 0)
+	s.entityMu.Lock()
+	for clientUID, entity := range s.entities {
+		if !entity.dirty {
+			continue
+		}
+		body, err := json.Marshal(entitySnapshot{
+			ServerID: current.ServerID, Generation: current.Generation,
+			Latitude: entity.latitude, Longitude: entity.longitude, Sequence: entity.sequence,
+		})
+		if err == nil {
+			pending = append(pending, pendingSnapshot{clientUID: clientUID, sequence: entity.sequence, body: body})
+			entity.dirty = false
+		}
+	}
+	s.entityMu.Unlock()
+	if len(pending) == 0 {
+		return
+	}
+	cacheCtx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
+	defer cancel()
+	pipeline := s.redis.Pipeline()
+	for _, snapshot := range pending {
+		pipeline.Set(cacheCtx, "tcp-lab:entity:"+snapshot.clientUID, snapshot.body, 5*time.Minute)
+	}
+	_, err := pipeline.Exec(cacheCtx)
+	if err == nil {
+		return
+	}
+	s.entityMu.Lock()
+	for _, snapshot := range pending {
+		if entity := s.entities[snapshot.clientUID]; entity != nil && entity.sequence == snapshot.sequence {
+			entity.dirty = true
+		}
+	}
+	s.entityMu.Unlock()
 }
 
 func connectDatabases(ctx context.Context, logger *slog.Logger) (*sql.DB, *redis.Client, error) {
@@ -532,7 +647,7 @@ func createSchema(ctx context.Context, db *sql.DB) error {
 		CREATE TABLE IF NOT EXISTS client_operation (
 			client_uid TEXT NOT NULL REFERENCES client_state(client_uid),
 			operation_id TEXT NOT NULL,
-			operation_type TEXT NOT NULL DEFAULT 'teleport',
+			operation_type TEXT NOT NULL DEFAULT 'increment',
 			resulting_counter BIGINT NOT NULL CHECK (resulting_counter >= 0),
 			latitude DOUBLE PRECISION NOT NULL,
 			longitude DOUBLE PRECISION NOT NULL,
@@ -543,7 +658,8 @@ func createSchema(ctx context.Context, db *sql.DB) error {
 			ON tcp_server_state (location);
 		ALTER TABLE tcp_server_state ADD COLUMN IF NOT EXISTS latitude DOUBLE PRECISION NOT NULL DEFAULT 0;
 		ALTER TABLE tcp_server_state ADD COLUMN IF NOT EXISTS longitude DOUBLE PRECISION NOT NULL DEFAULT 0;
-		ALTER TABLE client_operation ADD COLUMN IF NOT EXISTS operation_type TEXT NOT NULL DEFAULT 'teleport'`
+		ALTER TABLE client_operation ADD COLUMN IF NOT EXISTS operation_type TEXT NOT NULL DEFAULT 'increment';
+		ALTER TABLE client_operation ALTER COLUMN operation_type SET DEFAULT 'increment'`
 	if _, err := db.ExecContext(ctx, schema); err != nil {
 		return fmt.Errorf("create schema: %w", err)
 	}
@@ -759,7 +875,18 @@ func (s *server) handleConnection(ctx context.Context, conn net.Conn, logger *sl
 				_ = writer.Flush()
 				continue
 			}
-			if !s.handleDurableCommand(ctx, writer, bound, teleport, logger) {
+			if !s.handleInputCommand(ctx, writer, bound, teleport, logger) {
+				return
+			}
+			continue
+		}
+		if resume, found, err := parseResume(message); found {
+			if err != nil {
+				_, _ = fmt.Fprintf(writer, `{"error":%q}`+"\n", err.Error())
+				_ = writer.Flush()
+				continue
+			}
+			if !s.handleInputCommand(ctx, writer, bound, resume, logger) {
 				return
 			}
 			continue
@@ -781,26 +908,7 @@ func (s *server) handleConnection(ctx context.Context, conn net.Conn, logger *sl
 				_ = writer.Flush()
 				continue
 			}
-			command := inputCommand{intent: intent, result: make(chan inputResult, 1)}
-			select {
-			case s.inputs <- command:
-			case <-ctx.Done():
-				return
-			default:
-				_, _ = fmt.Fprintln(writer, `{"error":"input queue full"}`)
-				_ = writer.Flush()
-				continue
-			}
-			select {
-			case result := <-command.result:
-				if result.err != nil {
-					s.writeDatabaseError(writer, logger, result.err)
-					continue
-				}
-				if !s.writeInputResponse(writer, bound, intent, result) {
-					return
-				}
-			case <-ctx.Done():
+			if !s.handleInputCommand(ctx, writer, bound, intent, logger) {
 				return
 			}
 			continue
@@ -819,8 +927,31 @@ func (s *server) handleConnection(ctx context.Context, conn net.Conn, logger *sl
 	}
 }
 
-func (s *server) handleDurableCommand(ctx context.Context, writer *bufio.Writer, bound *assignment, request teleportCommand, logger *slog.Logger) bool {
-	command := durableCommand{assignment: *bound, teleport: request, result: make(chan durableResult, 1)}
+func (s *server) handleInputCommand(ctx context.Context, writer *bufio.Writer, bound *assignment, intent inputIntent, logger *slog.Logger) bool {
+	command := inputCommand{intent: intent, result: make(chan inputResult, 1)}
+	select {
+	case s.inputs <- command:
+	case <-ctx.Done():
+		return false
+	default:
+		_, _ = fmt.Fprintln(writer, `{"error":"input queue full"}`)
+		_ = writer.Flush()
+		return true
+	}
+	select {
+	case result := <-command.result:
+		if result.err != nil {
+			s.writeDatabaseError(writer, logger, result.err)
+			return true
+		}
+		return s.writeInputResponse(writer, bound, intent, result)
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func (s *server) handleDurableCommand(ctx context.Context, writer *bufio.Writer, bound *assignment, request durableRequest, logger *slog.Logger) bool {
+	command := durableCommand{assignment: *bound, request: request, result: make(chan durableResult, 1)}
 	select {
 	case s.durable <- command:
 	case <-ctx.Done():
@@ -842,34 +973,43 @@ func (s *server) handleDurableCommand(ctx context.Context, writer *bufio.Writer,
 	}
 }
 
-func parseTeleport(message string) (teleportCommand, bool, error) {
-	arguments, found := strings.CutPrefix(message, "@teleport ")
+func parseTeleport(message string) (inputIntent, bool, error) {
+	return parseAbsoluteInput(message, "@teleport ", false)
+}
+
+func parseResume(message string) (inputIntent, bool, error) {
+	return parseAbsoluteInput(message, "@resume ", true)
+}
+
+func parseAbsoluteInput(message, prefix string, resume bool) (inputIntent, bool, error) {
+	arguments, found := strings.CutPrefix(message, prefix)
 	if !found {
-		return teleportCommand{}, false, nil
+		return inputIntent{}, false, nil
 	}
 	fields := strings.Fields(arguments)
 	if len(fields) != 4 || !validIdentifier(fields[0]) || !validIdentifier(fields[1]) {
-		return teleportCommand{}, true, errors.New("teleport requires client UID, operation ID, latitude, and longitude")
+		return inputIntent{}, true, errors.New("teleport requires client UID, sequence, latitude, and longitude")
 	}
+	sequence, sequenceErr := strconv.ParseUint(fields[1], 10, 64)
 	latitude, latitudeErr := strconv.ParseFloat(fields[2], 64)
 	longitude, longitudeErr := strconv.ParseFloat(fields[3], 64)
-	if latitudeErr != nil || longitudeErr != nil || math.IsNaN(latitude) || math.IsNaN(longitude) ||
+	if sequenceErr != nil || latitudeErr != nil || longitudeErr != nil || math.IsNaN(latitude) || math.IsNaN(longitude) ||
 		math.IsInf(latitude, 0) || math.IsInf(longitude, 0) || latitude < -90 || latitude > 90 || longitude < -180 || longitude > 180 {
-		return teleportCommand{}, true, errors.New("teleport coordinates are invalid")
+		return inputIntent{}, true, errors.New("teleport coordinates are invalid")
 	}
-	return teleportCommand{Kind: "teleport", ClientUID: fields[0], OperationID: fields[1], Latitude: latitude, Longitude: longitude}, true, nil
+	return inputIntent{ClientUID: fields[0], Sequence: sequence, Teleport: true, Resume: resume, Latitude: latitude, Longitude: longitude}, true, nil
 }
 
-func parseIncrement(message string) (teleportCommand, bool, error) {
+func parseIncrement(message string) (durableRequest, bool, error) {
 	arguments, found := strings.CutPrefix(message, "@increment ")
 	if !found {
-		return teleportCommand{}, false, nil
+		return durableRequest{}, false, nil
 	}
 	fields := strings.Fields(arguments)
 	if len(fields) != 2 || !validIdentifier(fields[0]) || !validIdentifier(fields[1]) {
-		return teleportCommand{}, true, errors.New("increment requires client UID and operation ID")
+		return durableRequest{}, true, errors.New("increment requires client UID and operation ID")
 	}
-	return teleportCommand{Kind: "increment", ClientUID: fields[0], OperationID: fields[1]}, true, nil
+	return durableRequest{Kind: "increment", ClientUID: fields[0], OperationID: fields[1]}, true, nil
 }
 
 func parseInput(message string) (inputIntent, bool, error) {
@@ -904,7 +1044,7 @@ func validIdentifier(value string) bool {
 	return true
 }
 
-func (s *server) writeDurableResponse(writer *bufio.Writer, current *assignment, command teleportCommand, result durableResult) bool {
+func (s *server) writeDurableResponse(writer *bufio.Writer, current *assignment, command durableRequest, result durableResult) bool {
 	message := command.Kind
 	body, err := json.Marshal(response{
 		Server: current.ServerID, Location: current.Location,
@@ -924,13 +1064,17 @@ func (s *server) writeDurableResponse(writer *bufio.Writer, current *assignment,
 }
 
 func (s *server) writeInputResponse(writer *bufio.Writer, current *assignment, intent inputIntent, result inputResult) bool {
+	message := "state"
+	if intent.Teleport {
+		message = "teleport"
+	}
 	body, err := json.Marshal(response{
 		Server: current.ServerID, Location: current.Location,
 		Latitude: current.Latitude, Longitude: current.Longitude, Instance: s.podName,
-		Generation: current.Generation, Counter: result.counter, Message: "state",
+		Generation: current.Generation, Counter: result.counter, Message: message,
 		Time: time.Now().UTC().Format(time.RFC3339Nano), Tick: result.tick,
 		ClientUID: intent.ClientUID, ClientLatitude: result.latitude,
-		ClientLongitude: result.longitude, InputSequence: result.sequence,
+		ClientLongitude: result.longitude, InputSequence: result.sequence, Reroute: result.reroute,
 	})
 	if err != nil {
 		return false

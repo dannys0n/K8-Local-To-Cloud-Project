@@ -19,8 +19,8 @@ adding a coordinator or operator.
   authoritative simulation clock and includes its current tick in responses.
 - **PostgreSQL:** authoritative location identity, counters, leases, and ownership
   generations; one PVC on the dedicated kind database worker.
-- **Redis:** ephemeral server-presence and counter-cache keys on the same kind
-  database worker.
+- **Redis:** ephemeral server presence plus 10 Hz dirty-entity recovery
+  snapshots on the same kind database worker.
 - **Client entry:** `127.0.0.1:9000`; the browser map keeps one TCP connection
   through its local bridge. The EKS overlay uses an AWS NLB.
 - **Manifest management:** a shared Kustomize base plus kind and EKS overlays.
@@ -63,19 +63,19 @@ display detail; it is not persisted.
 
 `tools/client.py` asks the operating system for a free local port, prints the
 resulting URL, and opens it in the default browser. It keeps a stable client UID
-and pending operation queue in browser local storage. Map clicks durably
-teleport the client without changing its counter. The separate counter button
-durably increments the per-client counter. PostgreSQL records an idempotency
-key and result for both operation types. The gateway
-routes the command to the nearest active server without replacing the client
+and unacknowledged counter operations in browser local storage. Map clicks are
+sequenced transient teleport intents applied by the authoritative server tick.
+The separate counter button durably increments the per-client counter;
+PostgreSQL records its idempotency key and committed result. The gateway routes
+teleports to the nearest active server without replacing the client
 connection. Run the command again for each
 additional independent client; every process receives its own available port.
 Use `--listen-port 8082` only when a fixed port is useful.
 
 The internal `@location` handshake remains available to smoke checks. Browser
-clients use `@teleport CLIENT_UID OPERATION_ID LATITUDE LONGITUDE` and
+clients use `@teleport CLIENT_UID SEQUENCE LATITUDE LONGITUDE` and
 `@increment CLIENT_UID OPERATION_ID`; `@locations`
-returns sanitized active-server markers. Servers batch pending durable commands
+returns sanitized active-server markers. Servers batch pending counter commands
 on their 20 Hz tick and acknowledge them only after a synchronous PostgreSQL
 commit. Retrying an operation ID returns its recorded counter without applying
 it twice.
@@ -85,17 +85,26 @@ The browser never sends a position for movement: the current logical server
 keeps only the newest sequence, normalizes diagonal input, and advances the
 client coordinate at 40 geographic degrees per second on its authoritative
 tick. Input stops automatically if no
-refresh arrives for four ticks. Movement is intentionally not written to
-PostgreSQL yet; after server loss it falls back to the last durable teleport.
+refresh arrives for four ticks. Movement and teleports are not written to
+PostgreSQL. Dirty entity positions and input sequences are pipelined to Redis at
+10 Hz with a five-minute TTL, bounding normal replacement-server rollback to
+approximately 100 ms while Redis remains available.
 
-After a gateway disconnect, the local bridge reconnects and reapplies the last
-committed coordinate without incrementing the counter. The browser retries any
-unacknowledged durable operation with the same operation ID.
+After every movement tick, the server checks the resulting coordinate against
+the geographic locations. When ownership changes, it returns a transient
+handoff snapshot; the gateway resumes that snapshot on the destination server
+before switching its downstream socket. The browser-to-gateway connection does
+not change, and neither normal movement nor handoff writes to PostgreSQL.
+
+After a gateway disconnect, the local bridge uses its last coordinate as a
+routing hint and resumes authoritative state from the surviving server or its
+Redis snapshot. The browser retries any unacknowledged counter operation with
+the same operation ID.
 The logical server identity and per-client durable state remain in PostgreSQL when a pod is
 replaced. An expired 1.5-second lease is claimed by an already-running spare;
 the generation increases to fence the old owner. Redis presence keys expire and
-repopulate automatically. Generic test messages remain at-least-once, while map
-teleports have exactly-once database effects. Without a location handshake, port 9000 remains the
+repopulate automatically. Generic test messages remain at-least-once, while
+counter increments have exactly-once database effects. Without a location handshake, port 9000 remains the
 original round-robin endpoint.
 
 Use the map's reconnect button to replace the gateway connection while retaining
