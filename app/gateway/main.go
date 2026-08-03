@@ -7,11 +7,13 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -22,25 +24,39 @@ import (
 const statsPage = `<!doctype html><html><head><meta charset="utf-8"><title>Gateway stats</title><style>body{background:#0d1117;color:#e6edf3;font:14px monospace;margin:2rem}pre{background:#161b22;border:1px solid #30363d;padding:1rem;overflow:auto}</style></head><body><h1>Gateway replica</h1><p>Read-only live state; refreshes every two seconds.</p><pre id="data">loading</pre><script>async function r(){let x=await fetch('/stats',{cache:'no-store'});document.querySelector('#data').textContent=JSON.stringify(await x.json(),null,2)}r();setInterval(r,2000)</script></body></html>`
 
 type backend struct {
-	Server     string `json:"server"`
-	Location   string `json:"location"`
-	Instance   string `json:"instance"`
-	Address    string `json:"address"`
-	Generation int64  `json:"generation"`
+	Server     string                `json:"server"`
+	Location   string                `json:"location"`
+	Latitude   float64               `json:"latitude"`
+	Longitude  float64               `json:"longitude"`
+	Instance   string                `json:"instance"`
+	Address    string                `json:"address"`
+	Generation int64                 `json:"generation"`
 }
 
 type discoveryResponse struct {
-	Status     string `json:"status"`
-	Server     string `json:"server"`
-	Location   string `json:"location"`
-	Instance   string `json:"instance"`
-	Generation int64  `json:"generation"`
+	Status     string                `json:"status"`
+	Server     string                `json:"server"`
+	Location   string                `json:"location"`
+	Latitude   float64               `json:"latitude"`
+	Longitude  float64               `json:"longitude"`
+	Instance   string                `json:"instance"`
+	Generation int64                 `json:"generation"`
+}
+
+type publicLocation struct {
+	Server     string  `json:"server"`
+	Location   string  `json:"location"`
+	Latitude   float64 `json:"latitude"`
+	Longitude  float64 `json:"longitude"`
+	Generation int64   `json:"generation"`
 }
 
 type session struct {
 	ID          string    `json:"id"`
 	Client      string    `json:"client"`
 	Location    string    `json:"location"`
+	Latitude    float64   `json:"latitude"`
+	Longitude   float64   `json:"longitude"`
 	Server      string    `json:"server"`
 	Instance    string    `json:"instance"`
 	Address     string    `json:"address"`
@@ -164,6 +180,8 @@ func (g *gateway) handleClient(ctx context.Context, client net.Conn) {
 	}()
 
 	requested := ""
+	clientLatitude := 0.0
+	clientLongitude := 0.0
 	for {
 		line, err := clientReader.ReadString('\n')
 		if err != nil {
@@ -185,8 +203,49 @@ func (g *gateway) handleClient(ctx context.Context, client net.Conn) {
 			}
 			downstream = candidate
 			requested = location
-			g.updateSession(id, client.RemoteAddr().String(), candidate.info)
+			clientLatitude = candidate.info.Latitude
+			clientLongitude = candidate.info.Longitude
+			g.updateSession(id, client.RemoteAddr().String(), candidate.info, clientLatitude, clientLongitude)
+			hello = g.withGatewayMetadata(hello)
 			if _, err := clientWriter.Write(hello); err != nil || clientWriter.Flush() != nil {
+				return
+			}
+			continue
+		}
+		if latitude, longitude, found, err := parsePosition(message); found {
+			if err != nil {
+				writeJSONError(clientWriter, err.Error())
+				continue
+			}
+			g.discover(ctx)
+			location, err := g.nearestLocation(latitude, longitude)
+			if err != nil {
+				writeJSONError(clientWriter, err.Error())
+				continue
+			}
+			candidate, hello, err := g.openRoute(ctx, location, nil)
+			if err != nil {
+				writeJSONError(clientWriter, err.Error())
+				continue
+			}
+			if downstream != nil {
+				downstream.conn.Close()
+			}
+			downstream = candidate
+			requested = location
+			clientLatitude = latitude
+			clientLongitude = longitude
+			g.updateSession(id, client.RemoteAddr().String(), candidate.info, clientLatitude, clientLongitude)
+			hello = g.withGatewayMetadata(hello)
+			if _, err := clientWriter.Write(hello); err != nil || clientWriter.Flush() != nil {
+				return
+			}
+			continue
+		}
+		if message == "@locations" {
+			g.discover(ctx)
+			body, _ := json.Marshal(map[string]any{"gateway": g.instance, "locations": g.publicLocations()})
+			if _, err := clientWriter.Write(append(body, '\n')); err != nil || clientWriter.Flush() != nil {
 				return
 			}
 			continue
@@ -207,17 +266,31 @@ func (g *gateway) handleClient(ctx context.Context, client net.Conn) {
 				continue
 			}
 			downstream = candidate
-			g.updateSession(id, client.RemoteAddr().String(), candidate.info)
+			g.updateSession(id, client.RemoteAddr().String(), candidate.info, clientLatitude, clientLongitude)
 			response, err = g.exchange(downstream, message)
 		}
 		if err != nil {
 			writeJSONError(clientWriter, "backend request failed")
 			continue
 		}
+		response = g.withGatewayMetadata(response)
 		if _, err := clientWriter.Write(response); err != nil || clientWriter.Flush() != nil {
 			return
 		}
 	}
+}
+
+func (g *gateway) withGatewayMetadata(body []byte) []byte {
+	var response map[string]any
+	if err := json.Unmarshal(body, &response); err != nil {
+		return body
+	}
+	response["gateway"] = g.instance
+	encoded, err := json.Marshal(response)
+	if err != nil {
+		return body
+	}
+	return append(encoded, '\n')
 }
 
 func (g *gateway) openRoute(ctx context.Context, requested string, previous *backend) (*backendConnection, []byte, error) {
@@ -318,7 +391,11 @@ func (g *gateway) discover(ctx context.Context) {
 				results <- result{}
 				return
 			}
-			results <- result{info: backend{Server: discovered.Server, Location: discovered.Location, Instance: discovered.Instance, Address: endpoint, Generation: discovered.Generation}, ok: true}
+			results <- result{info: backend{
+				Server: discovered.Server, Location: discovered.Location,
+				Latitude: discovered.Latitude, Longitude: discovered.Longitude,
+				Instance: discovered.Instance, Address: endpoint, Generation: discovered.Generation,
+			}, ok: true}
 		}()
 	}
 	found := make(map[string]backend)
@@ -361,6 +438,73 @@ func (g *gateway) routeCandidates(requested string, previous *backend) []backend
 	return result
 }
 
+func (g *gateway) routesSnapshot() []backend {
+	g.mu.RLock()
+	routes := make([]backend, 0, len(g.routes))
+	for _, route := range g.routes {
+		routes = append(routes, route)
+	}
+	g.mu.RUnlock()
+	sort.Slice(routes, func(i, j int) bool { return routes[i].Server < routes[j].Server })
+	return routes
+}
+
+func (g *gateway) publicLocations() []publicLocation {
+	routes := g.routesSnapshot()
+	locations := make([]publicLocation, 0, len(routes))
+	for _, route := range routes {
+		locations = append(locations, publicLocation{
+			Server: route.Server, Location: route.Location,
+			Latitude: route.Latitude, Longitude: route.Longitude,
+			Generation: route.Generation,
+		})
+	}
+	return locations
+}
+
+func (g *gateway) nearestLocation(latitude, longitude float64) (string, error) {
+	routes := g.routesSnapshot()
+	if len(routes) == 0 {
+		return "", errors.New("no active locations available")
+	}
+	toRadians := func(value float64) float64 { return value * math.Pi / 180 }
+	lat1 := toRadians(latitude)
+	bestLocation := ""
+	bestDistance := math.Inf(1)
+	for _, route := range routes {
+		lat2 := toRadians(route.Latitude)
+		deltaLatitude := lat2 - lat1
+		deltaLongitude := toRadians(route.Longitude - longitude)
+		a := math.Sin(deltaLatitude/2)*math.Sin(deltaLatitude/2) +
+			math.Cos(lat1)*math.Cos(lat2)*math.Sin(deltaLongitude/2)*math.Sin(deltaLongitude/2)
+		a = math.Max(0, math.Min(1, a))
+		distance := 2 * math.Atan2(math.Sqrt(a), math.Sqrt(1-a))
+		if distance < bestDistance || (distance == bestDistance && route.Location < bestLocation) {
+			bestDistance = distance
+			bestLocation = route.Location
+		}
+	}
+	return bestLocation, nil
+}
+
+func parsePosition(message string) (float64, float64, bool, error) {
+	arguments, found := strings.CutPrefix(message, "@position ")
+	if !found {
+		return 0, 0, false, nil
+	}
+	fields := strings.Fields(arguments)
+	if len(fields) != 2 {
+		return 0, 0, true, errors.New("position requires latitude and longitude")
+	}
+	latitude, latitudeErr := strconv.ParseFloat(fields[0], 64)
+	longitude, longitudeErr := strconv.ParseFloat(fields[1], 64)
+	if latitudeErr != nil || longitudeErr != nil || math.IsNaN(latitude) || math.IsNaN(longitude) ||
+		math.IsInf(latitude, 0) || math.IsInf(longitude, 0) || latitude < -90 || latitude > 90 || longitude < -180 || longitude > 180 {
+		return 0, 0, true, errors.New("position must be finite latitude [-90, 90] and longitude [-180, 180]")
+	}
+	return latitude, longitude, true, nil
+}
+
 func (g *gateway) removeRoute(failed backend) {
 	g.mu.Lock()
 	if current, ok := g.routes[failed.Location]; ok && current.Address == failed.Address && current.Generation == failed.Generation {
@@ -369,13 +513,13 @@ func (g *gateway) removeRoute(failed backend) {
 	g.mu.Unlock()
 }
 
-func (g *gateway) updateSession(id, client string, route backend) {
+func (g *gateway) updateSession(id, client string, route backend, latitude, longitude float64) {
 	g.mu.Lock()
 	connectedAt := time.Now().UTC()
 	if current, ok := g.sessions[id]; ok {
 		connectedAt = current.ConnectedAt
 	}
-	g.sessions[id] = session{ID: id, Client: client, Location: route.Location, Server: route.Server, Instance: route.Instance, Address: route.Address, Generation: route.Generation, ConnectedAt: connectedAt, Protocol: "TCP"}
+	g.sessions[id] = session{ID: id, Client: client, Location: route.Location, Latitude: latitude, Longitude: longitude, Server: route.Server, Instance: route.Instance, Address: route.Address, Generation: route.Generation, ConnectedAt: connectedAt, Protocol: "TCP"}
 	g.mu.Unlock()
 }
 
@@ -392,13 +536,9 @@ func (g *gateway) serveHTTP(ctx context.Context, address string) {
 		for _, item := range g.sessions {
 			sessions = append(sessions, item)
 		}
-		routes := make([]backend, 0, len(g.routes))
-		for _, item := range g.routes {
-			routes = append(routes, item)
-		}
 		g.mu.RUnlock()
 		sort.Slice(sessions, func(i, j int) bool { return sessions[i].ID < sessions[j].ID })
-		sort.Slice(routes, func(i, j int) bool { return routes[i].Server < routes[j].Server })
+		routes := g.routesSnapshot()
 		_ = json.NewEncoder(writer).Encode(map[string]any{"instance": g.instance, "accepted": g.accepted.Load(), "sessions": sessions, "routes": routes})
 	})
 	mux.HandleFunc("/", func(writer http.ResponseWriter, _ *http.Request) {

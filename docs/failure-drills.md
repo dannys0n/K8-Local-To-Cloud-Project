@@ -27,8 +27,8 @@ Every gateway discovers server endpoints through the headless Service DNS.
 
 ## Server persistence
 
-1. Start a location client, for example `tools/client.ps1 -Location new-york`.
-2. Send several messages and note `tcp-server-1`, `new-york`, and its counter.
+1. Start `tools/client.ps1`, then click near New York on the browser map.
+2. Send several test packets and note `tcp-server-1`, `new-york`, and its counter.
 3. Find the physical owner and generation in PostgreSQL:
 
    ```bash

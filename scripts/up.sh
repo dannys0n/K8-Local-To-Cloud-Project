@@ -47,4 +47,4 @@ echo
 echo "Ready."
 echo "TCP endpoint: 127.0.0.1:9000"
 echo "Gateway stats: http://127.0.0.1:8404/"
-echo "Run: python3 tools/client.py"
+echo "Map client: python3 tools/client.py"

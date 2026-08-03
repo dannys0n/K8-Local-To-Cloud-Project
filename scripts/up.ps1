@@ -55,7 +55,7 @@ try {
     Write-Host "Ready."
     Write-Host "TCP endpoint: 127.0.0.1:9000"
     Write-Host "Gateway stats: http://127.0.0.1:8404/"
-    Write-Host "Run: powershell -ExecutionPolicy Bypass -File tools/client.ps1"
+    Write-Host "Map client: powershell -ExecutionPolicy Bypass -File tools/client.ps1"
 } finally {
     Pop-Location
 }

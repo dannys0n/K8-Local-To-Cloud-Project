@@ -20,8 +20,8 @@ adding a coordinator or operator.
   generations; one PVC on the dedicated kind database worker.
 - **Redis:** ephemeral server-presence and counter-cache keys on the same kind
   database worker.
-- **Client entry:** `127.0.0.1:9000`, with an optional location handshake; an
-  AWS NLB in the EKS overlay.
+- **Client entry:** `127.0.0.1:9000`; the browser map keeps one TCP connection
+  through its local bridge. The EKS overlay uses an AWS NLB.
 - **Manifest management:** a shared Kustomize base plus kind and EKS overlays.
 
 ## Prerequisites
@@ -32,7 +32,8 @@ Install and make available on `PATH`:
 - kind
 - kubectl
 
-The interactive PowerShell client uses only .NET. The Python clients are optional.
+- Python 3 for the local browser client and optional dashboard
+- Internet access for Leaflet and OpenStreetMap tiles in the browser
 
 ## Run on Windows PowerShell
 
@@ -44,30 +45,35 @@ powershell -ExecutionPolicy Bypass -File tools/smoke.ps1
 powershell -ExecutionPolicy Bypass -File tools/client.ps1
 ```
 
-Select a stable virtual location:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File tools/client.ps1 -Location los-angeles
-powershell -ExecutionPolicy Bypass -File tools/client.ps1 -Location new-york
-powershell -ExecutionPolicy Bypass -File tools/client.ps1 -Location london
-powershell -ExecutionPolicy Bypass -File tools/client.ps1 -Location singapore
-powershell -ExecutionPolicy Bypass -File tools/client.ps1 -Location frankfurt
-```
-
 The location endpoints are deliberately simple and fixed for this lab:
 
-| Location | kind port | Logical identity |
-|---|---:|---|
-| Los Angeles | 9000 | `tcp-server-0` |
-| New York | 9000 | `tcp-server-1` |
-| London | 9000 | `tcp-server-2` |
-| Singapore | 9000 | `tcp-server-3` |
-| Frankfurt | 9000 | `tcp-server-4` |
+| Location | Latitude | Longitude | kind port | Logical identity |
+|---|---:|---:|---:|---|
+| Los Angeles | 34.0522 | -118.2437 | 9000 | `tcp-server-0` |
+| New York | 40.7128 | -74.0060 | 9000 | `tcp-server-1` |
+| London | 51.5074 | -0.1278 | 9000 | `tcp-server-2` |
+| Singapore | 1.3521 | 103.8198 | 9000 | `tcp-server-3` |
+| Frankfurt | 50.1109 | 8.6821 | 9000 | `tcp-server-4` |
 
-The client sends a small `@location` handshake that the gateway uses to select
-the stable backend. The same command can change backends later without replacing
-the client connection. After a gateway disconnect, the client reconnects with
-the same handshake.
+PostgreSQL stores each location's name, latitude, and longitude. These are the
+canonical coordinates used by Leaflet `LatLng` values and can later be indexed
+directly with Redis GEO. Leaflet's Web Mercator projection remains a browser
+display detail; it is not persisted.
+
+`tools/client.py` asks the operating system for a free local port, prints the
+resulting URL, and opens it in the default browser. Clicking the Leaflet map sends the selected latitude and
+longitude over the existing TCP client connection. The gateway calculates the
+nearest active server on the globe and switches its downstream connection
+without replacing the client connection. Run the command again for each
+additional independent client; every process receives its own available port.
+Use `--listen-port 8082` only when a fixed port is useful.
+
+The internal `@location` handshake remains available to smoke checks. Browser
+clients use `@position LATITUDE LONGITUDE`; `@locations` returns the active
+server markers.
+
+After a gateway disconnect, the local bridge reconnects and reapplies the last
+selected coordinate.
 The logical server identity and counter remain in PostgreSQL when a pod is
 replaced. An expired 1.5-second lease is claimed by an already-running spare;
 the generation increases to fence the old owner. Redis presence keys expire and
@@ -76,19 +82,9 @@ whose response is lost during a disconnect may be retried, so this toy protocol
 is not an exactly-once protocol. Without `-Location`, port 9000 remains the
 original round-robin endpoint.
 
-While the client is running, change locations or force a fresh connection:
-
-```text
-/location london
-/location singapore
-/reconnect
-/status
-```
-
-`/location` keeps the client socket open and asks its current gateway to switch
-the downstream server. `/reconnect` keeps the location but creates a new client
-connection, which can land on any gateway replica. Use the aggregate dashboard
-to see the gateway and backend independently.
+Use the map's reconnect button to replace the gateway connection while retaining
+the selected coordinate. Use the aggregate dashboard to see the gateway and
+backend independently.
 
 Open the selected gateway replica's live page:
 
@@ -143,12 +139,11 @@ Delete everything:
 Send a line such as `hello` and receive one JSON line:
 
 ```json
-{"server":"tcp-server-0","location":"los-angeles","instance":"tcp-server-abc","generation":3,"counter":1,"message":"hello","time":"2026-07-31T00:00:00Z"}
+{"gateway":"gateway-abc","server":"tcp-server-0","location":"los-angeles","latitude":34.0522,"longitude":-118.2437,"instance":"tcp-server-abc","generation":3,"counter":1,"message":"hello","time":"2026-07-31T00:00:00Z"}
 ```
 
-A single persistent client connection stays on one gateway pod, while its
-selected backend server can change. Open multiple clients to observe both forms
-of distribution.
+A single browser-client process keeps one persistent TCP connection on one
+gateway pod, while map clicks can change its selected backend server.
 
 ## Useful commands
 

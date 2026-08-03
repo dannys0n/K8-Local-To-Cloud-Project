@@ -25,22 +25,28 @@ const (
 	defaultRenewInterval = 500 * time.Millisecond
 )
 
-var locations = []struct {
-	serverID string
-	location string
-}{
-	{"tcp-server-0", "los-angeles"},
-	{"tcp-server-1", "new-york"},
-	{"tcp-server-2", "london"},
-	{"tcp-server-3", "singapore"},
-	{"tcp-server-4", "frankfurt"},
+type locationDefinition struct {
+	serverID  string
+	location  string
+	latitude  float64
+	longitude float64
+}
+
+var locations = []locationDefinition{
+	{"tcp-server-0", "los-angeles", 34.0522, -118.2437},
+	{"tcp-server-1", "new-york", 40.7128, -74.0060},
+	{"tcp-server-2", "london", 51.5074, -0.1278},
+	{"tcp-server-3", "singapore", 1.3521, 103.8198},
+	{"tcp-server-4", "frankfurt", 50.1109, 8.6821},
 }
 
 type assignment struct {
-	ServerID   string
-	Location   string
-	Generation int64
-	LeaseUntil time.Time
+	ServerID    string
+	Location    string
+	Latitude    float64
+	Longitude   float64
+	Generation  int64
+	LeaseUntil  time.Time
 }
 
 type server struct {
@@ -55,13 +61,15 @@ type server struct {
 }
 
 type response struct {
-	Server     string `json:"server"`
-	Location   string `json:"location"`
-	Instance   string `json:"instance"`
-	Generation int64  `json:"generation"`
-	Counter    uint64 `json:"counter"`
-	Message    string `json:"message"`
-	Time       string `json:"time"`
+	Server     string                `json:"server"`
+	Location   string                `json:"location"`
+	Latitude   float64               `json:"latitude"`
+	Longitude  float64               `json:"longitude"`
+	Instance   string                `json:"instance"`
+	Generation int64                 `json:"generation"`
+	Counter    uint64                `json:"counter"`
+	Message    string                `json:"message"`
+	Time       string                `json:"time"`
 }
 
 func main() {
@@ -196,6 +204,8 @@ func createSchema(ctx context.Context, db *sql.DB) error {
 		CREATE TABLE IF NOT EXISTS tcp_server_state (
 			server_id TEXT PRIMARY KEY,
 			location TEXT NOT NULL UNIQUE,
+			latitude DOUBLE PRECISION NOT NULL DEFAULT 0,
+			longitude DOUBLE PRECISION NOT NULL DEFAULT 0,
 			counter BIGINT NOT NULL DEFAULT 0 CHECK (counter >= 0),
 			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		);
@@ -206,14 +216,21 @@ func createSchema(ctx context.Context, db *sql.DB) error {
 			lease_until TIMESTAMPTZ
 		);
 		CREATE UNIQUE INDEX IF NOT EXISTS tcp_server_state_location
-			ON tcp_server_state (location)`
+			ON tcp_server_state (location);
+		ALTER TABLE tcp_server_state ADD COLUMN IF NOT EXISTS latitude DOUBLE PRECISION NOT NULL DEFAULT 0;
+		ALTER TABLE tcp_server_state ADD COLUMN IF NOT EXISTS longitude DOUBLE PRECISION NOT NULL DEFAULT 0`
 	if _, err := db.ExecContext(ctx, schema); err != nil {
 		return fmt.Errorf("create schema: %w", err)
 	}
 	for _, item := range locations {
 		if _, err := db.ExecContext(ctx, `
-			INSERT INTO tcp_server_state (server_id, location) VALUES ($1, $2)
-			ON CONFLICT (server_id) DO UPDATE SET location = EXCLUDED.location`, item.serverID, item.location); err != nil {
+			INSERT INTO tcp_server_state (server_id, location, latitude, longitude)
+			VALUES ($1, $2, $3, $4)
+			ON CONFLICT (server_id) DO UPDATE SET
+				location = EXCLUDED.location,
+				latitude = EXCLUDED.latitude,
+				longitude = EXCLUDED.longitude`,
+			item.serverID, item.location, item.latitude, item.longitude); err != nil {
 			return fmt.Errorf("seed location %s: %w", item.location, err)
 		}
 		if _, err := db.ExecContext(ctx, `
@@ -272,11 +289,13 @@ func (s *server) claim(ctx context.Context) (*assignment, error) {
 			FROM candidate c WHERE a.server_id = c.server_id
 			RETURNING a.server_id, a.generation, a.lease_until
 		)
-		SELECT c.server_id, s.location, c.generation, c.lease_until
+		SELECT c.server_id, s.location, s.latitude, s.longitude,
+			c.generation, c.lease_until
 		FROM claimed c JOIN tcp_server_state s USING (server_id)`
 	claimed := &assignment{}
 	err := s.db.QueryRowContext(ctx, query, s.instanceID, s.leaseDuration.Seconds()).Scan(
-		&claimed.ServerID, &claimed.Location, &claimed.Generation, &claimed.LeaseUntil,
+		&claimed.ServerID, &claimed.Location, &claimed.Latitude, &claimed.Longitude,
+		&claimed.Generation, &claimed.LeaseUntil,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -316,6 +335,8 @@ func (s *server) heartbeat(ctx context.Context, logger *slog.Logger) {
 			value["status"] = "active"
 			value["server"] = current.ServerID
 			value["location"] = current.Location
+			value["latitude"] = current.Latitude
+			value["longitude"] = current.Longitude
 			value["generation"] = current.Generation
 		}
 		body, _ := json.Marshal(value)
@@ -363,6 +384,8 @@ func (s *server) handleConnection(ctx context.Context, conn net.Conn, logger *sl
 				body["status"] = "active"
 				body["server"] = current.ServerID
 				body["location"] = current.Location
+				body["latitude"] = current.Latitude
+				body["longitude"] = current.Longitude
 				body["generation"] = current.Generation
 			}
 			encoded, _ := json.Marshal(body)
@@ -421,7 +444,9 @@ func (s *server) handleConnection(ctx context.Context, conn net.Conn, logger *sl
 
 func (s *server) writeResponse(writer *bufio.Writer, current *assignment, counter uint64, message string) bool {
 	body, err := json.Marshal(response{
-		Server: current.ServerID, Location: current.Location, Instance: s.podName,
+		Server: current.ServerID, Location: current.Location,
+		Latitude: current.Latitude, Longitude: current.Longitude,
+		Instance: s.podName,
 		Generation: current.Generation, Counter: counter, Message: message,
 		Time: time.Now().UTC().Format(time.RFC3339Nano),
 	})
