@@ -111,7 +111,7 @@ PAGE = r"""<!doctype html>
     el('showAllServers').addEventListener('change',renderServers);
     el('reconnect').addEventListener('click',async()=>{try{const body=await request('/api/reconnect',{method:'POST'});showRoute(body||{});connection(body?'ready':'gateway');inputDirty=true;el('error').textContent=''}catch(error){el('error').textContent=error.message;refresh()}});
     async function refresh(){try{const state=await request('/api/state');connection(state.connection);if(state.latitude!==null&&!pendingCommands.length){selectedPosition=[state.latitude,state.longitude];el('coordinate').textContent=`${state.latitude.toFixed(5)}, ${state.longitude.toFixed(5)}`;if(selectedMarker)selectedMarker.setLatLng(selectedPosition);else selectedMarker=L.marker(selectedPosition).addTo(map)}showRoute(state.route||{gateway:state.gateway})}catch(error){connection('disconnected')}}
-    loadLocations().then(()=>{refresh();drainCommands()}).catch(error=>{el('error').textContent=error.message;refresh()});setInterval(sendInput,50);setInterval(refresh,1000);setInterval(drainCommands,1000);setInterval(()=>loadLocations().catch(()=>{}),5000);
+    loadLocations().then(()=>{refresh();drainCommands()}).catch(error=>{el('error').textContent=error.message;refresh()});setInterval(sendInput,25);setInterval(refresh,1000);setInterval(drainCommands,1000);setInterval(()=>loadLocations().catch(()=>{}),5000);
   </script>
 </body>
 </html>"""

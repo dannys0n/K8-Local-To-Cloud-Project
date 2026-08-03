@@ -28,6 +28,7 @@ const (
 	defaultRenewInterval = 500 * time.Millisecond
 	defaultTickInterval  = 50 * time.Millisecond
 	movementSpeed        = 40.0
+	inputTimeoutTicks    = 8
 )
 
 type locationDefinition struct {
@@ -403,7 +404,7 @@ drained:
 	}
 	distance := movementSpeed * s.tickInterval.Seconds()
 	for _, entity := range s.entities {
-		if tick-entity.lastInputTick > 4 {
+		if tick-entity.lastInputTick >= inputTimeoutTicks {
 			entity.axisX = 0
 			entity.axisY = 0
 		}

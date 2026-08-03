@@ -80,12 +80,12 @@ on their 20 Hz tick and acknowledge them only after a synchronous PostgreSQL
 commit. Retrying an operation ID returns its recorded counter without applying
 it twice.
 
-WASD sends transient `@input CLIENT_UID SEQUENCE X Y` intents at up to 20 Hz.
+WASD sends transient `@input CLIENT_UID SEQUENCE X Y` intents at up to 40 Hz.
 The browser never sends a position for movement: the current logical server
 keeps only the newest sequence, normalizes diagonal input, and advances the
 client coordinate at 40 geographic degrees per second on its authoritative
 tick. Input stops automatically if no
-refresh arrives for four ticks. Movement is not written on each tick.
+refresh arrives for eight ticks (400 ms). Movement is not written on each tick.
 PostgreSQL records the last server-claim coordinate as a recovery point and
 stores the durable counter independently.
 
