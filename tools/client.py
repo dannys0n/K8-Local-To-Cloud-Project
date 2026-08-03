@@ -37,7 +37,7 @@ PAGE = r"""<!doctype html>
   </style>
 </head>
 <body>
-  <header><h1>Geographic client</h1><span class="hint">Click anywhere to change location</span><span class="status"><span id="dot" class="dot"></span><span id="connection">Connecting</span></span></header>
+  <header><h1>Geographic client</h1><span class="hint">Click to teleport; use WASD to move</span><span class="status"><span id="dot" class="dot"></span><span id="connection">Connecting</span></span></header>
   <main><div id="map"></div><aside>
     <div class="card"><div class="label">Selected coordinate</div><div id="coordinate" class="value">Click the map</div></div>
     <div class="card"><div class="label">Client UID</div><div id="clientUid" class="value">—</div></div>
@@ -54,9 +54,11 @@ PAGE = r"""<!doctype html>
   <script>
     const map=L.map('map',{worldCopyJump:true,minZoom:2}).setView([25,0],2);
     L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:18,attribution:'&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'}).addTo(map);
-    let selectedMarker=null, connectionLine=null, serverLayers=[], locations=[], currentRoute=null, selectedPosition=null, draining=false;
+    let selectedMarker=null, connectionLine=null, serverLayers=[], locations=[], currentRoute=null, selectedPosition=null, draining=false,inputInFlight=false,inputDirty=false;
+    const keys=new Set();
     const el=id=>document.getElementById(id);
     const clientUid=localStorage.getItem('tcp-lab-client-uid')||crypto.randomUUID();localStorage.setItem('tcp-lab-client-uid',clientUid);el('clientUid').textContent=clientUid;
+    const inputSequenceKey=`tcp-lab-input-sequence-${clientUid}`;let inputSequence=Number(localStorage.getItem(inputSequenceKey)||0);
     const pendingKey=`tcp-lab-pending-${clientUid}`;let pendingCommands=JSON.parse(localStorage.getItem(pendingKey)||'[]');
     function showRoute(body){
       currentRoute=body;
@@ -93,10 +95,19 @@ PAGE = r"""<!doctype html>
       if(selectedMarker)selectedMarker.setLatLng([lat,lng]);else selectedMarker=L.marker([lat,lng]).addTo(map);
       pendingCommands.push({operation_id:crypto.randomUUID(),latitude:lat,longitude:lng});localStorage.setItem(pendingKey,JSON.stringify(pendingCommands));drainCommands();
     });
+    function setKey(event,pressed){const key=event.key.toLowerCase();if(!'wasd'.includes(key))return;event.preventDefault();if(pressed)keys.add(key);else keys.delete(key);inputDirty=true}
+    addEventListener('keydown',event=>setKey(event,true));addEventListener('keyup',event=>setKey(event,false));addEventListener('blur',()=>{keys.clear();inputDirty=true});
+    async function sendInput(){
+      if(inputInFlight||pendingCommands.length||!currentRoute?.server)return;
+      const x=(keys.has('d')?1:0)-(keys.has('a')?1:0),y=(keys.has('w')?1:0)-(keys.has('s')?1:0);
+      if(x===0&&y===0&&!inputDirty)return;inputDirty=false;inputInFlight=true;
+      try{inputSequence++;localStorage.setItem(inputSequenceKey,inputSequence);const body=await request('/api/input',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({client_uid:clientUid,sequence:inputSequence,x,y})});showRoute(body);selectedPosition=[body.client_latitude,body.client_longitude];el('coordinate').textContent=`${body.client_latitude.toFixed(5)}, ${body.client_longitude.toFixed(5)}`;if(selectedMarker)selectedMarker.setLatLng(selectedPosition);else selectedMarker=L.marker(selectedPosition).addTo(map)}
+      catch(error){el('error').textContent=error.message;inputDirty=true}finally{inputInFlight=false}
+    }
     el('showAllServers').addEventListener('change',renderServers);
     el('reconnect').addEventListener('click',async()=>{try{const body=await request('/api/reconnect',{method:'POST'});showRoute(body||{});connection(body?'ready':'gateway');el('error').textContent=''}catch(error){el('error').textContent=error.message;refresh()}});
     async function refresh(){try{const state=await request('/api/state');connection(state.connection);if(state.latitude!==null&&!pendingCommands.length){selectedPosition=[state.latitude,state.longitude];el('coordinate').textContent=`${state.latitude.toFixed(5)}, ${state.longitude.toFixed(5)}`;if(selectedMarker)selectedMarker.setLatLng(selectedPosition);else selectedMarker=L.marker(selectedPosition).addTo(map)}showRoute(state.route||{gateway:state.gateway})}catch(error){connection('disconnected')}}
-    loadLocations().then(()=>{refresh();drainCommands()}).catch(error=>{el('error').textContent=error.message;refresh()});setInterval(refresh,1000);setInterval(drainCommands,1000);setInterval(()=>loadLocations().catch(()=>{}),5000);
+    loadLocations().then(()=>{refresh();drainCommands()}).catch(error=>{el('error').textContent=error.message;refresh()});setInterval(sendInput,50);setInterval(refresh,1000);setInterval(drainCommands,1000);setInterval(()=>loadLocations().catch(()=>{}),5000);
   </script>
 </body>
 </html>"""
@@ -194,6 +205,19 @@ class GatewayClient:
             self.connection = "ready"
         return body
 
+    def send_input(self, client_uid: str, sequence: int, x: float, y: float):
+        allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.:")
+        if not client_uid or len(client_uid) > 128 or set(client_uid) - allowed:
+            raise ValueError("client identifier is invalid")
+        if sequence < 0 or not (-1 <= x <= 1 and -1 <= y <= 1):
+            raise ValueError("input intent is invalid")
+        body = self.exchange(f"@input {client_uid} {sequence} {x:.3f} {y:.3f}")
+        with self.state_lock:
+            self.latitude = body["client_latitude"]
+            self.longitude = body["client_longitude"]
+            self.route = body
+        return body
+
     def reconnect(self):
         with self.lock:
             self._connect()
@@ -260,6 +284,10 @@ def make_handler(client: GatewayClient):
                     self.send_json(client.move(str(payload["client_uid"]), str(payload["operation_id"]), latitude, longitude))
                 elif path == "/api/reconnect":
                     self.send_json(client.reconnect())
+                elif path == "/api/input":
+                    length = int(self.headers.get("Content-Length", "0"))
+                    payload = json.loads(self.rfile.read(length) or b"{}")
+                    self.send_json(client.send_input(str(payload["client_uid"]), int(payload["sequence"]), float(payload["x"]), float(payload["y"])))
                 else:
                     self.send_json({"error": "not found"}, 404)
             except (GatewayResponseError, KeyError, OSError, TypeError, ValueError, ConnectionError) as error:

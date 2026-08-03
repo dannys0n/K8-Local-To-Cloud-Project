@@ -63,6 +63,9 @@ type server struct {
 	tickInterval  time.Duration
 	tick          atomic.Uint64
 	durable       chan durableCommand
+	inputs        chan inputCommand
+	entityMu      sync.Mutex
+	entities      map[string]*entityState
 	mu            sync.RWMutex
 	assignment    *assignment
 }
@@ -80,8 +83,9 @@ type response struct {
 	Tick       uint64                `json:"tick"`
 	ClientUID       string  `json:"client_uid,omitempty"`
 	OperationID     string  `json:"operation_id,omitempty"`
-	ClientLatitude  float64 `json:"client_latitude,omitempty"`
-	ClientLongitude float64 `json:"client_longitude,omitempty"`
+	ClientLatitude  float64 `json:"client_latitude"`
+	ClientLongitude float64 `json:"client_longitude"`
+	InputSequence   uint64  `json:"input_sequence,omitempty"`
 }
 
 type teleportCommand struct {
@@ -101,6 +105,37 @@ type durableResult struct {
 	counter uint64
 	tick    uint64
 	err     error
+}
+
+type inputIntent struct {
+	ClientUID string
+	Sequence  uint64
+	X         float64
+	Y         float64
+}
+
+type inputCommand struct {
+	intent inputIntent
+	result chan inputResult
+}
+
+type inputResult struct {
+	latitude  float64
+	longitude float64
+	counter   uint64
+	sequence  uint64
+	tick      uint64
+	err       error
+}
+
+type entityState struct {
+	latitude  float64
+	longitude float64
+	counter   uint64
+	sequence  uint64
+	axisX     float64
+	axisY     float64
+	lastInputTick uint64
 }
 
 func main() {
@@ -142,6 +177,7 @@ func main() {
 		instanceID: instanceID, podName: podName, db: db, redis: cache,
 		leaseDuration: leaseDuration, renewInterval: renewInterval, tickInterval: tickInterval,
 		durable: make(chan durableCommand, 4096),
+		inputs: make(chan inputCommand, 8192), entities: make(map[string]*entityState),
 	}
 	go s.manageAssignment(ctx, logger)
 	go s.heartbeat(ctx, logger)
@@ -197,6 +233,7 @@ func (s *server) runTicks(ctx context.Context) {
 		case <-ticker.C:
 			currentTick := s.tick.Add(1)
 			s.commitDurableCommands(ctx, currentTick)
+			s.applyTransientInputs(ctx, currentTick)
 		}
 	}
 }
@@ -222,15 +259,16 @@ func (s *server) applyDurableBatch(ctx context.Context, tick uint64, batch []dur
 	defer cancel()
 	tx, err := s.db.BeginTx(queryCtx, nil)
 	if err != nil {
-		s.finishDurableBatch(batch, nil, tick, err)
+		s.finishDurableBatch(batch, nil, nil, tick, err)
 		return
 	}
 	defer tx.Rollback()
 	if _, err = tx.ExecContext(queryCtx, `SET LOCAL synchronous_commit = on`); err != nil {
-		s.finishDurableBatch(batch, nil, tick, err)
+		s.finishDurableBatch(batch, nil, nil, tick, err)
 		return
 	}
 	results := make([]uint64, len(batch))
+	applied := make([]bool, len(batch))
 	for index, queued := range batch {
 		var lockedServer string
 		err = tx.QueryRowContext(queryCtx, `
@@ -271,21 +309,120 @@ func (s *server) applyDurableBatch(ctx context.Context, tick uint64, batch []dur
 		if err != nil {
 			break
 		}
+		applied[index] = true
 	}
 	if err == nil {
 		err = tx.Commit()
 	}
-	s.finishDurableBatch(batch, results, tick, err)
+	s.finishDurableBatch(batch, results, applied, tick, err)
 }
 
-func (s *server) finishDurableBatch(batch []durableCommand, counters []uint64, tick uint64, err error) {
+func (s *server) finishDurableBatch(batch []durableCommand, counters []uint64, applied []bool, tick uint64, err error) {
 	for index, queued := range batch {
 		result := durableResult{tick: tick, err: err}
 		if err == nil {
 			result.counter = counters[index]
+			if applied[index] {
+				s.entityMu.Lock()
+				s.entities[queued.teleport.ClientUID] = &entityState{
+					latitude: queued.teleport.Latitude, longitude: queued.teleport.Longitude,
+					counter: result.counter,
+				}
+				s.entityMu.Unlock()
+			}
 		}
 		queued.result <- result
 	}
+}
+
+func (s *server) applyTransientInputs(ctx context.Context, tick uint64) {
+	commands := make([]inputCommand, 0, 256)
+	for len(commands) < 4096 {
+		select {
+		case command := <-s.inputs:
+			commands = append(commands, command)
+		default:
+			goto drained
+		}
+	}
+
+drained:
+	failed := make(map[int]error)
+	for index, command := range commands {
+		if err := s.ensureEntity(ctx, command.intent.ClientUID); err != nil {
+			failed[index] = err
+		}
+	}
+	s.entityMu.Lock()
+	for index, command := range commands {
+		if failed[index] != nil {
+			continue
+		}
+		entity := s.entities[command.intent.ClientUID]
+		if entity != nil && command.intent.Sequence > entity.sequence {
+			entity.sequence = command.intent.Sequence
+			entity.lastInputTick = tick
+			magnitude := math.Hypot(command.intent.X, command.intent.Y)
+			if magnitude > 1 {
+				entity.axisX = command.intent.X / magnitude
+				entity.axisY = command.intent.Y / magnitude
+			} else {
+				entity.axisX = command.intent.X
+				entity.axisY = command.intent.Y
+			}
+		}
+	}
+	distance := s.tickInterval.Seconds()
+	for _, entity := range s.entities {
+		if tick-entity.lastInputTick > 4 {
+			entity.axisX = 0
+			entity.axisY = 0
+		}
+		entity.latitude = math.Max(-90, math.Min(90, entity.latitude+entity.axisY*distance))
+		entity.longitude += entity.axisX * distance
+		if entity.longitude > 180 {
+			entity.longitude -= 360
+		} else if entity.longitude < -180 {
+			entity.longitude += 360
+		}
+	}
+	for index, command := range commands {
+		if err := failed[index]; err != nil {
+			command.result <- inputResult{tick: tick, err: err}
+			continue
+		}
+		if entity := s.entities[command.intent.ClientUID]; entity != nil {
+			command.result <- inputResult{
+				latitude: entity.latitude, longitude: entity.longitude, counter: entity.counter,
+				sequence: entity.sequence, tick: tick,
+			}
+		}
+	}
+	s.entityMu.Unlock()
+}
+
+func (s *server) ensureEntity(ctx context.Context, clientUID string) error {
+	s.entityMu.Lock()
+	_, exists := s.entities[clientUID]
+	s.entityMu.Unlock()
+	if exists {
+		return nil
+	}
+	queryCtx, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	loaded := &entityState{}
+	err := s.db.QueryRowContext(queryCtx, `
+		SELECT latitude, longitude, counter FROM client_state WHERE client_uid = $1`, clientUID).
+		Scan(&loaded.latitude, &loaded.longitude, &loaded.counter)
+	if err != nil {
+		return err
+	}
+	s.entityMu.Lock()
+	if _, exists := s.entities[clientUID]; !exists {
+		s.entities[clientUID] = loaded
+	}
+	s.entityMu.Unlock()
+	return nil
 }
 
 func connectDatabases(ctx context.Context, logger *slog.Logger) (*sql.DB, *redis.Client, error) {
@@ -614,6 +751,36 @@ func (s *server) handleConnection(ctx context.Context, conn net.Conn, logger *sl
 			}
 			continue
 		}
+		if intent, found, err := parseInput(message); found {
+			if err != nil {
+				_, _ = fmt.Fprintf(writer, `{"error":%q}`+"\n", err.Error())
+				_ = writer.Flush()
+				continue
+			}
+			command := inputCommand{intent: intent, result: make(chan inputResult, 1)}
+			select {
+			case s.inputs <- command:
+			case <-ctx.Done():
+				return
+			default:
+				_, _ = fmt.Fprintln(writer, `{"error":"input queue full"}`)
+				_ = writer.Flush()
+				continue
+			}
+			select {
+			case result := <-command.result:
+				if result.err != nil {
+					s.writeDatabaseError(writer, logger, result.err)
+					continue
+				}
+				if !s.writeInputResponse(writer, bound, intent, result) {
+					return
+				}
+			case <-ctx.Done():
+				return
+			}
+			continue
+		}
 		count, err := s.increment(ctx, bound)
 		if err != nil {
 			s.writeDatabaseError(writer, logger, err)
@@ -646,6 +813,25 @@ func parseTeleport(message string) (teleportCommand, bool, error) {
 	return teleportCommand{ClientUID: fields[0], OperationID: fields[1], Latitude: latitude, Longitude: longitude}, true, nil
 }
 
+func parseInput(message string) (inputIntent, bool, error) {
+	arguments, found := strings.CutPrefix(message, "@input ")
+	if !found {
+		return inputIntent{}, false, nil
+	}
+	fields := strings.Fields(arguments)
+	if len(fields) != 4 || !validIdentifier(fields[0]) {
+		return inputIntent{}, true, errors.New("input requires client UID, sequence, x axis, and y axis")
+	}
+	sequence, sequenceErr := strconv.ParseUint(fields[1], 10, 64)
+	x, xErr := strconv.ParseFloat(fields[2], 64)
+	y, yErr := strconv.ParseFloat(fields[3], 64)
+	if sequenceErr != nil || xErr != nil || yErr != nil || math.IsNaN(x) || math.IsNaN(y) ||
+		math.IsInf(x, 0) || math.IsInf(y, 0) || x < -1 || x > 1 || y < -1 || y > 1 {
+		return inputIntent{}, true, errors.New("input axes must be finite values from -1 to 1")
+	}
+	return inputIntent{ClientUID: fields[0], Sequence: sequence, X: x, Y: y}, true, nil
+}
+
 func validIdentifier(value string) bool {
 	if value == "" || len(value) > 128 {
 		return false
@@ -667,6 +853,24 @@ func (s *server) writeTeleportResponse(writer *bufio.Writer, current *assignment
 		Time: time.Now().UTC().Format(time.RFC3339Nano), Tick: result.tick,
 		ClientUID: command.ClientUID, OperationID: command.OperationID,
 		ClientLatitude: command.Latitude, ClientLongitude: command.Longitude,
+	})
+	if err != nil {
+		return false
+	}
+	if _, err := writer.Write(append(body, '\n')); err != nil {
+		return false
+	}
+	return writer.Flush() == nil
+}
+
+func (s *server) writeInputResponse(writer *bufio.Writer, current *assignment, intent inputIntent, result inputResult) bool {
+	body, err := json.Marshal(response{
+		Server: current.ServerID, Location: current.Location,
+		Latitude: current.Latitude, Longitude: current.Longitude, Instance: s.podName,
+		Generation: current.Generation, Counter: result.counter, Message: "state",
+		Time: time.Now().UTC().Format(time.RFC3339Nano), Tick: result.tick,
+		ClientUID: intent.ClientUID, ClientLatitude: result.latitude,
+		ClientLongitude: result.longitude, InputSequence: result.sequence,
 	})
 	if err != nil {
 		return false

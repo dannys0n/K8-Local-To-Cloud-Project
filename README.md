@@ -78,6 +78,13 @@ on their 20 Hz tick and acknowledge them only after a synchronous PostgreSQL
 commit. Retrying an operation ID returns its recorded counter without applying
 it twice.
 
+WASD sends transient `@input CLIENT_UID SEQUENCE X Y` intents at up to 20 Hz.
+The browser never sends a position for movement: the current logical server
+keeps only the newest sequence, normalizes diagonal input, and advances the
+client coordinate on its authoritative tick. Input stops automatically if no
+refresh arrives for four ticks. Movement is intentionally not written to
+PostgreSQL yet; after server loss it falls back to the last durable teleport.
+
 After a gateway disconnect, the local bridge reconnects and reapplies the last
 committed coordinate without incrementing the counter. The browser retries any
 unacknowledged durable operation with the same operation ID.
