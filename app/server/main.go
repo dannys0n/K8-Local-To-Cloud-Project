@@ -30,6 +30,7 @@ const (
 	movementSpeed         = 40.0
 	inputTimeoutTicks     = 8
 	visibilityActiveTicks = 20
+	entityCleanupTicks    = 600
 	mercatorLatitudeLimit = 85.05112878
 )
 
@@ -511,7 +512,11 @@ drained:
 	}
 	distance := movementSpeed * s.tickInterval.Seconds()
 	projectedDistance := distance * math.Pi / 180
-	for _, entity := range s.entities {
+	for uid, entity := range s.entities {
+		if tick-entity.lastInputTick >= entityCleanupTicks {
+			delete(s.entities, uid)
+			continue
+		}
 		if tick-entity.lastInputTick >= inputTimeoutTicks {
 			entity.axisX = 0
 			entity.axisY = 0

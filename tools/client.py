@@ -3,8 +3,12 @@
 
 import argparse
 import json
+import math
+import random
 import socket
 import threading
+import time
+import uuid
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
@@ -32,6 +36,7 @@ PAGE = r"""<!doctype html>
     .toggle{display:flex;align-items:center;gap:8px;color:#8b949e;cursor:pointer}.toggle+.toggle{margin-top:9px}.toggle input{width:auto;margin:0}
     button{width:100%;border:1px solid #30363d;border-radius:6px;background:#21262d;color:#e6edf3;padding:9px;cursor:pointer}
     button:hover{border-color:#58a6ff}.error{color:#f85149;min-height:20px;margin-top:10px}
+    .batch-row{display:grid;grid-template-columns:1fr auto;align-items:center;gap:8px;margin-top:8px;font:12px ui-monospace,monospace}.batch-row button{width:auto;padding:5px 8px}.bot-summary{margin:8px 0;color:#8b949e}
     .server-label{background:#161b22;color:#e6edf3;border:1px solid #58a6ff;border-radius:4px;box-shadow:none;padding:2px 5px}
     .entity-label{background:#161b22;color:#39c5cf;border:1px solid #39c5cf;border-radius:4px;box-shadow:none;padding:2px 5px}
     .other-client-pin-wrap{background:transparent;border:0}.other-client-pin{display:block;width:18px;height:18px;background:#39c5cf;border:2px solid #d7ffff;border-radius:50% 50% 50% 0;transform:rotate(-45deg);box-shadow:0 2px 5px #0009}
@@ -53,6 +58,7 @@ PAGE = r"""<!doctype html>
     <div class="card"><div class="label">Server pod</div><div id="instance" class="value">—</div></div>
     <div class="card"><div class="label">Ownership generation</div><div id="generation" class="value">—</div></div>
     <div class="card"><label class="toggle"><input id="showAllServers" type="checkbox">Show all active servers</label><label class="toggle"><input id="showProxies" type="checkbox">Show proxies</label><label class="toggle"><input id="showHotSwaps" type="checkbox">Show hot swaps</label></div>
+    <div class="card"><div class="label">Dummy clients</div><input id="botBatchSize" type="number" min="1" max="500" value="10"><button id="spawnBots">Spawn batch</button><div id="botSummary" class="bot-summary">0 active</div><div id="botBatches"></div><button id="despawnAllBots">Despawn all</button></div>
     <button id="reconnect">Reconnect gateway client</button><div id="error" class="error"></div>
   </aside></main>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
@@ -74,6 +80,8 @@ PAGE = r"""<!doctype html>
     }
     function connection(state){connectionState=state;if(state!=='ready')renderEntities([]);const dot=el('dot');dot.classList.toggle('ok',state==='ready');dot.classList.toggle('waiting',state==='gateway');el('connection').textContent=state==='ready'?'Connected':state==='gateway'?'Gateway connected; waiting for server':'Disconnected';}
     async function request(path,options){const response=await fetch(path,options);const body=await response.json();if(!response.ok)throw new Error(body.error||response.statusText);return body}
+    function renderBots(state){el('botSummary').textContent=`${state.total} active in ${state.batches.length} batches`;const list=el('botBatches');list.replaceChildren();for(const batch of state.batches){const row=document.createElement('div');row.className='batch-row';const label=document.createElement('span');label.textContent=`Batch ${batch.id}: ${batch.count}`;const remove=document.createElement('button');remove.textContent='Despawn';remove.addEventListener('click',async()=>{await request('/api/bots/despawn',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({batch_id:batch.id})});refreshBots()});row.append(label,remove);list.appendChild(row)}}
+    async function refreshBots(){try{renderBots(await request('/api/bots'))}catch(error){el('error').textContent=error.message}}
     function infraNode(item,kind){const node=document.createElement('div');node.className=`infra-node ${kind}`;node.dataset.name=item.name;node.textContent=item.name;node.title=[item.name,item.ip,item.node].filter(Boolean).join('\n');return node}
     function drawProxyEdge(){const svg=el('infraEdges');svg.replaceChildren();if(!el('showProxies').checked||!selectedPosition||!currentRoute?.gateway)return;const node=[...el('proxyRow').children].find(item=>item.dataset.name===currentRoute.gateway);if(!node)return;const mapRect=el('map').getBoundingClientRect(),nodeRect=node.getBoundingClientRect(),start=map.latLngToContainerPoint(selectedPosition);svg.setAttribute('viewBox',`0 0 ${mapRect.width} ${mapRect.height}`);const line=document.createElementNS('http://www.w3.org/2000/svg','line');line.setAttribute('x1',start.x);line.setAttribute('y1',start.y);line.setAttribute('x2',nodeRect.left-mapRect.left+nodeRect.width/2);line.setAttribute('y2',nodeRect.top-mapRect.top+nodeRect.height/2);line.setAttribute('stroke','#3fb950');line.setAttribute('stroke-width','2');line.setAttribute('stroke-dasharray','7 6');svg.appendChild(line)}
     function renderInfra(){const proxies=el('proxyRow'),spares=el('spareRow');proxies.replaceChildren();spares.replaceChildren();if(infra&&el('showProxies').checked)for(const gateway of infra.gateways){const node=infraNode(gateway,'proxy');if(gateway.name===currentRoute?.gateway)node.classList.add('active');proxies.appendChild(node)}if(infra&&el('showHotSwaps').checked)for(const server of infra.server_instances.filter(item=>item.role==='spare'))spares.appendChild(infraNode(server,'spare'));requestAnimationFrame(drawProxyEdge)}
@@ -109,6 +117,8 @@ PAGE = r"""<!doctype html>
       catch(error){el('error').textContent=error.message;refresh()}finally{teleporting=false;inputDirty=true}
     });
     el('increment').addEventListener('click',()=>{pendingCommands.push({kind:'increment',operation_id:crypto.randomUUID()});localStorage.setItem(pendingKey,JSON.stringify(pendingCommands));drainCommands()});
+    el('spawnBots').addEventListener('click',async()=>{try{await request('/api/bots/spawn',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({count:Number(el('botBatchSize').value)})});refreshBots()}catch(error){el('error').textContent=error.message}});
+    el('despawnAllBots').addEventListener('click',async()=>{try{await request('/api/bots/despawn-all',{method:'POST'});refreshBots()}catch(error){el('error').textContent=error.message}});
     function setKey(event,pressed){const key=event.key.toLowerCase();if(!'wasd'.includes(key))return;event.preventDefault();if(pressed)keys.add(key);else keys.delete(key);inputDirty=true}
     addEventListener('keydown',event=>setKey(event,true));addEventListener('keyup',event=>setKey(event,false));addEventListener('blur',()=>{keys.clear();inputDirty=true});
     async function sendInput(){
@@ -123,7 +133,7 @@ PAGE = r"""<!doctype html>
     async function reconnect(silent=false){if(reconnecting)return;reconnecting=true;try{const body=await request('/api/reconnect',{method:'POST'});showRoute(body||{});connection(body?'ready':'gateway');inputDirty=true;el('error').textContent=''}catch(error){if(!silent)el('error').textContent=error.message;refresh()}finally{reconnecting=false}}
     el('reconnect').addEventListener('click',()=>reconnect(false));
     async function refresh(){try{const state=await request('/api/state');connection(state.connection);if(state.latitude!==null&&!pendingCommands.length){selectedPosition=[state.latitude,state.longitude];el('coordinate').textContent=`${state.latitude.toFixed(5)}, ${state.longitude.toFixed(5)}`;if(selectedMarker)selectedMarker.setLatLng(selectedPosition);else selectedMarker=L.marker(selectedPosition).addTo(map)}showRoute(state.route||{gateway:state.gateway})}catch(error){connection('disconnected')}}
-    loadLocations().then(()=>{refresh();drainCommands()}).catch(error=>{el('error').textContent=error.message;refresh()});setInterval(sendInput,25);setInterval(refresh,1000);setInterval(()=>{if(connectionState!=='ready')reconnect(true)},1000);setInterval(drainCommands,1000);setInterval(loadInfra,2000);setInterval(()=>loadLocations().catch(()=>{}),5000);
+    loadLocations().then(()=>{refresh();refreshBots();drainCommands()}).catch(error=>{el('error').textContent=error.message;refresh()});setInterval(sendInput,25);setInterval(refresh,1000);setInterval(refreshBots,1000);setInterval(()=>{if(connectionState!=='ready')reconnect(true)},1000);setInterval(drainCommands,1000);setInterval(loadInfra,2000);setInterval(()=>loadLocations().catch(()=>{}),5000);
   </script>
 </body>
 </html>"""
@@ -265,7 +275,103 @@ class GatewayClient:
             self._close()
 
 
-def make_handler(client: GatewayClient):
+class Bot:
+    def __init__(self, host: str, port: int):
+        self.uid = f"bot:{uuid.uuid4()}"
+        self.client = GatewayClient(host, port)
+        self.stopped = threading.Event()
+        self.thread = threading.Thread(target=self.run, name=self.uid, daemon=True)
+
+    def start(self):
+        self.thread.start()
+
+    def stop(self):
+        self.stopped.set()
+        sock = self.client.sock
+        if sock:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+
+    def run(self):
+        sequence = 0
+        axis_x = axis_y = 0.0
+        rng = random.Random(self.uid)
+        next_direction = time.monotonic()
+        next_counter = next_direction + rng.random()
+        pending_operation = None
+        try:
+            while not self.stopped.is_set():
+                started = time.monotonic()
+                if started >= next_direction:
+                    angle = rng.random() * math.tau
+                    axis_x, axis_y = math.cos(angle), math.sin(angle)
+                    next_direction = started + 3
+                if started >= next_counter:
+                    if pending_operation is None:
+                        pending_operation = f"bot-op:{uuid.uuid4()}"
+                    try:
+                        self.client.increment(self.uid, pending_operation)
+                        pending_operation = None
+                    except (GatewayResponseError, OSError, ValueError, ConnectionError):
+                        pass
+                    next_counter = time.monotonic() + 1
+                sequence += 1
+                try:
+                    self.client.send_input(self.uid, sequence, axis_x, axis_y)
+                except (GatewayResponseError, OSError, ValueError, ConnectionError):
+                    pass
+                self.stopped.wait(max(0, 0.05 - (time.monotonic() - started)))
+        finally:
+            self.client.close()
+
+
+class BotManager:
+    def __init__(self, host: str, port: int):
+        self.host = host
+        self.port = port
+        self.lock = threading.Lock()
+        self.next_batch = 1
+        self.batches: dict[int, list[Bot]] = {}
+
+    def spawn(self, count: int) -> dict:
+        if count < 1 or count > 500:
+            raise ValueError("batch size must be between 1 and 500")
+        bots = [Bot(self.host, self.port) for _ in range(count)]
+        with self.lock:
+            batch_id = self.next_batch
+            self.next_batch += 1
+            self.batches[batch_id] = bots
+        for bot in bots:
+            bot.start()
+        return self.snapshot()
+
+    def despawn(self, batch_id: int) -> dict:
+        with self.lock:
+            bots = self.batches.pop(batch_id, None)
+        if bots is None:
+            raise ValueError("batch not found")
+        for bot in bots:
+            bot.stop()
+        return self.snapshot()
+
+    def despawn_all(self) -> dict:
+        with self.lock:
+            batches = list(self.batches.values())
+            self.batches.clear()
+        for bots in batches:
+            for bot in bots:
+                bot.stop()
+        return self.snapshot()
+
+    def snapshot(self) -> dict:
+        with self.lock:
+            batches = [{"id": batch_id, "count": len(bots)} for batch_id, bots in self.batches.items()]
+        return {"total": sum(batch["count"] for batch in batches), "batches": batches}
+
+
+def make_handler(client: GatewayClient, bots: BotManager):
     class Handler(BaseHTTPRequestHandler):
         def send_json(self, body, status=200):
             encoded = json.dumps(body).encode()
@@ -289,6 +395,8 @@ def make_handler(client: GatewayClient):
                     self.send_json(client.snapshot())
                 elif path == "/api/locations":
                     self.send_json(client.exchange("@locations"))
+                elif path == "/api/bots":
+                    self.send_json(bots.snapshot())
                 else:
                     self.send_json({"error": "not found"}, 404)
             except (GatewayResponseError, OSError, ValueError, ConnectionError) as error:
@@ -297,7 +405,17 @@ def make_handler(client: GatewayClient):
         def do_POST(self):
             path = urlparse(self.path).path
             try:
-                if path == "/api/location":
+                if path == "/api/bots/spawn":
+                    length = int(self.headers.get("Content-Length", "0"))
+                    payload = json.loads(self.rfile.read(length) or b"{}")
+                    self.send_json(bots.spawn(int(payload["count"])))
+                elif path == "/api/bots/despawn":
+                    length = int(self.headers.get("Content-Length", "0"))
+                    payload = json.loads(self.rfile.read(length) or b"{}")
+                    self.send_json(bots.despawn(int(payload["batch_id"])))
+                elif path == "/api/bots/despawn-all":
+                    self.send_json(bots.despawn_all())
+                elif path == "/api/location":
                     length = int(self.headers.get("Content-Length", "0"))
                     payload = json.loads(self.rfile.read(length) or b"{}")
                     latitude, longitude = float(payload["latitude"]), float(payload["longitude"])
@@ -334,7 +452,8 @@ def main() -> int:
     parser.add_argument("--no-browser", action="store_true")
     args = parser.parse_args()
     client = GatewayClient(args.gateway_host, args.gateway_port)
-    server = ThreadingHTTPServer((args.listen_host, args.listen_port), make_handler(client))
+    bots = BotManager(args.gateway_host, args.gateway_port)
+    server = ThreadingHTTPServer((args.listen_host, args.listen_port), make_handler(client, bots))
     actual_port = server.server_address[1]
     url = f"http://{args.listen_host}:{actual_port}"
     print(f"Map client: {url}")
@@ -347,6 +466,7 @@ def main() -> int:
         pass
     finally:
         server.server_close()
+        bots.despawn_all()
         client.close()
     return 0
 

@@ -72,6 +72,13 @@ connection. Run the command again for each
 additional independent client; every process receives its own available port.
 Use `--listen-port 8082` only when a fixed port is useful.
 
+The client sidebar can spawn dummy clients in batches of up to 500. Every bot
+uses its own gateway TCP connection, chooses a random normalized movement
+direction every three seconds, sends movement heartbeats at 20 Hz, and performs
+one idempotent durable counter increment per second. Batches can be despawned
+individually or together. Their cyan pins disappear from visibility after one
+second, and abandoned in-memory server entities are removed after 30 seconds.
+
 The internal `@location` handshake remains available to smoke checks. Browser
 clients use `@teleport CLIENT_UID SEQUENCE LATITUDE LONGITUDE` and
 `@increment CLIENT_UID OPERATION_ID`; `@locations`
