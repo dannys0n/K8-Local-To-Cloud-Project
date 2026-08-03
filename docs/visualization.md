@@ -18,6 +18,12 @@ holding that identity. It uses the current `kubectl` context and binds only
 to local loopback by default. It reads pod endpoints through the Kubernetes API;
 the per-replica statistics Service is not exposed publicly on EKS.
 
+While the dashboard is running, the local map client can enable `Show proxies`
+and `Show hot swaps`. Proxies appear in a screen-space row below the map, hot
+spare server pods appear above it, and the selected gateway is connected to the
+client marker. These optional layers read the dashboard's localhost-only JSON;
+the gateway and server protocols do not expose Kubernetes inventory.
+
 The Data services table uses Kubernetes pod status to show the in-cluster
 PostgreSQL and Redis instances, their worker placement, pod IPs, stable Service
 endpoints, restart counts, and readiness. It does not inspect database contents

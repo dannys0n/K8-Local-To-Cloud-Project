@@ -29,16 +29,19 @@ PAGE = r"""<!doctype html>
     .label{color:#8b949e;font-size:11px;text-transform:uppercase;letter-spacing:.08em;margin-bottom:5px}
     .value{font-family:ui-monospace,monospace;overflow-wrap:anywhere}.route{font-size:18px;color:#58a6ff}
     input{width:100%;margin-bottom:8px;border:1px solid #30363d;border-radius:6px;background:#161b22;color:#e6edf3;padding:9px}
-    .toggle{display:flex;align-items:center;gap:8px;color:#8b949e;cursor:pointer}.toggle input{width:auto;margin:0}
+    .toggle{display:flex;align-items:center;gap:8px;color:#8b949e;cursor:pointer}.toggle+.toggle{margin-top:9px}.toggle input{width:auto;margin:0}
     button{width:100%;border:1px solid #30363d;border-radius:6px;background:#21262d;color:#e6edf3;padding:9px;cursor:pointer}
     button:hover{border-color:#58a6ff}.error{color:#f85149;min-height:20px;margin-top:10px}
     .server-label{background:#161b22;color:#e6edf3;border:1px solid #58a6ff;border-radius:4px;box-shadow:none;padding:2px 5px}
+    .infra-row{position:absolute;left:54px;right:12px;z-index:900;display:flex;justify-content:center;gap:7px;flex-wrap:wrap;pointer-events:none}.infra-row.top{top:12px}.infra-row.bottom{bottom:24px}
+    .infra-node{max-width:180px;padding:6px 9px;border:1px solid #8b949e;border-radius:6px;background:#161b22e8;color:#e6edf3;font:11px ui-monospace,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;pointer-events:auto;box-shadow:0 2px 8px #0008}.infra-node.active{border-color:#3fb950;color:#3fb950}.infra-node.spare{border-color:#d29922;color:#d29922}
+    #infraEdges{position:absolute;inset:0;width:100%;height:100%;z-index:899;pointer-events:none}#infraStatus{position:absolute;left:12px;bottom:12px;z-index:901;color:#f85149;background:#161b22dd;padding:4px 7px;border-radius:4px;font-size:11px}
     @media(max-width:720px){main{grid-template-columns:1fr;grid-template-rows:minmax(360px,1fr) auto}aside{border-left:0;border-top:1px solid #30363d}}
   </style>
 </head>
 <body>
   <header><h1>Geographic client</h1><span class="hint">Click to teleport; use WASD to move</span><span class="status"><span id="dot" class="dot"></span><span id="connection">Connecting</span></span></header>
-  <main><div id="map"></div><aside>
+  <main><div id="map"><svg id="infraEdges"></svg><div id="spareRow" class="infra-row top"></div><div id="proxyRow" class="infra-row bottom"></div><div id="infraStatus" hidden></div></div><aside>
     <div class="card"><div class="label">Selected coordinate</div><div id="coordinate" class="value">Click the map</div></div>
     <div class="card"><div class="label">Client UID</div><div id="clientUid" class="value">—</div></div>
     <div class="card"><div class="label">Durable counter</div><div id="counter" class="value route">0</div><button id="increment">Increase counter</button></div>
@@ -47,14 +50,14 @@ PAGE = r"""<!doctype html>
     <div class="card"><div class="label">Logical server</div><div id="server" class="value">—</div></div>
     <div class="card"><div class="label">Server pod</div><div id="instance" class="value">—</div></div>
     <div class="card"><div class="label">Ownership generation</div><div id="generation" class="value">—</div></div>
-    <div class="card"><label class="toggle"><input id="showAllServers" type="checkbox">Show all active servers</label></div>
+    <div class="card"><label class="toggle"><input id="showAllServers" type="checkbox">Show all active servers</label><label class="toggle"><input id="showProxies" type="checkbox">Show proxies</label><label class="toggle"><input id="showHotSwaps" type="checkbox">Show hot swaps</label></div>
     <button id="reconnect">Reconnect gateway client</button><div id="error" class="error"></div>
   </aside></main>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
   <script>
     const map=L.map('map',{worldCopyJump:true,minZoom:2}).setView([25,0],2);
     L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:18,attribution:'&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'}).addTo(map);
-    let selectedMarker=null, connectionLine=null, serverLayers=[], locations=[], currentRoute=null, selectedPosition=null, connectionState='disconnected',draining=false,inputInFlight=false,inputDirty=true,teleporting=false,reconnecting=false;
+    let selectedMarker=null, connectionLine=null, serverLayers=[], locations=[], infra=null, currentRoute=null, selectedPosition=null, connectionState='disconnected',draining=false,inputInFlight=false,inputDirty=true,teleporting=false,reconnecting=false;
     const keys=new Set();
     const el=id=>document.getElementById(id);
     const clientUid=localStorage.getItem('tcp-lab-client-uid')||crypto.randomUUID();localStorage.setItem('tcp-lab-client-uid',clientUid);el('clientUid').textContent=clientUid;
@@ -65,10 +68,14 @@ PAGE = r"""<!doctype html>
       el('location').textContent=body.location||'—'; el('server').textContent=body.server||'—';
       el('gateway').textContent=body.gateway||'—';el('instance').textContent=body.instance||'—';el('generation').textContent=body.generation??'—';
       if(body.client_uid===clientUid&&body.counter!==undefined)el('counter').textContent=body.counter;
-      renderServers();
+      renderServers();renderInfra();
     }
     function connection(state){connectionState=state;const dot=el('dot');dot.classList.toggle('ok',state==='ready');dot.classList.toggle('waiting',state==='gateway');el('connection').textContent=state==='ready'?'Connected':state==='gateway'?'Gateway connected; waiting for server':'Disconnected';}
     async function request(path,options){const response=await fetch(path,options);const body=await response.json();if(!response.ok)throw new Error(body.error||response.statusText);return body}
+    function infraNode(item,kind){const node=document.createElement('div');node.className=`infra-node ${kind}`;node.dataset.name=item.name;node.textContent=item.name;node.title=[item.name,item.ip,item.node].filter(Boolean).join('\n');return node}
+    function drawProxyEdge(){const svg=el('infraEdges');svg.replaceChildren();if(!el('showProxies').checked||!selectedPosition||!currentRoute?.gateway)return;const node=[...el('proxyRow').children].find(item=>item.dataset.name===currentRoute.gateway);if(!node)return;const mapRect=el('map').getBoundingClientRect(),nodeRect=node.getBoundingClientRect(),start=map.latLngToContainerPoint(selectedPosition);svg.setAttribute('viewBox',`0 0 ${mapRect.width} ${mapRect.height}`);const line=document.createElementNS('http://www.w3.org/2000/svg','line');line.setAttribute('x1',start.x);line.setAttribute('y1',start.y);line.setAttribute('x2',nodeRect.left-mapRect.left+nodeRect.width/2);line.setAttribute('y2',nodeRect.top-mapRect.top+nodeRect.height/2);line.setAttribute('stroke','#3fb950');line.setAttribute('stroke-width','2');line.setAttribute('stroke-dasharray','7 6');svg.appendChild(line)}
+    function renderInfra(){const proxies=el('proxyRow'),spares=el('spareRow');proxies.replaceChildren();spares.replaceChildren();if(infra&&el('showProxies').checked)for(const gateway of infra.gateways){const node=infraNode(gateway,'proxy');if(gateway.name===currentRoute?.gateway)node.classList.add('active');proxies.appendChild(node)}if(infra&&el('showHotSwaps').checked)for(const server of infra.server_instances.filter(item=>item.role==='spare'))spares.appendChild(infraNode(server,'spare'));requestAnimationFrame(drawProxyEdge)}
+    async function loadInfra(){if(!el('showProxies').checked&&!el('showHotSwaps').checked){el('infraStatus').hidden=true;renderInfra();return}try{const response=await fetch('http://127.0.0.1:8080/api/connections',{cache:'no-store'});const body=await response.json();if(!response.ok)throw new Error(body.error||response.statusText);infra=body;el('infraStatus').hidden=true;renderInfra()}catch(error){infra=null;el('infraStatus').textContent='Infrastructure dashboard unavailable';el('infraStatus').hidden=false;renderInfra()}}
     function renderServers(){
       serverLayers.forEach(layer=>layer.remove());serverLayers=[];
       if(connectionLine){connectionLine.remove();connectionLine=null}
@@ -109,10 +116,11 @@ PAGE = r"""<!doctype html>
       catch(error){el('error').textContent=error.message;inputDirty=true}finally{inputInFlight=false}
     }
     el('showAllServers').addEventListener('change',renderServers);
+    el('showProxies').addEventListener('change',loadInfra);el('showHotSwaps').addEventListener('change',loadInfra);map.on('move zoom resize',drawProxyEdge);
     async function reconnect(silent=false){if(reconnecting)return;reconnecting=true;try{const body=await request('/api/reconnect',{method:'POST'});showRoute(body||{});connection(body?'ready':'gateway');inputDirty=true;el('error').textContent=''}catch(error){if(!silent)el('error').textContent=error.message;refresh()}finally{reconnecting=false}}
     el('reconnect').addEventListener('click',()=>reconnect(false));
     async function refresh(){try{const state=await request('/api/state');connection(state.connection);if(state.latitude!==null&&!pendingCommands.length){selectedPosition=[state.latitude,state.longitude];el('coordinate').textContent=`${state.latitude.toFixed(5)}, ${state.longitude.toFixed(5)}`;if(selectedMarker)selectedMarker.setLatLng(selectedPosition);else selectedMarker=L.marker(selectedPosition).addTo(map)}showRoute(state.route||{gateway:state.gateway})}catch(error){connection('disconnected')}}
-    loadLocations().then(()=>{refresh();drainCommands()}).catch(error=>{el('error').textContent=error.message;refresh()});setInterval(sendInput,25);setInterval(refresh,1000);setInterval(()=>{if(connectionState!=='ready')reconnect(true)},1000);setInterval(drainCommands,1000);setInterval(()=>loadLocations().catch(()=>{}),5000);
+    loadLocations().then(()=>{refresh();drainCommands()}).catch(error=>{el('error').textContent=error.message;refresh()});setInterval(sendInput,25);setInterval(refresh,1000);setInterval(()=>{if(connectionState!=='ready')reconnect(true)},1000);setInterval(drainCommands,1000);setInterval(loadInfra,2000);setInterval(()=>loadLocations().catch(()=>{}),5000);
   </script>
 </body>
 </html>"""

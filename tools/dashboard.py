@@ -122,6 +122,7 @@ def list_server_pods() -> dict[str, dict[str, str]]:
     return {
         item.get("status", {}).get("podIP", ""): {
             "name": item.get("metadata", {}).get("name", ""),
+            "ip": item.get("status", {}).get("podIP", ""),
             "node": item.get("spec", {}).get("nodeName", ""),
         }
         for item in json.loads(raw).get("items", [])
@@ -245,12 +246,22 @@ def snapshot() -> dict:
         up = len(backend["gateways"].split(", ")) if backend["gateways"] else 0
         backend["status"] = "UP" if gateways and up == len(gateways) else ("DEGRADED" if up else "DOWN")
 
+    active_instances = {backend["instance"] for backend in backends if backend["instance"]}
+    server_instances = sorted(
+        (
+            {**pod, "role": "active" if pod["name"] in active_instances else "spare"}
+            for pod in server_pods.values()
+        ),
+        key=lambda pod: pod["name"],
+    )
+
     return {
         "gateways": gateways,
         "total_clients": sum(p["clients"] for p in gateways),
         "total_backends": sum(p["backend_sessions"] for p in gateways),
         "server_pods": len(server_pods),
-        "hot_spares": max(0, len(server_pods) - len({b["instance"] for b in backends if b["instance"]})),
+        "hot_spares": sum(instance["role"] == "spare" for instance in server_instances),
+        "server_instances": server_instances,
         "data_services": data_services,
         "sessions": [session for p in gateways for session in p["sessions"]],
         "backends": backends,
@@ -278,6 +289,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
         self.wfile.write(body)
 
