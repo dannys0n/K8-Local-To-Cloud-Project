@@ -40,25 +40,29 @@ PAGE = r"""<!doctype html>
   <header><h1>Geographic client</h1><span class="hint">Click anywhere to change location</span><span class="status"><span id="dot" class="dot"></span><span id="connection">Connecting</span></span></header>
   <main><div id="map"></div><aside>
     <div class="card"><div class="label">Selected coordinate</div><div id="coordinate" class="value">Click the map</div></div>
+    <div class="card"><div class="label">Client UID</div><div id="clientUid" class="value">—</div></div>
+    <div class="card"><div class="label">Durable counter</div><div id="counter" class="value route">0</div></div>
     <div class="card"><div class="label">Nearest active location</div><div id="location" class="value route">—</div></div>
     <div class="card"><div class="label">Connected gateway pod</div><div id="gateway" class="value">—</div></div>
     <div class="card"><div class="label">Logical server</div><div id="server" class="value">—</div></div>
     <div class="card"><div class="label">Server pod</div><div id="instance" class="value">—</div></div>
     <div class="card"><div class="label">Ownership generation</div><div id="generation" class="value">—</div></div>
     <div class="card"><label class="toggle"><input id="showAllServers" type="checkbox">Show all active servers</label></div>
-    <div class="card"><div class="label">Test application packet</div><input id="message" value="hello" maxlength="256"><button id="send">Send through current route</button><div id="response" class="value"></div></div>
     <button id="reconnect">Reconnect gateway client</button><div id="error" class="error"></div>
   </aside></main>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
   <script>
     const map=L.map('map',{worldCopyJump:true,minZoom:2}).setView([25,0],2);
     L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:18,attribution:'&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'}).addTo(map);
-    let selectedMarker=null, connectionLine=null, serverLayers=[], locations=[], currentRoute=null, selectedPosition=null;
+    let selectedMarker=null, connectionLine=null, serverLayers=[], locations=[], currentRoute=null, selectedPosition=null, draining=false;
     const el=id=>document.getElementById(id);
+    const clientUid=localStorage.getItem('tcp-lab-client-uid')||crypto.randomUUID();localStorage.setItem('tcp-lab-client-uid',clientUid);el('clientUid').textContent=clientUid;
+    const pendingKey=`tcp-lab-pending-${clientUid}`;let pendingCommands=JSON.parse(localStorage.getItem(pendingKey)||'[]');
     function showRoute(body){
       currentRoute=body;
       el('location').textContent=body.location||'—'; el('server').textContent=body.server||'—';
       el('gateway').textContent=body.gateway||'—';el('instance').textContent=body.instance||'—';el('generation').textContent=body.generation??'—';
+      if(body.counter!==undefined)el('counter').textContent=body.counter;
       renderServers();
     }
     function connection(state){const dot=el('dot');dot.classList.toggle('ok',state==='ready');dot.classList.toggle('waiting',state==='gateway');el('connection').textContent=state==='ready'?'Connected':state==='gateway'?'Gateway connected; waiting for server':'Disconnected';}
@@ -79,17 +83,20 @@ PAGE = r"""<!doctype html>
     async function loadLocations(){
       const body=await request('/api/locations');locations=body.locations;renderServers();
     }
-    map.on('click',async event=>{
+    async function drainCommands(){
+      if(draining)return;draining=true;
+      try{while(pendingCommands.length){const command=pendingCommands[0];const body=await request('/api/location',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({client_uid:clientUid,operation_id:command.operation_id,latitude:command.latitude,longitude:command.longitude})});showRoute(body);connection('ready');pendingCommands.shift();localStorage.setItem(pendingKey,JSON.stringify(pendingCommands));el('error').textContent=''}}
+      catch(error){el('error').textContent=error.message;refresh()}finally{draining=false}
+    }
+    map.on('click',event=>{
       const {lat,lng}=event.latlng.wrap();selectedPosition=[lat,lng];el('coordinate').textContent=`${lat.toFixed(5)}, ${lng.toFixed(5)}`;el('error').textContent='';
       if(selectedMarker)selectedMarker.setLatLng([lat,lng]);else selectedMarker=L.marker([lat,lng]).addTo(map);
-      try{const body=await request('/api/location',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({latitude:lat,longitude:lng})});showRoute(body);connection('ready')}
-      catch(error){el('error').textContent=error.message;refresh()}
+      pendingCommands.push({operation_id:crypto.randomUUID(),latitude:lat,longitude:lng});localStorage.setItem(pendingKey,JSON.stringify(pendingCommands));drainCommands();
     });
     el('showAllServers').addEventListener('change',renderServers);
-    el('send').addEventListener('click',async()=>{try{const body=await request('/api/message',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:el('message').value})});el('response').textContent=`counter ${body.counter}: ${body.message}`;showRoute(body);el('error').textContent=''}catch(error){el('error').textContent=error.message}});
     el('reconnect').addEventListener('click',async()=>{try{const body=await request('/api/reconnect',{method:'POST'});showRoute(body||{});connection(body?'ready':'gateway');el('error').textContent=''}catch(error){el('error').textContent=error.message;refresh()}});
-    async function refresh(){try{const state=await request('/api/state');connection(state.connection);if(state.latitude!==null){selectedPosition=[state.latitude,state.longitude];el('coordinate').textContent=`${state.latitude.toFixed(5)}, ${state.longitude.toFixed(5)}`;if(selectedMarker)selectedMarker.setLatLng(selectedPosition);else selectedMarker=L.marker(selectedPosition).addTo(map)}showRoute(state.route||{gateway:state.gateway})}catch(error){connection('disconnected')}}
-    loadLocations().then(refresh).catch(error=>{el('error').textContent=error.message;refresh()});setInterval(refresh,1000);setInterval(()=>loadLocations().catch(()=>{}),5000);
+    async function refresh(){try{const state=await request('/api/state');connection(state.connection);if(state.latitude!==null&&!pendingCommands.length){selectedPosition=[state.latitude,state.longitude];el('coordinate').textContent=`${state.latitude.toFixed(5)}, ${state.longitude.toFixed(5)}`;if(selectedMarker)selectedMarker.setLatLng(selectedPosition);else selectedMarker=L.marker(selectedPosition).addTo(map)}showRoute(state.route||{gateway:state.gateway})}catch(error){connection('disconnected')}}
+    loadLocations().then(()=>{refresh();drainCommands()}).catch(error=>{el('error').textContent=error.message;refresh()});setInterval(refresh,1000);setInterval(drainCommands,1000);setInterval(()=>loadLocations().catch(()=>{}),5000);
   </script>
 </body>
 </html>"""
@@ -176,18 +183,16 @@ class GatewayClient:
                     self.connection = "ready"
             return body
 
-    def move(self, latitude: float, longitude: float):
-        body = self.exchange(f"@position {latitude:.8f} {longitude:.8f}")
+    def move(self, client_uid: str, operation_id: str, latitude: float, longitude: float):
+        allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.:")
+        if not client_uid or len(client_uid) > 128 or not operation_id or len(operation_id) > 128 or set(client_uid) - allowed or set(operation_id) - allowed:
+            raise ValueError("client and operation identifiers are invalid")
+        body = self.exchange(f"@teleport {client_uid} {operation_id} {latitude:.8f} {longitude:.8f}")
         with self.state_lock:
             self.latitude, self.longitude, self.route = latitude, longitude, body
             self.gateway = body.get("gateway")
             self.connection = "ready"
         return body
-
-    def send_message(self, message: str):
-        if not message or len(message) > 256 or "\n" in message or "\r" in message or message.startswith("@"):
-            raise ValueError("message must be 1-256 characters and cannot begin with @")
-        return self.exchange(message)
 
     def reconnect(self):
         with self.lock:
@@ -252,11 +257,7 @@ def make_handler(client: GatewayClient):
                     latitude, longitude = float(payload["latitude"]), float(payload["longitude"])
                     if not (-90 <= latitude <= 90 and -180 <= longitude <= 180):
                         raise ValueError("coordinate is outside the world bounds")
-                    self.send_json(client.move(latitude, longitude))
-                elif path == "/api/message":
-                    length = int(self.headers.get("Content-Length", "0"))
-                    payload = json.loads(self.rfile.read(length) or b"{}")
-                    self.send_json(client.send_message(str(payload["message"])))
+                    self.send_json(client.move(str(payload["client_uid"]), str(payload["operation_id"]), latitude, longitude))
                 elif path == "/api/reconnect":
                     self.send_json(client.reconnect())
                 else:

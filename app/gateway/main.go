@@ -212,6 +212,42 @@ func (g *gateway) handleClient(ctx context.Context, client net.Conn) {
 			}
 			continue
 		}
+		if latitude, longitude, found, err := parseTeleportRoute(message); found {
+			if err != nil {
+				writeJSONError(clientWriter, err.Error())
+				continue
+			}
+			g.discover(ctx)
+			location, err := g.nearestLocation(latitude, longitude)
+			if err != nil {
+				writeJSONError(clientWriter, err.Error())
+				continue
+			}
+			candidate, _, err := g.openRoute(ctx, location, nil)
+			if err != nil {
+				writeJSONError(clientWriter, err.Error())
+				continue
+			}
+			response, err := g.exchange(candidate, message)
+			if err != nil || responseHasError(response) {
+				candidate.conn.Close()
+				writeJSONError(clientWriter, "durable teleport failed")
+				continue
+			}
+			if downstream != nil {
+				downstream.conn.Close()
+			}
+			downstream = candidate
+			requested = location
+			clientLatitude = latitude
+			clientLongitude = longitude
+			g.updateSession(id, client.RemoteAddr().String(), candidate.info, clientLatitude, clientLongitude)
+			response = g.withGatewayMetadata(response)
+			if _, err := clientWriter.Write(response); err != nil || clientWriter.Flush() != nil {
+				return
+			}
+			continue
+		}
 		if latitude, longitude, found, err := parsePosition(message); found {
 			if err != nil {
 				writeJSONError(clientWriter, err.Error())
@@ -501,6 +537,24 @@ func parsePosition(message string) (float64, float64, bool, error) {
 	if latitudeErr != nil || longitudeErr != nil || math.IsNaN(latitude) || math.IsNaN(longitude) ||
 		math.IsInf(latitude, 0) || math.IsInf(longitude, 0) || latitude < -90 || latitude > 90 || longitude < -180 || longitude > 180 {
 		return 0, 0, true, errors.New("position must be finite latitude [-90, 90] and longitude [-180, 180]")
+	}
+	return latitude, longitude, true, nil
+}
+
+func parseTeleportRoute(message string) (float64, float64, bool, error) {
+	arguments, found := strings.CutPrefix(message, "@teleport ")
+	if !found {
+		return 0, 0, false, nil
+	}
+	fields := strings.Fields(arguments)
+	if len(fields) != 4 {
+		return 0, 0, true, errors.New("teleport requires client UID, operation ID, latitude, and longitude")
+	}
+	latitude, latitudeErr := strconv.ParseFloat(fields[2], 64)
+	longitude, longitudeErr := strconv.ParseFloat(fields[3], 64)
+	if latitudeErr != nil || longitudeErr != nil || math.IsNaN(latitude) || math.IsNaN(longitude) ||
+		math.IsInf(latitude, 0) || math.IsInf(longitude, 0) || latitude < -90 || latitude > 90 || longitude < -180 || longitude > 180 {
+		return 0, 0, true, errors.New("teleport coordinates are invalid")
 	}
 	return latitude, longitude, true, nil
 }

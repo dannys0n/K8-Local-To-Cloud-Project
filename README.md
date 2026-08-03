@@ -62,25 +62,30 @@ directly with Redis GEO. Leaflet's Web Mercator projection remains a browser
 display detail; it is not persisted.
 
 `tools/client.py` asks the operating system for a free local port, prints the
-resulting URL, and opens it in the default browser. Clicking the Leaflet map sends the selected latitude and
-longitude over the existing TCP client connection. The gateway calculates the
-nearest active server on the globe and switches its downstream connection
-without replacing the client connection. Run the command again for each
+resulting URL, and opens it in the default browser. It keeps a stable client UID
+and pending operation queue in browser local storage. Each map click is one
+idempotent durable operation: PostgreSQL atomically stores the new coordinate,
+increments that client's counter, and records the operation ID. The gateway
+routes the command to the nearest active server without replacing the client
+connection. Run the command again for each
 additional independent client; every process receives its own available port.
 Use `--listen-port 8082` only when a fixed port is useful.
 
 The internal `@location` handshake remains available to smoke checks. Browser
-clients use `@position LATITUDE LONGITUDE`; `@locations` returns the active
-server markers.
+clients use `@teleport CLIENT_UID OPERATION_ID LATITUDE LONGITUDE`; `@locations`
+returns sanitized active-server markers. Servers batch pending durable commands
+on their 20 Hz tick and acknowledge them only after a synchronous PostgreSQL
+commit. Retrying an operation ID returns its recorded counter without applying
+it twice.
 
 After a gateway disconnect, the local bridge reconnects and reapplies the last
-selected coordinate.
-The logical server identity and counter remain in PostgreSQL when a pod is
+committed coordinate without incrementing the counter. The browser retries any
+unacknowledged durable operation with the same operation ID.
+The logical server identity and per-client durable state remain in PostgreSQL when a pod is
 replaced. An expired 1.5-second lease is claimed by an already-running spare;
 the generation increases to fence the old owner. Redis presence keys expire and
-repopulate automatically. A request
-whose response is lost during a disconnect may be retried, so this toy protocol
-is not an exactly-once protocol. Without `-Location`, port 9000 remains the
+repopulate automatically. Generic test messages remain at-least-once, while map
+teleports have exactly-once database effects. Without a location handshake, port 9000 remains the
 original round-robin endpoint.
 
 Use the map's reconnect button to replace the gateway connection while retaining
@@ -140,7 +145,7 @@ Delete everything:
 Send a line such as `hello` and receive one JSON line:
 
 ```json
-{"gateway":"gateway-abc","server":"tcp-server-0","location":"los-angeles","latitude":34.0522,"longitude":-118.2437,"instance":"tcp-server-abc","generation":3,"counter":1,"message":"hello","time":"2026-07-31T00:00:00Z"}
+{"gateway":"gateway-abc","server":"tcp-server-0","location":"los-angeles","latitude":34.0522,"longitude":-118.2437,"client_uid":"a-client-uuid","operation_id":"an-operation-uuid","client_latitude":34.1,"client_longitude":-118.2,"instance":"tcp-server-abc","generation":3,"counter":1,"message":"teleported","tick":42,"time":"2026-07-31T00:00:00Z"}
 ```
 
 A single browser-client process keeps one persistent TCP connection on one

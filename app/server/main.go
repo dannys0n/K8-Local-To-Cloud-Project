@@ -8,12 +8,14 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net"
 	"os"
 	"os/signal"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -60,6 +62,7 @@ type server struct {
 	renewInterval time.Duration
 	tickInterval  time.Duration
 	tick          atomic.Uint64
+	durable       chan durableCommand
 	mu            sync.RWMutex
 	assignment    *assignment
 }
@@ -75,6 +78,29 @@ type response struct {
 	Message    string                `json:"message"`
 	Time       string                `json:"time"`
 	Tick       uint64                `json:"tick"`
+	ClientUID       string  `json:"client_uid,omitempty"`
+	OperationID     string  `json:"operation_id,omitempty"`
+	ClientLatitude  float64 `json:"client_latitude,omitempty"`
+	ClientLongitude float64 `json:"client_longitude,omitempty"`
+}
+
+type teleportCommand struct {
+	ClientUID   string
+	OperationID string
+	Latitude    float64
+	Longitude   float64
+}
+
+type durableCommand struct {
+	assignment assignment
+	teleport   teleportCommand
+	result     chan durableResult
+}
+
+type durableResult struct {
+	counter uint64
+	tick    uint64
+	err     error
 }
 
 func main() {
@@ -115,6 +141,7 @@ func main() {
 	s := &server{
 		instanceID: instanceID, podName: podName, db: db, redis: cache,
 		leaseDuration: leaseDuration, renewInterval: renewInterval, tickInterval: tickInterval,
+		durable: make(chan durableCommand, 4096),
 	}
 	go s.manageAssignment(ctx, logger)
 	go s.heartbeat(ctx, logger)
@@ -168,8 +195,96 @@ func (s *server) runTicks(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			s.tick.Add(1)
+			currentTick := s.tick.Add(1)
+			s.commitDurableCommands(ctx, currentTick)
 		}
+	}
+}
+
+func (s *server) commitDurableCommands(ctx context.Context, tick uint64) {
+	batch := make([]durableCommand, 0, 256)
+	for len(batch) < 1024 {
+		select {
+		case command := <-s.durable:
+			batch = append(batch, command)
+		default:
+			if len(batch) > 0 {
+				s.applyDurableBatch(ctx, tick, batch)
+			}
+			return
+		}
+	}
+	s.applyDurableBatch(ctx, tick, batch)
+}
+
+func (s *server) applyDurableBatch(ctx context.Context, tick uint64, batch []durableCommand) {
+	queryCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	tx, err := s.db.BeginTx(queryCtx, nil)
+	if err != nil {
+		s.finishDurableBatch(batch, nil, tick, err)
+		return
+	}
+	defer tx.Rollback()
+	if _, err = tx.ExecContext(queryCtx, `SET LOCAL synchronous_commit = on`); err != nil {
+		s.finishDurableBatch(batch, nil, tick, err)
+		return
+	}
+	results := make([]uint64, len(batch))
+	for index, queued := range batch {
+		var lockedServer string
+		err = tx.QueryRowContext(queryCtx, `
+			SELECT server_id FROM tcp_server_assignment
+			WHERE server_id = $1 AND owner_instance_id = $2 AND generation = $3
+				AND lease_until > NOW()
+			FOR UPDATE`, queued.assignment.ServerID, s.instanceID, queued.assignment.Generation).Scan(&lockedServer)
+		if err != nil {
+			break
+		}
+		_, err = tx.ExecContext(queryCtx, `
+			INSERT INTO client_state (client_uid) VALUES ($1)
+			ON CONFLICT (client_uid) DO NOTHING`, queued.teleport.ClientUID)
+		if err != nil {
+			break
+		}
+		err = tx.QueryRowContext(queryCtx, `
+			SELECT resulting_counter FROM client_operation
+			WHERE client_uid = $1 AND operation_id = $2`,
+			queued.teleport.ClientUID, queued.teleport.OperationID).Scan(&results[index])
+		if err == nil {
+			continue
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			break
+		}
+		err = tx.QueryRowContext(queryCtx, `
+			UPDATE client_state SET counter = counter + 1, latitude = $2, longitude = $3, updated_at = NOW()
+			WHERE client_uid = $1
+			RETURNING counter`, queued.teleport.ClientUID, queued.teleport.Latitude, queued.teleport.Longitude).Scan(&results[index])
+		if err != nil {
+			break
+		}
+		_, err = tx.ExecContext(queryCtx, `
+			INSERT INTO client_operation (client_uid, operation_id, resulting_counter, latitude, longitude)
+			VALUES ($1, $2, $3, $4, $5)`, queued.teleport.ClientUID, queued.teleport.OperationID,
+			results[index], queued.teleport.Latitude, queued.teleport.Longitude)
+		if err != nil {
+			break
+		}
+	}
+	if err == nil {
+		err = tx.Commit()
+	}
+	s.finishDurableBatch(batch, results, tick, err)
+}
+
+func (s *server) finishDurableBatch(batch []durableCommand, counters []uint64, tick uint64, err error) {
+	for index, queued := range batch {
+		result := durableResult{tick: tick, err: err}
+		if err == nil {
+			result.counter = counters[index]
+		}
+		queued.result <- result
 	}
 }
 
@@ -239,6 +354,22 @@ func createSchema(ctx context.Context, db *sql.DB) error {
 			owner_instance_id TEXT,
 			generation BIGINT NOT NULL DEFAULT 0,
 			lease_until TIMESTAMPTZ
+		);
+		CREATE TABLE IF NOT EXISTS client_state (
+			client_uid TEXT PRIMARY KEY,
+			counter BIGINT NOT NULL DEFAULT 0 CHECK (counter >= 0),
+			latitude DOUBLE PRECISION NOT NULL DEFAULT 0,
+			longitude DOUBLE PRECISION NOT NULL DEFAULT 0,
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		);
+		CREATE TABLE IF NOT EXISTS client_operation (
+			client_uid TEXT NOT NULL REFERENCES client_state(client_uid),
+			operation_id TEXT NOT NULL,
+			resulting_counter BIGINT NOT NULL CHECK (resulting_counter >= 0),
+			latitude DOUBLE PRECISION NOT NULL,
+			longitude DOUBLE PRECISION NOT NULL,
+			committed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			PRIMARY KEY (client_uid, operation_id)
 		);
 		CREATE UNIQUE INDEX IF NOT EXISTS tcp_server_state_location
 			ON tcp_server_state (location);
@@ -453,6 +584,36 @@ func (s *server) handleConnection(ctx context.Context, conn net.Conn, logger *sl
 			_ = writer.Flush()
 			return
 		}
+		if teleport, found, err := parseTeleport(message); found {
+			if err != nil {
+				_, _ = fmt.Fprintf(writer, `{"error":%q}`+"\n", err.Error())
+				_ = writer.Flush()
+				continue
+			}
+			command := durableCommand{assignment: *bound, teleport: teleport, result: make(chan durableResult, 1)}
+			select {
+			case s.durable <- command:
+			case <-ctx.Done():
+				return
+			default:
+				_, _ = fmt.Fprintln(writer, `{"error":"durable command queue full"}`)
+				_ = writer.Flush()
+				continue
+			}
+			select {
+			case result := <-command.result:
+				if result.err != nil {
+					s.writeDatabaseError(writer, logger, result.err)
+					continue
+				}
+				if !s.writeTeleportResponse(writer, bound, teleport, result) {
+					return
+				}
+			case <-ctx.Done():
+				return
+			}
+			continue
+		}
 		count, err := s.increment(ctx, bound)
 		if err != nil {
 			s.writeDatabaseError(writer, logger, err)
@@ -465,6 +626,55 @@ func (s *server) handleConnection(ctx context.Context, conn net.Conn, logger *sl
 	if err := scanner.Err(); err != nil {
 		logger.Debug("connection read ended", "instance", s.podName, "remote", remote, "error", err)
 	}
+}
+
+func parseTeleport(message string) (teleportCommand, bool, error) {
+	arguments, found := strings.CutPrefix(message, "@teleport ")
+	if !found {
+		return teleportCommand{}, false, nil
+	}
+	fields := strings.Fields(arguments)
+	if len(fields) != 4 || !validIdentifier(fields[0]) || !validIdentifier(fields[1]) {
+		return teleportCommand{}, true, errors.New("teleport requires client UID, operation ID, latitude, and longitude")
+	}
+	latitude, latitudeErr := strconv.ParseFloat(fields[2], 64)
+	longitude, longitudeErr := strconv.ParseFloat(fields[3], 64)
+	if latitudeErr != nil || longitudeErr != nil || math.IsNaN(latitude) || math.IsNaN(longitude) ||
+		math.IsInf(latitude, 0) || math.IsInf(longitude, 0) || latitude < -90 || latitude > 90 || longitude < -180 || longitude > 180 {
+		return teleportCommand{}, true, errors.New("teleport coordinates are invalid")
+	}
+	return teleportCommand{ClientUID: fields[0], OperationID: fields[1], Latitude: latitude, Longitude: longitude}, true, nil
+}
+
+func validIdentifier(value string) bool {
+	if value == "" || len(value) > 128 {
+		return false
+	}
+	for _, character := range value {
+		if !((character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') ||
+			(character >= '0' && character <= '9') || strings.ContainsRune("-_.:", character)) {
+			return false
+		}
+	}
+	return true
+}
+
+func (s *server) writeTeleportResponse(writer *bufio.Writer, current *assignment, command teleportCommand, result durableResult) bool {
+	body, err := json.Marshal(response{
+		Server: current.ServerID, Location: current.Location,
+		Latitude: current.Latitude, Longitude: current.Longitude, Instance: s.podName,
+		Generation: current.Generation, Counter: result.counter, Message: "teleported",
+		Time: time.Now().UTC().Format(time.RFC3339Nano), Tick: result.tick,
+		ClientUID: command.ClientUID, OperationID: command.OperationID,
+		ClientLatitude: command.Latitude, ClientLongitude: command.Longitude,
+	})
+	if err != nil {
+		return false
+	}
+	if _, err := writer.Write(append(body, '\n')); err != nil {
+		return false
+	}
+	return writer.Flush() == nil
 }
 
 func (s *server) writeResponse(writer *bufio.Writer, current *assignment, counter uint64, message string) bool {

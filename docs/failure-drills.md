@@ -28,7 +28,7 @@ Every gateway discovers server endpoints through the headless Service DNS.
 ## Server persistence
 
 1. Start `tools/client.ps1`, then click near New York on the browser map.
-2. Send several test packets and note `tcp-server-1`, `new-york`, and its counter.
+2. Click several positions and note `tcp-server-1`, `new-york`, and the durable client counter.
 3. Find the physical owner and generation in PostgreSQL:
 
    ```bash
@@ -36,10 +36,11 @@ Every gateway discovers server endpoints through the headless Service DNS.
    ```
 
 4. Delete the owner pod while leaving the client open.
-5. Send another message. The gateway retains the client connection, discovers
-   the replacement, switches its downstream connection, and retries.
+5. Click again. The gateway retains the client connection, discovers the
+   replacement, switches its downstream connection, and the client retries any
+   unacknowledged operation ID.
 6. Confirm an existing spare owns `tcp-server-1`, the generation increased, and
-   the PostgreSQL counter continues from its previous value.
+   the PostgreSQL `client_state` counter continues from its previous value.
 
 The server-side TCP socket cannot survive a pod failure, but the client-to-gateway
 socket remains open. A message in flight at the server disconnect can be
