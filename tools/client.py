@@ -54,7 +54,7 @@ PAGE = r"""<!doctype html>
   <script>
     const map=L.map('map',{worldCopyJump:true,minZoom:2}).setView([25,0],2);
     L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:18,attribution:'&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'}).addTo(map);
-    let selectedMarker=null, connectionLine=null, serverLayers=[], locations=[], currentRoute=null, selectedPosition=null, draining=false,inputInFlight=false,inputDirty=false;
+    let selectedMarker=null, connectionLine=null, serverLayers=[], locations=[], currentRoute=null, selectedPosition=null, draining=false,inputInFlight=false,inputDirty=true;
     const keys=new Set();
     const el=id=>document.getElementById(id);
     const clientUid=localStorage.getItem('tcp-lab-client-uid')||crypto.randomUUID();localStorage.setItem('tcp-lab-client-uid',clientUid);el('clientUid').textContent=clientUid;
@@ -64,7 +64,7 @@ PAGE = r"""<!doctype html>
       currentRoute=body;
       el('location').textContent=body.location||'—'; el('server').textContent=body.server||'—';
       el('gateway').textContent=body.gateway||'—';el('instance').textContent=body.instance||'—';el('generation').textContent=body.generation??'—';
-      if(body.counter!==undefined)el('counter').textContent=body.counter;
+      if(body.client_uid===clientUid&&body.counter!==undefined)el('counter').textContent=body.counter;
       renderServers();
     }
     function connection(state){const dot=el('dot');dot.classList.toggle('ok',state==='ready');dot.classList.toggle('waiting',state==='gateway');el('connection').textContent=state==='ready'?'Connected':state==='gateway'?'Gateway connected; waiting for server':'Disconnected';}
@@ -106,7 +106,7 @@ PAGE = r"""<!doctype html>
       catch(error){el('error').textContent=error.message;inputDirty=true}finally{inputInFlight=false}
     }
     el('showAllServers').addEventListener('change',renderServers);
-    el('reconnect').addEventListener('click',async()=>{try{const body=await request('/api/reconnect',{method:'POST'});showRoute(body||{});connection(body?'ready':'gateway');el('error').textContent=''}catch(error){el('error').textContent=error.message;refresh()}});
+    el('reconnect').addEventListener('click',async()=>{try{const body=await request('/api/reconnect',{method:'POST'});showRoute(body||{});connection(body?'ready':'gateway');inputDirty=true;el('error').textContent=''}catch(error){el('error').textContent=error.message;refresh()}});
     async function refresh(){try{const state=await request('/api/state');connection(state.connection);if(state.latitude!==null&&!pendingCommands.length){selectedPosition=[state.latitude,state.longitude];el('coordinate').textContent=`${state.latitude.toFixed(5)}, ${state.longitude.toFixed(5)}`;if(selectedMarker)selectedMarker.setLatLng(selectedPosition);else selectedMarker=L.marker(selectedPosition).addTo(map)}showRoute(state.route||{gateway:state.gateway})}catch(error){connection('disconnected')}}
     loadLocations().then(()=>{refresh();drainCommands()}).catch(error=>{el('error').textContent=error.message;refresh()});setInterval(sendInput,50);setInterval(refresh,1000);setInterval(drainCommands,1000);setInterval(()=>loadLocations().catch(()=>{}),5000);
   </script>

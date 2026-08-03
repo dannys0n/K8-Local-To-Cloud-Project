@@ -27,6 +27,7 @@ const (
 	defaultLeaseDuration = 3 * time.Second
 	defaultRenewInterval = 500 * time.Millisecond
 	defaultTickInterval  = 50 * time.Millisecond
+	movementSpeed        = 40.0
 )
 
 type locationDefinition struct {
@@ -342,9 +343,17 @@ func (s *server) finishDurableBatch(batch []durableCommand, counters []uint64, l
 			result.longitude = longitudes[index]
 			if applied[index] {
 				s.entityMu.Lock()
-				s.entities[queued.teleport.ClientUID] = &entityState{
-					latitude: result.latitude, longitude: result.longitude,
-					counter: result.counter,
+				if queued.teleport.Kind == "increment" {
+					if entity := s.entities[queued.teleport.ClientUID]; entity != nil {
+						entity.counter = result.counter
+					} else {
+						s.entities[queued.teleport.ClientUID] = &entityState{latitude: result.latitude, longitude: result.longitude, counter: result.counter}
+					}
+				} else {
+					s.entities[queued.teleport.ClientUID] = &entityState{
+						latitude: result.latitude, longitude: result.longitude,
+						counter: result.counter,
+					}
 				}
 				s.entityMu.Unlock()
 			}
@@ -390,7 +399,7 @@ drained:
 			}
 		}
 	}
-	distance := s.tickInterval.Seconds()
+	distance := movementSpeed * s.tickInterval.Seconds()
 	for _, entity := range s.entities {
 		if tick-entity.lastInputTick > 4 {
 			entity.axisX = 0
@@ -432,6 +441,9 @@ func (s *server) ensureEntity(ctx context.Context, clientUID string) error {
 	err := s.db.QueryRowContext(queryCtx, `
 		SELECT latitude, longitude, counter FROM client_state WHERE client_uid = $1`, clientUID).
 		Scan(&loaded.latitude, &loaded.longitude, &loaded.counter)
+	if errors.Is(err, sql.ErrNoRows) {
+		err = nil
+	}
 	if err != nil {
 		return err
 	}
