@@ -63,16 +63,18 @@ display detail; it is not persisted.
 
 `tools/client.py` asks the operating system for a free local port, prints the
 resulting URL, and opens it in the default browser. It keeps a stable client UID
-and pending operation queue in browser local storage. Each map click is one
-idempotent durable operation: PostgreSQL atomically stores the new coordinate,
-increments that client's counter, and records the operation ID. The gateway
+and pending operation queue in browser local storage. Map clicks durably
+teleport the client without changing its counter. The separate counter button
+durably increments the per-client counter. PostgreSQL records an idempotency
+key and result for both operation types. The gateway
 routes the command to the nearest active server without replacing the client
 connection. Run the command again for each
 additional independent client; every process receives its own available port.
 Use `--listen-port 8082` only when a fixed port is useful.
 
 The internal `@location` handshake remains available to smoke checks. Browser
-clients use `@teleport CLIENT_UID OPERATION_ID LATITUDE LONGITUDE`; `@locations`
+clients use `@teleport CLIENT_UID OPERATION_ID LATITUDE LONGITUDE` and
+`@increment CLIENT_UID OPERATION_ID`; `@locations`
 returns sanitized active-server markers. Servers batch pending durable commands
 on their 20 Hz tick and acknowledge them only after a synchronous PostgreSQL
 commit. Retrying an operation ID returns its recorded counter without applying
@@ -152,7 +154,7 @@ Delete everything:
 Send a line such as `hello` and receive one JSON line:
 
 ```json
-{"gateway":"gateway-abc","server":"tcp-server-0","location":"los-angeles","latitude":34.0522,"longitude":-118.2437,"client_uid":"a-client-uuid","operation_id":"an-operation-uuid","client_latitude":34.1,"client_longitude":-118.2,"instance":"tcp-server-abc","generation":3,"counter":1,"message":"teleported","tick":42,"time":"2026-07-31T00:00:00Z"}
+{"gateway":"gateway-abc","server":"tcp-server-0","location":"los-angeles","latitude":34.0522,"longitude":-118.2437,"client_uid":"a-client-uuid","operation_id":"an-operation-uuid","client_latitude":34.1,"client_longitude":-118.2,"instance":"tcp-server-abc","generation":3,"counter":1,"message":"increment","tick":42,"time":"2026-07-31T00:00:00Z"}
 ```
 
 A single browser-client process keeps one persistent TCP connection on one

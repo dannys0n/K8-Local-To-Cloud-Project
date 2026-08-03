@@ -41,7 +41,7 @@ PAGE = r"""<!doctype html>
   <main><div id="map"></div><aside>
     <div class="card"><div class="label">Selected coordinate</div><div id="coordinate" class="value">Click the map</div></div>
     <div class="card"><div class="label">Client UID</div><div id="clientUid" class="value">—</div></div>
-    <div class="card"><div class="label">Durable counter</div><div id="counter" class="value route">0</div></div>
+    <div class="card"><div class="label">Durable counter</div><div id="counter" class="value route">0</div><button id="increment">Increase counter</button></div>
     <div class="card"><div class="label">Nearest active location</div><div id="location" class="value route">—</div></div>
     <div class="card"><div class="label">Connected gateway pod</div><div id="gateway" class="value">—</div></div>
     <div class="card"><div class="label">Logical server</div><div id="server" class="value">—</div></div>
@@ -87,14 +87,15 @@ PAGE = r"""<!doctype html>
     }
     async function drainCommands(){
       if(draining)return;draining=true;
-      try{while(pendingCommands.length){const command=pendingCommands[0];const body=await request('/api/location',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({client_uid:clientUid,operation_id:command.operation_id,latitude:command.latitude,longitude:command.longitude})});showRoute(body);connection('ready');pendingCommands.shift();localStorage.setItem(pendingKey,JSON.stringify(pendingCommands));el('error').textContent=''}}
+      try{while(pendingCommands.length){const command=pendingCommands[0];const increment=command.kind==='increment';const path=increment?'/api/increment':'/api/location';const payload={client_uid:clientUid,operation_id:command.operation_id};if(!increment){payload.latitude=command.latitude;payload.longitude=command.longitude}const body=await request(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});showRoute(body);connection('ready');pendingCommands.shift();localStorage.setItem(pendingKey,JSON.stringify(pendingCommands));el('error').textContent=''}}
       catch(error){el('error').textContent=error.message;refresh()}finally{draining=false}
     }
     map.on('click',event=>{
       const {lat,lng}=event.latlng.wrap();selectedPosition=[lat,lng];el('coordinate').textContent=`${lat.toFixed(5)}, ${lng.toFixed(5)}`;el('error').textContent='';
       if(selectedMarker)selectedMarker.setLatLng([lat,lng]);else selectedMarker=L.marker([lat,lng]).addTo(map);
-      pendingCommands.push({operation_id:crypto.randomUUID(),latitude:lat,longitude:lng});localStorage.setItem(pendingKey,JSON.stringify(pendingCommands));drainCommands();
+      pendingCommands.push({kind:'teleport',operation_id:crypto.randomUUID(),latitude:lat,longitude:lng});localStorage.setItem(pendingKey,JSON.stringify(pendingCommands));drainCommands();
     });
+    el('increment').addEventListener('click',()=>{pendingCommands.push({kind:'increment',operation_id:crypto.randomUUID()});localStorage.setItem(pendingKey,JSON.stringify(pendingCommands));drainCommands()});
     function setKey(event,pressed){const key=event.key.toLowerCase();if(!'wasd'.includes(key))return;event.preventDefault();if(pressed)keys.add(key);else keys.delete(key);inputDirty=true}
     addEventListener('keydown',event=>setKey(event,true));addEventListener('keyup',event=>setKey(event,false));addEventListener('blur',()=>{keys.clear();inputDirty=true});
     async function sendInput(){
@@ -218,6 +219,12 @@ class GatewayClient:
             self.route = body
         return body
 
+    def increment(self, client_uid: str, operation_id: str):
+        allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.:")
+        if not client_uid or len(client_uid) > 128 or not operation_id or len(operation_id) > 128 or set(client_uid) - allowed or set(operation_id) - allowed:
+            raise ValueError("client and operation identifiers are invalid")
+        return self.exchange(f"@increment {client_uid} {operation_id}")
+
     def reconnect(self):
         with self.lock:
             self._connect()
@@ -284,6 +291,10 @@ def make_handler(client: GatewayClient):
                     self.send_json(client.move(str(payload["client_uid"]), str(payload["operation_id"]), latitude, longitude))
                 elif path == "/api/reconnect":
                     self.send_json(client.reconnect())
+                elif path == "/api/increment":
+                    length = int(self.headers.get("Content-Length", "0"))
+                    payload = json.loads(self.rfile.read(length) or b"{}")
+                    self.send_json(client.increment(str(payload["client_uid"]), str(payload["operation_id"])))
                 elif path == "/api/input":
                     length = int(self.headers.get("Content-Length", "0"))
                     payload = json.loads(self.rfile.read(length) or b"{}")

@@ -89,6 +89,7 @@ type response struct {
 }
 
 type teleportCommand struct {
+	Kind        string
 	ClientUID   string
 	OperationID string
 	Latitude    float64
@@ -103,6 +104,8 @@ type durableCommand struct {
 
 type durableResult struct {
 	counter uint64
+	latitude float64
+	longitude float64
 	tick    uint64
 	err     error
 }
@@ -259,15 +262,17 @@ func (s *server) applyDurableBatch(ctx context.Context, tick uint64, batch []dur
 	defer cancel()
 	tx, err := s.db.BeginTx(queryCtx, nil)
 	if err != nil {
-		s.finishDurableBatch(batch, nil, nil, tick, err)
+		s.finishDurableBatch(batch, nil, nil, nil, nil, tick, err)
 		return
 	}
 	defer tx.Rollback()
 	if _, err = tx.ExecContext(queryCtx, `SET LOCAL synchronous_commit = on`); err != nil {
-		s.finishDurableBatch(batch, nil, nil, tick, err)
+		s.finishDurableBatch(batch, nil, nil, nil, nil, tick, err)
 		return
 	}
 	results := make([]uint64, len(batch))
+	latitudes := make([]float64, len(batch))
+	longitudes := make([]float64, len(batch))
 	applied := make([]bool, len(batch))
 	for index, queued := range batch {
 		var lockedServer string
@@ -286,26 +291,37 @@ func (s *server) applyDurableBatch(ctx context.Context, tick uint64, batch []dur
 			break
 		}
 		err = tx.QueryRowContext(queryCtx, `
-			SELECT resulting_counter FROM client_operation
+			SELECT resulting_counter, latitude, longitude FROM client_operation
 			WHERE client_uid = $1 AND operation_id = $2`,
-			queued.teleport.ClientUID, queued.teleport.OperationID).Scan(&results[index])
+			queued.teleport.ClientUID, queued.teleport.OperationID).
+			Scan(&results[index], &latitudes[index], &longitudes[index])
 		if err == nil {
 			continue
 		}
 		if !errors.Is(err, sql.ErrNoRows) {
 			break
 		}
-		err = tx.QueryRowContext(queryCtx, `
-			UPDATE client_state SET counter = counter + 1, latitude = $2, longitude = $3, updated_at = NOW()
-			WHERE client_uid = $1
-			RETURNING counter`, queued.teleport.ClientUID, queued.teleport.Latitude, queued.teleport.Longitude).Scan(&results[index])
+		if queued.teleport.Kind == "increment" {
+			err = tx.QueryRowContext(queryCtx, `
+				UPDATE client_state SET counter = counter + 1, updated_at = NOW()
+				WHERE client_uid = $1
+				RETURNING counter, latitude, longitude`, queued.teleport.ClientUID).
+				Scan(&results[index], &latitudes[index], &longitudes[index])
+		} else {
+			err = tx.QueryRowContext(queryCtx, `
+				UPDATE client_state SET latitude = $2, longitude = $3, updated_at = NOW()
+				WHERE client_uid = $1
+				RETURNING counter, latitude, longitude`, queued.teleport.ClientUID,
+				queued.teleport.Latitude, queued.teleport.Longitude).
+				Scan(&results[index], &latitudes[index], &longitudes[index])
+		}
 		if err != nil {
 			break
 		}
 		_, err = tx.ExecContext(queryCtx, `
-			INSERT INTO client_operation (client_uid, operation_id, resulting_counter, latitude, longitude)
-			VALUES ($1, $2, $3, $4, $5)`, queued.teleport.ClientUID, queued.teleport.OperationID,
-			results[index], queued.teleport.Latitude, queued.teleport.Longitude)
+			INSERT INTO client_operation (client_uid, operation_id, operation_type, resulting_counter, latitude, longitude)
+			VALUES ($1, $2, $3, $4, $5, $6)`, queued.teleport.ClientUID, queued.teleport.OperationID,
+			queued.teleport.Kind, results[index], latitudes[index], longitudes[index])
 		if err != nil {
 			break
 		}
@@ -314,18 +330,20 @@ func (s *server) applyDurableBatch(ctx context.Context, tick uint64, batch []dur
 	if err == nil {
 		err = tx.Commit()
 	}
-	s.finishDurableBatch(batch, results, applied, tick, err)
+	s.finishDurableBatch(batch, results, latitudes, longitudes, applied, tick, err)
 }
 
-func (s *server) finishDurableBatch(batch []durableCommand, counters []uint64, applied []bool, tick uint64, err error) {
+func (s *server) finishDurableBatch(batch []durableCommand, counters []uint64, latitudes, longitudes []float64, applied []bool, tick uint64, err error) {
 	for index, queued := range batch {
 		result := durableResult{tick: tick, err: err}
 		if err == nil {
 			result.counter = counters[index]
+			result.latitude = latitudes[index]
+			result.longitude = longitudes[index]
 			if applied[index] {
 				s.entityMu.Lock()
 				s.entities[queued.teleport.ClientUID] = &entityState{
-					latitude: queued.teleport.Latitude, longitude: queued.teleport.Longitude,
+					latitude: result.latitude, longitude: result.longitude,
 					counter: result.counter,
 				}
 				s.entityMu.Unlock()
@@ -502,6 +520,7 @@ func createSchema(ctx context.Context, db *sql.DB) error {
 		CREATE TABLE IF NOT EXISTS client_operation (
 			client_uid TEXT NOT NULL REFERENCES client_state(client_uid),
 			operation_id TEXT NOT NULL,
+			operation_type TEXT NOT NULL DEFAULT 'teleport',
 			resulting_counter BIGINT NOT NULL CHECK (resulting_counter >= 0),
 			latitude DOUBLE PRECISION NOT NULL,
 			longitude DOUBLE PRECISION NOT NULL,
@@ -511,7 +530,8 @@ func createSchema(ctx context.Context, db *sql.DB) error {
 		CREATE UNIQUE INDEX IF NOT EXISTS tcp_server_state_location
 			ON tcp_server_state (location);
 		ALTER TABLE tcp_server_state ADD COLUMN IF NOT EXISTS latitude DOUBLE PRECISION NOT NULL DEFAULT 0;
-		ALTER TABLE tcp_server_state ADD COLUMN IF NOT EXISTS longitude DOUBLE PRECISION NOT NULL DEFAULT 0`
+		ALTER TABLE tcp_server_state ADD COLUMN IF NOT EXISTS longitude DOUBLE PRECISION NOT NULL DEFAULT 0;
+		ALTER TABLE client_operation ADD COLUMN IF NOT EXISTS operation_type TEXT NOT NULL DEFAULT 'teleport'`
 	if _, err := db.ExecContext(ctx, schema); err != nil {
 		return fmt.Errorf("create schema: %w", err)
 	}
@@ -727,26 +747,18 @@ func (s *server) handleConnection(ctx context.Context, conn net.Conn, logger *sl
 				_ = writer.Flush()
 				continue
 			}
-			command := durableCommand{assignment: *bound, teleport: teleport, result: make(chan durableResult, 1)}
-			select {
-			case s.durable <- command:
-			case <-ctx.Done():
+			if !s.handleDurableCommand(ctx, writer, bound, teleport, logger) {
 				return
-			default:
-				_, _ = fmt.Fprintln(writer, `{"error":"durable command queue full"}`)
+			}
+			continue
+		}
+		if increment, found, err := parseIncrement(message); found {
+			if err != nil {
+				_, _ = fmt.Fprintf(writer, `{"error":%q}`+"\n", err.Error())
 				_ = writer.Flush()
 				continue
 			}
-			select {
-			case result := <-command.result:
-				if result.err != nil {
-					s.writeDatabaseError(writer, logger, result.err)
-					continue
-				}
-				if !s.writeTeleportResponse(writer, bound, teleport, result) {
-					return
-				}
-			case <-ctx.Done():
+			if !s.handleDurableCommand(ctx, writer, bound, increment, logger) {
 				return
 			}
 			continue
@@ -795,6 +807,29 @@ func (s *server) handleConnection(ctx context.Context, conn net.Conn, logger *sl
 	}
 }
 
+func (s *server) handleDurableCommand(ctx context.Context, writer *bufio.Writer, bound *assignment, request teleportCommand, logger *slog.Logger) bool {
+	command := durableCommand{assignment: *bound, teleport: request, result: make(chan durableResult, 1)}
+	select {
+	case s.durable <- command:
+	case <-ctx.Done():
+		return false
+	default:
+		_, _ = fmt.Fprintln(writer, `{"error":"durable command queue full"}`)
+		_ = writer.Flush()
+		return true
+	}
+	select {
+	case result := <-command.result:
+		if result.err != nil {
+			s.writeDatabaseError(writer, logger, result.err)
+			return true
+		}
+		return s.writeDurableResponse(writer, bound, request, result)
+	case <-ctx.Done():
+		return false
+	}
+}
+
 func parseTeleport(message string) (teleportCommand, bool, error) {
 	arguments, found := strings.CutPrefix(message, "@teleport ")
 	if !found {
@@ -810,7 +845,19 @@ func parseTeleport(message string) (teleportCommand, bool, error) {
 		math.IsInf(latitude, 0) || math.IsInf(longitude, 0) || latitude < -90 || latitude > 90 || longitude < -180 || longitude > 180 {
 		return teleportCommand{}, true, errors.New("teleport coordinates are invalid")
 	}
-	return teleportCommand{ClientUID: fields[0], OperationID: fields[1], Latitude: latitude, Longitude: longitude}, true, nil
+	return teleportCommand{Kind: "teleport", ClientUID: fields[0], OperationID: fields[1], Latitude: latitude, Longitude: longitude}, true, nil
+}
+
+func parseIncrement(message string) (teleportCommand, bool, error) {
+	arguments, found := strings.CutPrefix(message, "@increment ")
+	if !found {
+		return teleportCommand{}, false, nil
+	}
+	fields := strings.Fields(arguments)
+	if len(fields) != 2 || !validIdentifier(fields[0]) || !validIdentifier(fields[1]) {
+		return teleportCommand{}, true, errors.New("increment requires client UID and operation ID")
+	}
+	return teleportCommand{Kind: "increment", ClientUID: fields[0], OperationID: fields[1]}, true, nil
 }
 
 func parseInput(message string) (inputIntent, bool, error) {
@@ -845,14 +892,15 @@ func validIdentifier(value string) bool {
 	return true
 }
 
-func (s *server) writeTeleportResponse(writer *bufio.Writer, current *assignment, command teleportCommand, result durableResult) bool {
+func (s *server) writeDurableResponse(writer *bufio.Writer, current *assignment, command teleportCommand, result durableResult) bool {
+	message := command.Kind
 	body, err := json.Marshal(response{
 		Server: current.ServerID, Location: current.Location,
 		Latitude: current.Latitude, Longitude: current.Longitude, Instance: s.podName,
-		Generation: current.Generation, Counter: result.counter, Message: "teleported",
+		Generation: current.Generation, Counter: result.counter, Message: message,
 		Time: time.Now().UTC().Format(time.RFC3339Nano), Tick: result.tick,
 		ClientUID: command.ClientUID, OperationID: command.OperationID,
-		ClientLatitude: command.Latitude, ClientLongitude: command.Longitude,
+		ClientLatitude: result.latitude, ClientLongitude: result.longitude,
 	})
 	if err != nil {
 		return false
