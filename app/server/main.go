@@ -791,12 +791,7 @@ func (s *server) handleConnection(ctx context.Context, conn net.Conn, logger *sl
 				return
 			}
 			bound = current
-			count, err := s.currentCounter(ctx, bound.ServerID)
-			if err != nil {
-				s.writeDatabaseError(writer, logger, err)
-				return
-			}
-			if !s.writeResponse(writer, bound, count, "connected") {
+			if !s.writeResponse(writer, bound, 0, "connected") {
 				return
 			}
 			continue
@@ -851,12 +846,7 @@ func (s *server) handleConnection(ctx context.Context, conn net.Conn, logger *sl
 			}
 			continue
 		}
-		count, err := s.increment(ctx, bound)
-		if err != nil {
-			s.writeDatabaseError(writer, logger, err)
-			return
-		}
-		if !s.writeResponse(writer, bound, count, message) {
+		if !s.writeResponse(writer, bound, 0, message) {
 			return
 		}
 	}
@@ -1095,37 +1085,6 @@ func (s *server) writeDatabaseError(writer *bufio.Writer, logger *slog.Logger, e
 	logger.Error("database operation", "instance", s.podName, "error", err)
 	_, _ = fmt.Fprintln(writer, `{"error":"database unavailable or stale assignment"}`)
 	_ = writer.Flush()
-}
-
-func (s *server) currentCounter(ctx context.Context, serverID string) (uint64, error) {
-	queryCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-	defer cancel()
-	var counter uint64
-	err := s.db.QueryRowContext(queryCtx, `SELECT counter FROM tcp_server_state WHERE server_id = $1`, serverID).Scan(&counter)
-	return counter, err
-}
-
-func (s *server) increment(ctx context.Context, current *assignment) (uint64, error) {
-	queryCtx, cancelQuery := context.WithTimeout(ctx, 2*time.Second)
-	defer cancelQuery()
-	const query = `
-		UPDATE tcp_server_state AS state
-		SET counter = state.counter + 1, updated_at = NOW()
-		FROM tcp_server_assignment AS assignment
-		WHERE state.server_id = $1
-			AND assignment.server_id = state.server_id
-			AND assignment.owner_instance_id = $2
-			AND assignment.generation = $3
-			AND assignment.lease_until > NOW()
-		RETURNING state.counter`
-	var counter uint64
-	err := s.db.QueryRowContext(queryCtx, query, current.ServerID, s.instanceID, current.Generation).Scan(&counter)
-	if err == nil {
-		cacheCtx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
-		_ = s.redis.Set(cacheCtx, "tcp-lab:server:"+current.ServerID+":counter", counter, 0).Err()
-		cancel()
-	}
-	return counter, err
 }
 
 func (s *server) currentAssignment() *assignment {

@@ -85,25 +85,23 @@ The browser never sends a position for movement: the current logical server
 keeps only the newest sequence, normalizes diagonal input, and advances the
 client coordinate at 40 geographic degrees per second on its authoritative
 tick. Input stops automatically if no
-refresh arrives for four ticks. Movement and teleports are not written on each
-tick. PostgreSQL records the last server-claim coordinate as a recovery point;
-the durable counter is stored independently.
+refresh arrives for four ticks. Movement is not written on each tick.
+PostgreSQL records the last server-claim coordinate as a recovery point and
+stores the durable counter independently.
 
 After every movement tick, the server checks the resulting coordinate against
 the geographic locations. When ownership changes, it returns a transient
 handoff snapshot; the gateway resumes that snapshot on the destination server
 before switching its downstream socket. The browser-to-gateway connection does
-not change. Normal movement does not write to PostgreSQL; a completed handoff
-records one entity claim.
+not change. A completed handoff records one entity claim in PostgreSQL.
 
 After a gateway disconnect, the local bridge uses its last coordinate as a
 routing hint. The destination server restores the durable counter from
 PostgreSQL, while the browser retries any unacknowledged counter operation with
 the same operation ID.
 The logical server identity, durable counter, and last entity claim remain in
-PostgreSQL when a pod is replaced. The claim stores both the logical location
-name used for routing and the exact latitude/longitude used for recovery. An
-expired 1.5-second lease is claimed by an already-running spare;
+PostgreSQL when a pod is replaced. Movement after that claim remains transient.
+An expired 1.5-second lease is claimed by an already-running spare;
 the generation increases to fence the old owner. Redis presence keys expire and
 repopulate automatically. Generic test messages remain at-least-once, while
 counter increments have exactly-once database effects. Without a location handshake, port 9000 remains the
