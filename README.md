@@ -15,7 +15,8 @@ adding a coordinator or operator.
 - **Gateway:** four generic Go replicas that preserve the client connection
   while switching downstream location servers at runtime.
 - **TCP server:** ten interchangeable Deployment replicas: five active location
-  owners and five ready hot spares.
+  owners and five ready hot spares. Each active process runs a 20 Hz
+  authoritative simulation clock and includes its current tick in responses.
 - **PostgreSQL:** authoritative location identity, counters, leases, and ownership
   generations; one PVC on the dedicated kind database worker.
 - **Redis:** ephemeral server-presence and counter-cache keys on the same kind

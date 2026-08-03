@@ -13,6 +13,7 @@ import (
 	"os/signal"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -23,6 +24,7 @@ import (
 const (
 	defaultLeaseDuration = 3 * time.Second
 	defaultRenewInterval = 500 * time.Millisecond
+	defaultTickInterval  = 50 * time.Millisecond
 )
 
 type locationDefinition struct {
@@ -56,6 +58,8 @@ type server struct {
 	redis         *redis.Client
 	leaseDuration time.Duration
 	renewInterval time.Duration
+	tickInterval  time.Duration
+	tick          atomic.Uint64
 	mu            sync.RWMutex
 	assignment    *assignment
 }
@@ -70,6 +74,7 @@ type response struct {
 	Counter    uint64                `json:"counter"`
 	Message    string                `json:"message"`
 	Time       string                `json:"time"`
+	Tick       uint64                `json:"tick"`
 }
 
 func main() {
@@ -101,13 +106,19 @@ func main() {
 		logger.Error("assignment lease must cover at least three renew intervals", "lease", leaseDuration, "renew_interval", renewInterval)
 		os.Exit(1)
 	}
+	tickInterval, err := durationFromEnv("SERVER_TICK_INTERVAL", defaultTickInterval)
+	if err != nil || tickInterval <= 0 {
+		logger.Error("invalid server tick interval", "error", err)
+		os.Exit(1)
+	}
 
 	s := &server{
 		instanceID: instanceID, podName: podName, db: db, redis: cache,
-		leaseDuration: leaseDuration, renewInterval: renewInterval,
+		leaseDuration: leaseDuration, renewInterval: renewInterval, tickInterval: tickInterval,
 	}
 	go s.manageAssignment(ctx, logger)
 	go s.heartbeat(ctx, logger)
+	go s.runTicks(ctx)
 
 	listenAddr := envOrDefault("LISTEN_ADDR", ":7000")
 	listener, err := net.Listen("tcp", listenAddr)
@@ -117,7 +128,8 @@ func main() {
 	}
 	defer listener.Close()
 	logger.Info("pool server ready", "instance", podName, "address", listenAddr,
-		"assignment_lease", leaseDuration, "assignment_renew_interval", renewInterval)
+		"assignment_lease", leaseDuration, "assignment_renew_interval", renewInterval,
+		"tick_interval", tickInterval)
 
 	go func() {
 		<-ctx.Done()
@@ -146,6 +158,19 @@ func main() {
 	s.release(cleanupCtx)
 	_ = s.redis.Del(cleanupCtx, s.presenceKey()).Err()
 	logger.Info("pool server stopped", "instance", podName)
+}
+
+func (s *server) runTicks(ctx context.Context) {
+	ticker := time.NewTicker(s.tickInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.tick.Add(1)
+		}
+	}
 }
 
 func connectDatabases(ctx context.Context, logger *slog.Logger) (*sql.DB, *redis.Client, error) {
@@ -448,7 +473,7 @@ func (s *server) writeResponse(writer *bufio.Writer, current *assignment, counte
 		Latitude: current.Latitude, Longitude: current.Longitude,
 		Instance: s.podName,
 		Generation: current.Generation, Counter: counter, Message: message,
-		Time: time.Now().UTC().Format(time.RFC3339Nano),
+		Time: time.Now().UTC().Format(time.RFC3339Nano), Tick: s.tick.Load(),
 	})
 	if err != nil {
 		return false
