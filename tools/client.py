@@ -65,7 +65,7 @@ PAGE = r"""<!doctype html>
   <script>
     const map=L.map('map',{worldCopyJump:true,minZoom:2}).setView([25,0],2);
     L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:18,attribution:'&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'}).addTo(map);
-    let selectedMarker=null, connectionLine=null, serverLayers=new Map(), otherMarkers=new Map(), locations=[], infra=null, currentRoute=null, selectedPosition=null, connectionState='disconnected',lastInputAt=0,draining=false,inputInFlight=false,inputDirty=true,teleporting=false,reconnecting=false;
+    let selectedMarker=null,teleportTargetMarker=null,connectionLine=null,serverLayers=new Map(),otherMarkers=new Map(),locations=[],infra=null,currentRoute=null,selectedPosition=null,connectionState='disconnected',lastInputAt=0,draining=false,inputInFlight=false,inputDirty=true,teleporting=false,reconnecting=false;
     const keys=new Set();
     const el=id=>document.getElementById(id);
     const clientUid=localStorage.getItem('tcp-lab-client-uid')||crypto.randomUUID();localStorage.setItem('tcp-lab-client-uid',clientUid);el('clientUid').textContent=clientUid;
@@ -80,6 +80,7 @@ PAGE = r"""<!doctype html>
     }
     function connection(state){connectionState=state;if(state!=='ready')renderEntities([]);const dot=el('dot');dot.classList.toggle('ok',state==='ready');dot.classList.toggle('waiting',state==='gateway');el('connection').textContent=state==='ready'?'Connected':state==='gateway'?'Gateway connected; waiting for server':'Disconnected';}
     async function request(path,options){const response=await fetch(path,options);const body=await response.json();if(!response.ok)throw new Error(body.error||response.statusText);return body}
+    function applyAuthoritativePosition(body){if(!Number.isFinite(body.client_latitude)||!Number.isFinite(body.client_longitude))return;selectedPosition=[body.client_latitude,body.client_longitude];el('coordinate').textContent=`${body.client_latitude.toFixed(5)}, ${body.client_longitude.toFixed(5)}`;if(selectedMarker)selectedMarker.setLatLng(selectedPosition);else selectedMarker=L.marker(selectedPosition).addTo(map)}
     function renderBots(state){el('botSummary').textContent=`${state.total} active in ${state.batches.length} batches`;const list=el('botBatches');list.replaceChildren();for(const batch of state.batches){const row=document.createElement('div');row.className='batch-row';const label=document.createElement('span');label.textContent=`Batch ${batch.id}: ${batch.count}`;const remove=document.createElement('button');remove.textContent='Despawn';remove.addEventListener('click',async()=>{await request('/api/bots/despawn',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({batch_id:batch.id})});refreshBots()});row.append(label,remove);list.appendChild(row)}}
     async function refreshBots(){try{renderBots(await request('/api/bots'))}catch(error){el('error').textContent=error.message}}
     function infraNode(item,kind){const node=document.createElement('div');node.className=`infra-node ${kind} ${item.status||''}`;node.dataset.name=item.name;node.textContent=item.name;node.title=[item.name,item.role,item.status?.replace('_',' '),item.ip,item.node].filter(Boolean).join('\n');return node}
@@ -112,11 +113,11 @@ PAGE = r"""<!doctype html>
     }
     map.on('click',async event=>{
       if(teleporting)return;
-      const {lat,lng}=event.latlng.wrap();selectedPosition=[lat,lng];el('coordinate').textContent=`${lat.toFixed(5)}, ${lng.toFixed(5)}`;el('error').textContent='';
-      if(selectedMarker)selectedMarker.setLatLng([lat,lng]);else selectedMarker=L.marker([lat,lng]).addTo(map);
+      const {lat,lng}=event.latlng.wrap();el('coordinate').textContent=`Target: ${lat.toFixed(5)}, ${lng.toFixed(5)}`;el('error').textContent='';
+      if(teleportTargetMarker)teleportTargetMarker.setLatLng([lat,lng]);else teleportTargetMarker=L.circleMarker([lat,lng],{radius:9,color:'#d29922',weight:2,dashArray:'4 4',fillColor:'#d29922',fillOpacity:.15}).addTo(map);
       teleporting=true;inputSequence++;localStorage.setItem(inputSequenceKey,inputSequence);
-      try{const body=await request('/api/location',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({client_uid:clientUid,sequence:inputSequence,latitude:lat,longitude:lng})});showRoute(body);renderEntities(body.entities||[]);connection('ready')}
-      catch(error){el('error').textContent=error.message;refresh()}finally{teleporting=false;inputDirty=true}
+      try{const body=await request('/api/location',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({client_uid:clientUid,sequence:inputSequence,latitude:lat,longitude:lng})});applyAuthoritativePosition(body);showRoute(body);renderEntities(body.entities||[]);connection('ready')}
+      catch(error){el('error').textContent=error.message;refresh()}finally{if(teleportTargetMarker){teleportTargetMarker.remove();teleportTargetMarker=null}teleporting=false;inputDirty=true}
     });
     el('increment').addEventListener('click',()=>{pendingCommands.push({kind:'increment',operation_id:crypto.randomUUID()});localStorage.setItem(pendingKey,JSON.stringify(pendingCommands));drainCommands()});
     el('spawnBots').addEventListener('click',async()=>{try{await request('/api/bots/spawn',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({count:Number(el('botBatchSize').value)})});refreshBots()}catch(error){el('error').textContent=error.message}});
@@ -127,14 +128,14 @@ PAGE = r"""<!doctype html>
       if(inputInFlight||teleporting||pendingCommands.length||!currentRoute?.server)return;
       const x=(keys.has('d')?1:0)-(keys.has('a')?1:0),y=(keys.has('w')?1:0)-(keys.has('s')?1:0);
       const now=performance.now();if(x===0&&y===0&&!inputDirty&&now-lastInputAt<50)return;inputDirty=false;inputInFlight=true;lastInputAt=now;
-      try{inputSequence++;localStorage.setItem(inputSequenceKey,inputSequence);const body=await request('/api/input',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({client_uid:clientUid,sequence:inputSequence,x,y})});showRoute(body);renderEntities(body.entities||[]);selectedPosition=[body.client_latitude,body.client_longitude];el('coordinate').textContent=`${body.client_latitude.toFixed(5)}, ${body.client_longitude.toFixed(5)}`;if(selectedMarker)selectedMarker.setLatLng(selectedPosition);else selectedMarker=L.marker(selectedPosition).addTo(map)}
+      try{inputSequence++;localStorage.setItem(inputSequenceKey,inputSequence);const body=await request('/api/input',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({client_uid:clientUid,sequence:inputSequence,x,y})});applyAuthoritativePosition(body);showRoute(body);renderEntities(body.entities||[])}
       catch(error){el('error').textContent=error.message;inputDirty=true}finally{inputInFlight=false}
     }
     el('showAllServers').addEventListener('change',renderServers);
     el('showProxies').addEventListener('change',loadInfra);el('showHotSwaps').addEventListener('change',loadInfra);map.on('move zoom resize',drawProxyEdge);
     async function reconnect(silent=false){if(reconnecting)return;reconnecting=true;try{const body=await request('/api/reconnect',{method:'POST'});showRoute(body||{});connection(body?'ready':'gateway');inputDirty=true;el('error').textContent=''}catch(error){if(!silent)el('error').textContent=error.message;refresh()}finally{reconnecting=false}}
     el('reconnect').addEventListener('click',()=>reconnect(false));
-    async function refresh(){try{const state=await request('/api/state');connection(state.connection);if(state.latitude!==null&&!pendingCommands.length){selectedPosition=[state.latitude,state.longitude];el('coordinate').textContent=`${state.latitude.toFixed(5)}, ${state.longitude.toFixed(5)}`;if(selectedMarker)selectedMarker.setLatLng(selectedPosition);else selectedMarker=L.marker(selectedPosition).addTo(map)}showRoute(state.route||{gateway:state.gateway})}catch(error){connection('disconnected')}}
+    async function refresh(){try{const state=await request('/api/state');connection(state.connection);if(state.latitude!==null&&!pendingCommands.length&&!teleporting)applyAuthoritativePosition({client_latitude:state.latitude,client_longitude:state.longitude});showRoute(state.route||{gateway:state.gateway})}catch(error){connection('disconnected')}}
     loadLocations().then(()=>{refresh();refreshBots();drainCommands()}).catch(error=>{el('error').textContent=error.message;refresh()});setInterval(sendInput,25);setInterval(refresh,1000);setInterval(refreshBots,1000);setInterval(()=>{if(connectionState!=='ready')reconnect(true)},1000);setInterval(drainCommands,1000);setInterval(loadInfra,2000);setInterval(()=>loadLocations().catch(()=>{}),5000);
   </script>
 </body>
