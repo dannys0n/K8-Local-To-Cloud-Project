@@ -194,8 +194,13 @@ powershell -ExecutionPolicy Bypass -File scripts/down.ps1
 
 ## Run on Linux, macOS, or WSL
 
+For WSL, enable Docker Desktop's WSL integration for the distribution first,
+or provide a Docker Engine socket that is reachable from WSL. Verify that
+`docker version`, `kind version`, and `kubectl version --client` work inside
+the same shell, then run:
+
 ```bash
-./scripts/up.sh
+bash scripts/up.sh
 python3 tools/smoke.py
 python3 tools/client.py
 ```
@@ -203,8 +208,11 @@ python3 tools/client.py
 Delete everything:
 
 ```bash
-./scripts/down.sh
+bash scripts/down.sh
 ```
+
+Using `bash` explicitly works both on native Linux filesystems and on Windows
+drives mounted into WSL, where executable permission metadata may be disabled.
 
 ## Expected response
 
