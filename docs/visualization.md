@@ -25,6 +25,13 @@ nodes use red for `NotReady`, gray for `Unknown`, yellow for ready spares, and t
 normal gateway/active styling for ready pods. Health combines the pod readiness
 condition with the assigned node's Kubernetes `Ready` condition.
 
+Client counters intentionally measure different layers. `Total clients` is the
+number of TCP sessions accepted by reachable gateways, including sessions waiting
+for a backend. `Connected clients` counts only sessions currently routed through
+both a gateway and server. `Dummy threads` is the number of bot threads owned by
+this dashboard process, whether ready, gateway-only, or disconnected. The session
+table exposes `gateway` and `ready` status so the difference is inspectable.
+
 The map update-rate slider targets 1–20 Hz and persists its setting in the
 browser. Refreshes use a one-request-in-flight scheduler: if Kubernetes inventory
 collection takes longer than the selected period, the next refresh waits rather

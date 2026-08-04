@@ -95,6 +95,10 @@ direction every three seconds, sends movement heartbeats at 20 Hz, and performs
 one idempotent durable counter increment per second. Batches can be despawned
 individually or together. Their cyan pins disappear from visibility after one
 second, and abandoned in-memory server entities are removed after 30 seconds.
+When routing is unavailable, bots pause application commands and retry their
+existing reconnect/resume path with 0.75–1.25 seconds of per-bot jitter. The UI
+reports ready, gateway-only, and disconnected bots separately instead of treating
+every allocated bot thread as connected.
 
 The internal `@location` handshake remains available to smoke checks. Browser
 clients use `@teleport CLIENT_UID SEQUENCE LATITUDE LONGITUDE` and

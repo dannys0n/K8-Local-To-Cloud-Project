@@ -64,6 +64,7 @@ type session struct {
 	Generation  int64     `json:"generation"`
 	ConnectedAt time.Time `json:"connected_at"`
 	Protocol    string    `json:"protocol"`
+	Status      string    `json:"status"`
 }
 
 type gateway struct {
@@ -168,6 +169,9 @@ func (g *gateway) handleClient(ctx context.Context, client net.Conn) {
 	}()
 	id := fmt.Sprintf("%s-%d", g.instance, g.nextSession.Add(1))
 	g.accepted.Add(1)
+	g.mu.Lock()
+	g.sessions[id] = session{ID: id, Client: client.RemoteAddr().String(), ConnectedAt: time.Now().UTC(), Protocol: "TCP", Status: "gateway"}
+	g.mu.Unlock()
 	clientReader := bufio.NewReader(client)
 	clientWriter := bufio.NewWriter(client)
 	var downstream *backendConnection
@@ -310,6 +314,7 @@ func (g *gateway) handleClient(ctx context.Context, client net.Conn) {
 			failed := downstream.info
 			downstream.conn.Close()
 			downstream = nil
+			g.setSessionStatus(id, "gateway")
 			g.removeRoute(failed)
 			candidate, _, routeErr := g.openRoute(ctx, requested, &failed)
 			if routeErr != nil {
@@ -329,7 +334,12 @@ func (g *gateway) handleClient(ctx context.Context, client net.Conn) {
 			g.updateSession(id, client.RemoteAddr().String(), candidate.info, clientLatitude, clientLongitude)
 			response, err = g.exchange(downstream, message)
 		}
-		if err != nil {
+		if err != nil || responseHasError(response) {
+			if downstream != nil {
+				downstream.conn.Close()
+				downstream = nil
+			}
+			g.setSessionStatus(id, "gateway")
 			writeJSONError(clientWriter, "backend request failed")
 			continue
 		}
@@ -643,7 +653,16 @@ func (g *gateway) updateSession(id, client string, route backend, latitude, long
 	if current, ok := g.sessions[id]; ok {
 		connectedAt = current.ConnectedAt
 	}
-	g.sessions[id] = session{ID: id, Client: client, LocationID: route.LocationID, Latitude: latitude, Longitude: longitude, Server: route.Server, Instance: route.Instance, Address: route.Address, Generation: route.Generation, ConnectedAt: connectedAt, Protocol: "TCP"}
+	g.sessions[id] = session{ID: id, Client: client, LocationID: route.LocationID, Latitude: latitude, Longitude: longitude, Server: route.Server, Instance: route.Instance, Address: route.Address, Generation: route.Generation, ConnectedAt: connectedAt, Protocol: "TCP", Status: "ready"}
+	g.mu.Unlock()
+}
+
+func (g *gateway) setSessionStatus(id, status string) {
+	g.mu.Lock()
+	if current, ok := g.sessions[id]; ok {
+		current.Status = status
+		g.sessions[id] = current
+	}
 	g.mu.Unlock()
 }
 

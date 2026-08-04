@@ -55,13 +55,15 @@ PAGE = r"""<!doctype html>
     <div class="card">Not ready pods<div class="value bad" id="notReady">-</div></div>
     <div class="card">Unknown pods<div class="value muted" id="unknown">-</div></div>
     <div class="card">Gateway replicas<div class="value" id="gateways">–</div></div>
-    <div class="card">Live clients<div class="value" id="clients">–</div></div>
+    <div class="card">Total clients<div class="value" id="clients">–</div></div>
+    <div class="card">Connected clients<div class="value" id="connectedClients">–</div></div>
+    <div class="card">Dummy threads<div class="value" id="dummyThreads">–</div></div>
     <div class="card">Backend sessions<div class="value" id="backends">–</div></div>
     <div class="card">Server pool<div class="value" id="pool">–</div></div>
     <div class="card">Hot spares<div class="value" id="spares">–</div></div>
   </div>
   <div class="panel"><h2>Per gateway</h2><table><thead><tr><th>Gateway</th><th>Pod IP</th><th>Node</th><th>Clients</th><th>Backend</th><th>Total accepted</th><th>Status</th></tr></thead><tbody id="gatewayRows"></tbody></table></div>
-  <div class="panel"><h2>Active client sessions</h2><table><thead><tr><th>Gateway</th><th>Client address</th><th>Location ID</th><th>Logical server</th><th>Instance</th><th>Generation</th><th>Age</th><th>Protocol</th></tr></thead><tbody id="sessionRows"></tbody></table></div>
+  <div class="panel"><h2>Client sessions</h2><table><thead><tr><th>Gateway</th><th>Client address</th><th>Status</th><th>Location ID</th><th>Logical server</th><th>Instance</th><th>Generation</th><th>Age</th><th>Protocol</th></tr></thead><tbody id="sessionRows"></tbody></table></div>
   <div class="panel"><h2>Backend distribution</h2><table><thead><tr><th>Logical server</th><th>Location ID</th><th>Active instance</th><th>Node</th><th>Endpoint</th><th>Generation</th><th>Clients</th><th>Seen by gateways</th><th>Status</th></tr></thead><tbody id="backendRows"></tbody></table></div>
   <div class="panel"><h2>Data services</h2><table><thead><tr><th>Service</th><th>Instance</th><th>Node</th><th>Pod IP</th><th>Service endpoint</th><th>Restarts</th><th>Status</th></tr></thead><tbody id="dataRows"></tbody></table></div>
   <p class="muted" id="updated"></p>
@@ -75,13 +77,15 @@ async function refresh(){
     document.getElementById('error').textContent=data.errors.join(' · ');
     document.getElementById('gateways').textContent=data.gateways.length;
     document.getElementById('clients').textContent=data.total_clients;
+    document.getElementById('connectedClients').textContent=data.connected_clients;
+    document.getElementById('dummyThreads').textContent=data.dummy_threads;
     document.getElementById('backends').textContent=data.total_backends;
     document.getElementById('pool').textContent=data.server_pods;
     document.getElementById('spares').textContent=data.hot_spares;
     document.getElementById('notReady').textContent=data.not_ready_pods;
     document.getElementById('unknown').textContent=data.unknown_pods;
     fill('gatewayRows', data.gateways, ['name','ip','node','clients','backend_sessions','total_accepted',p=>p.error?'ERROR':'OK']);
-    fill('sessionRows', data.sessions, ['gateway','src','location_id','server','instance','generation','age','proto']);
+    fill('sessionRows', data.sessions, ['gateway','src','status','location_id','server','instance','generation','age','proto']);
     fill('backendRows', data.backends, ['server','location_id','instance','node','address','generation','current','gateways','status']);
     fill('dataRows', data.data_services, ['service','instance','node','ip','endpoint','restarts','status'], 'No in-cluster data services');
     document.getElementById('updated').textContent='Updated '+new Date().toLocaleTimeString();
@@ -113,16 +117,16 @@ const map=L.map('map',{worldCopyJump:true,minZoom:2}).setView([20,0],2);L.tileLa
 const serverLayer=L.layerGroup().addTo(map),clientLayer=L.layerGroup().addTo(map),serverMarkers=new Map(),clientMarkers=new Map();let selectedPoint=null,selectedLocation=null,lastData=null,refreshHz=4;
 const request=async(path,options={})=>{const response=await fetch(path,{cache:'no-store',...options});const body=await response.json();if(!response.ok)throw new Error(body.error||response.statusText);return body};
 const post=(path,body={})=>request(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-function render(data){lastData=data;document.getElementById('summary').textContent=`${data.gateways.length} gateways · ${data.total_clients} clients · ${data.backends.length} locations · ${data.hot_spares} spares · ${data.not_ready_pods} not ready · ${data.unknown_pods} unknown`;const visibleServers=new Set(),visibleClients=new Set();
+function render(data){lastData=data;document.getElementById('summary').textContent=`${data.gateways.length} gateways · ${data.connected_clients}/${data.total_clients} clients connected · ${data.dummy_threads} dummy threads · ${data.backends.length} locations · ${data.hot_spares} spares · ${data.not_ready_pods} not ready · ${data.unknown_pods} unknown`;const visibleServers=new Set(),visibleClients=new Set();
  if(document.getElementById('showServers').checked)for(const server of data.backends){if(!server.latitude&&server.latitude!==0)continue;visibleServers.add(server.server);let marker=serverMarkers.get(server.server);if(!marker){marker=L.circleMarker([server.latitude,server.longitude],{radius:10,color:'#3fb950',weight:3,fillColor:'#0d1117',fillOpacity:1}).addTo(serverLayer);marker.bindTooltip('',{permanent:true,direction:'top',className:'server-label'});marker.bindPopup('');marker.on('click',()=>selectLocation(marker.serverData));serverMarkers.set(server.server,marker)}marker.serverData=server;marker.setLatLng([server.latitude,server.longitude]);marker.getTooltip().setContent(`Location ${server.location_id}`);marker.getPopup().setContent(`<b>Location ${server.location_id}</b><br>${server.server}<br>${server.instance}<br>${server.node}<br>${server.current} clients`)}for(const [key,marker] of serverMarkers)if(!visibleServers.has(key)){marker.remove();serverMarkers.delete(key)}
- if(document.getElementById('showClients').checked)for(const client of data.sessions){if(client.latitude==null||client.longitude==null)continue;const key=`${client.gateway}:${client.id||client.src}`;visibleClients.add(key);let marker=clientMarkers.get(key);if(!marker){const icon=L.divIcon({className:'client-pin-wrap',html:'<div class="client-pin"></div>',iconSize:[18,25],iconAnchor:[9,25]});marker=L.marker([client.latitude,client.longitude],{icon}).addTo(clientLayer);marker.bindTooltip('');marker.bindPopup('');clientMarkers.set(key,marker)}marker.setLatLng([client.latitude,client.longitude]);marker.getTooltip().setContent(client.client_uid||client.src);marker.getPopup().setContent(`<b>${client.client_uid||'Client'}</b><br>Gateway: ${client.gateway}<br>Location: ${client.location_id}<br>Server: ${client.server}`)}for(const [key,marker] of clientMarkers)if(!visibleClients.has(key)){marker.remove();clientMarkers.delete(key)}
+ if(document.getElementById('showClients').checked)for(const client of data.sessions){if(client.latitude==null||client.longitude==null)continue;const key=`${client.gateway}:${client.id||client.src}`;visibleClients.add(key);let marker=clientMarkers.get(key);if(!marker){const icon=L.divIcon({className:'client-pin-wrap',html:'<div class="client-pin"></div>',iconSize:[18,25],iconAnchor:[9,25]});marker=L.marker([client.latitude,client.longitude],{icon}).addTo(clientLayer);marker.bindTooltip('');marker.bindPopup('');clientMarkers.set(key,marker)}marker.setLatLng([client.latitude,client.longitude]);marker.getTooltip().setContent(client.client_uid||client.src);marker.getPopup().setContent(`<b>${client.client_uid||'Client'}</b><br>Status: ${client.status}<br>Gateway: ${client.gateway}<br>Location: ${client.location_id}<br>Server: ${client.server}`)}for(const [key,marker] of clientMarkers)if(!visibleClients.has(key)){marker.remove();clientMarkers.delete(key)}
  const gateways=document.getElementById('gateways');gateways.replaceChildren();if(document.getElementById('showGateways').checked)for(const item of data.gateway_instances){const node=document.createElement('div');node.className=`node gateway ${item.status}`;node.textContent=item.name;node.title=`${item.status.replace('_',' ')} · ${item.node}`;gateways.appendChild(node)}
  const spares=document.getElementById('spares');spares.replaceChildren();if(document.getElementById('showSpares').checked)for(const item of data.server_instances.filter(x=>x.role==='spare'||x.status!=='ready')){const node=document.createElement('div');node.className=`node spare ${item.status}`;node.textContent=item.name;node.title=`${item.role} · ${item.status.replace('_',' ')} · ${item.node}`;spares.appendChild(node)}}
 function selectLocation(server){selectedLocation=server;selectedPoint=[server.latitude,server.longitude];document.getElementById('selection').textContent=`Location ${server.location_id} · ${server.latitude.toFixed(5)}, ${server.longitude.toFixed(5)}`;document.getElementById('createSelected').disabled=false;document.getElementById('deleteLocation').disabled=false}
 map.on('click',event=>{const point=event.latlng.wrap();selectedPoint=[point.lat,point.lng];selectedLocation=null;document.getElementById('selection').textContent=`${point.lat.toFixed(5)}, ${point.lng.toFixed(5)}`;document.getElementById('createSelected').disabled=false;document.getElementById('deleteLocation').disabled=true});
 async function refresh(){try{render(await request('/api/connections'));document.getElementById('error').textContent=''}catch(error){document.getElementById('error').textContent=error.message}}
 async function refreshLoop(){const started=performance.now();await refresh();setTimeout(refreshLoop,Math.max(0,1000/refreshHz-(performance.now()-started)))}
-function renderBots(bots){document.getElementById('botState').textContent=`${bots.total} active in ${bots.batches.length} batches`;const list=document.getElementById('botBatches');list.replaceChildren();for(const batch of bots.batches){const row=document.createElement('div');row.className='batch-row';const label=document.createElement('span');label.textContent=`Batch ${batch.id}: ${batch.count}`;const remove=document.createElement('button');remove.textContent='Despawn';remove.onclick=async()=>{try{renderBots(await post('/api/bots/despawn',{batch_id:batch.id}))}catch(error){document.getElementById('error').textContent=error.message}};row.append(label,remove);list.appendChild(row)}}
+function renderBots(bots){document.getElementById('botState').textContent=`${bots.states.ready} ready · ${bots.states.gateway} gateway · ${bots.states.disconnected} disconnected`;const list=document.getElementById('botBatches');list.replaceChildren();for(const batch of bots.batches){const row=document.createElement('div');row.className='batch-row';const label=document.createElement('span');label.textContent=`Batch ${batch.id}: ${batch.count}`;const remove=document.createElement('button');remove.textContent='Despawn';remove.onclick=async()=>{try{renderBots(await post('/api/bots/despawn',{batch_id:batch.id}))}catch(error){document.getElementById('error').textContent=error.message}};row.append(label,remove);list.appendChild(row)}}
 async function refreshBots(){try{renderBots(await request('/api/bots'))}catch(error){document.getElementById('error').textContent=error.message}}
 document.getElementById('spawn').onclick=async()=>{try{await post('/api/bots/spawn',{count:Number(document.getElementById('botCount').value)});refreshBots()}catch(error){document.getElementById('error').textContent=error.message}};document.getElementById('despawn').onclick=async()=>{try{await post('/api/bots/despawn-all');refreshBots()}catch(error){document.getElementById('error').textContent=error.message}};
 document.getElementById('createSelected').onclick=async()=>{if(!selectedPoint)return;try{await post('/api/locations/create',{latitude:selectedPoint[0],longitude:selectedPoint[1]});selectedLocation=null;await refresh()}catch(error){document.getElementById('error').textContent=error.message}};document.getElementById('createRandom').onclick=async()=>{try{await post('/api/locations/create');await refresh()}catch(error){document.getElementById('error').textContent=error.message}};document.getElementById('deleteLocation').onclick=async()=>{if(!selectedLocation||!confirm(`Disable location ${selectedLocation.location_id}?`))return;try{await post('/api/locations/delete',{location_id:selectedLocation.location_id});selectedLocation=null;document.getElementById('deleteLocation').disabled=true;await refresh()}catch(error){document.getElementById('error').textContent=error.message}};
@@ -275,10 +279,10 @@ def inspect_pod(pod: dict) -> dict:
                 "latitude": item.get("latitude"), "longitude": item.get("longitude"),
                 "instance": item.get("instance", ""), "address": item.get("address", ""),
                 "generation": item.get("generation", 0), "age": f"{age}s",
-                "proto": item.get("protocol", "TCP"),
+                "proto": item.get("protocol", "TCP"), "status": item.get("status", "gateway"),
             })
         pod["clients"] = len(pod["sessions"])
-        pod["backend_sessions"] = len(pod["sessions"])
+        pod["backend_sessions"] = sum(item["status"] == "ready" for item in pod["sessions"])
         for item in stats.get("routes", []):
             pod["backends"].append({
                 "gateway": pod["name"], "server": item.get("server", ""),
@@ -337,11 +341,14 @@ def snapshot() -> dict:
     )
 
     application_instances = gateway_instances + server_instances
+    bot_state = BOT_MANAGER.snapshot() if BOT_MANAGER is not None else {"total": 0}
 
     return {
         "gateways": gateways,
         "gateway_instances": gateway_instances,
         "total_clients": sum(p["clients"] for p in gateways),
+        "connected_clients": sum(p["backend_sessions"] for p in gateways),
+        "dummy_threads": bot_state["total"],
         "total_backends": sum(p["backend_sessions"] for p in gateways),
         "server_pods": sum(instance["status"] == "ready" for instance in server_instances),
         "hot_spares": sum(instance["role"] == "spare" and instance["status"] == "ready" for instance in server_instances),

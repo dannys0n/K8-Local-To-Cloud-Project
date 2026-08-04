@@ -81,7 +81,7 @@ PAGE = r"""<!doctype html>
     function connection(state){connectionState=state;if(state!=='ready')renderEntities([]);const dot=el('dot');dot.classList.toggle('ok',state==='ready');dot.classList.toggle('waiting',state==='gateway');el('connection').textContent=state==='ready'?'Connected':state==='gateway'?'Gateway connected; waiting for server':'Disconnected';}
     async function request(path,options){const response=await fetch(path,options);const body=await response.json();if(!response.ok)throw new Error(body.error||response.statusText);return body}
     function applyAuthoritativePosition(body){if(!Number.isFinite(body.client_latitude)||!Number.isFinite(body.client_longitude))return;selectedPosition=[body.client_latitude,body.client_longitude];el('coordinate').textContent=`${body.client_latitude.toFixed(5)}, ${body.client_longitude.toFixed(5)}`;if(selectedMarker)selectedMarker.setLatLng(selectedPosition);else selectedMarker=L.marker(selectedPosition).addTo(map)}
-    function renderBots(state){el('botSummary').textContent=`${state.total} active in ${state.batches.length} batches`;const list=el('botBatches');list.replaceChildren();for(const batch of state.batches){const row=document.createElement('div');row.className='batch-row';const label=document.createElement('span');label.textContent=`Batch ${batch.id}: ${batch.count}`;const remove=document.createElement('button');remove.textContent='Despawn';remove.addEventListener('click',async()=>{await request('/api/bots/despawn',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({batch_id:batch.id})});refreshBots()});row.append(label,remove);list.appendChild(row)}}
+    function renderBots(state){el('botSummary').textContent=`${state.states.ready} ready · ${state.states.gateway} gateway · ${state.states.disconnected} disconnected`;const list=el('botBatches');list.replaceChildren();for(const batch of state.batches){const row=document.createElement('div');row.className='batch-row';const label=document.createElement('span');label.textContent=`Batch ${batch.id}: ${batch.count}`;const remove=document.createElement('button');remove.textContent='Despawn';remove.addEventListener('click',async()=>{await request('/api/bots/despawn',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({batch_id:batch.id})});refreshBots()});row.append(label,remove);list.appendChild(row)}}
     async function refreshBots(){try{renderBots(await request('/api/bots'))}catch(error){el('error').textContent=error.message}}
     function infraNode(item,kind){const node=document.createElement('div');node.className=`infra-node ${kind} ${item.status||''}`;node.dataset.name=item.name;node.textContent=item.name;node.title=[item.name,item.role,item.status?.replace('_',' '),item.ip,item.node].filter(Boolean).join('\n');return node}
     function drawProxyEdge(){const svg=el('infraEdges');svg.replaceChildren();if(!el('showProxies').checked||!selectedPosition||!currentRoute?.gateway)return;const node=[...el('proxyRow').children].find(item=>item.dataset.name===currentRoute.gateway);if(!node)return;const mapRect=el('map').getBoundingClientRect(),nodeRect=node.getBoundingClientRect(),start=map.latLngToContainerPoint(selectedPosition);svg.setAttribute('viewBox',`0 0 ${mapRect.width} ${mapRect.height}`);const line=document.createElementNS('http://www.w3.org/2000/svg','line');line.setAttribute('x1',start.x);line.setAttribute('y1',start.y);line.setAttribute('x2',nodeRect.left-mapRect.left+nodeRect.width/2);line.setAttribute('y2',nodeRect.top-mapRect.top+nodeRect.height/2);line.setAttribute('stroke','#3fb950');line.setAttribute('stroke-width','2');line.setAttribute('stroke-dasharray','7 6');svg.appendChild(line)}
@@ -306,10 +306,20 @@ class Bot:
         rng = random.Random(self.uid)
         next_direction = time.monotonic()
         next_counter = next_direction + rng.random()
+        next_reconnect = next_direction
         pending_operation = None
         try:
             while not self.stopped.is_set():
                 started = time.monotonic()
+                if self.client.snapshot()["connection"] != "ready":
+                    if started >= next_reconnect:
+                        try:
+                            self.client.reconnect()
+                        except (GatewayResponseError, OSError, ValueError, ConnectionError):
+                            pass
+                        next_reconnect = time.monotonic() + 0.75 + rng.random() * 0.5
+                    self.stopped.wait(0.05)
+                    continue
                 if started >= next_direction:
                     angle = rng.random() * math.tau
                     axis_x, axis_y = math.cos(angle), math.sin(angle)
@@ -323,6 +333,8 @@ class Bot:
                     except (GatewayResponseError, OSError, ValueError, ConnectionError):
                         pass
                     next_counter = time.monotonic() + 1
+                if self.client.snapshot()["connection"] != "ready":
+                    continue
                 sequence += 1
                 try:
                     self.client.send_input(self.uid, sequence, axis_x, axis_y)
@@ -374,7 +386,12 @@ class BotManager:
     def snapshot(self) -> dict:
         with self.lock:
             batches = [{"id": batch_id, "count": len(bots)} for batch_id, bots in self.batches.items()]
-        return {"total": sum(batch["count"] for batch in batches), "batches": batches}
+            bots = [bot for batch in self.batches.values() for bot in batch]
+        states = {"ready": 0, "gateway": 0, "disconnected": 0}
+        for bot in bots:
+            connection = bot.client.snapshot()["connection"]
+            states[connection if connection in states else "disconnected"] += 1
+        return {"total": len(bots), "states": states, "batches": batches}
 
 
 def make_handler(client: GatewayClient, bots: BotManager):
