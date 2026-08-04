@@ -35,7 +35,7 @@ class WorkerSchedulingTests(unittest.TestCase):
                 self.assertIn("effect: NoSchedule", content)
 
     def test_kind_node_roles_and_fast_monitoring(self) -> None:
-        content = (ROOT / "kind/cluster.yaml").read_text(encoding="utf-8")
+        content = (ROOT / "infra/kind/cluster.yaml").read_text(encoding="utf-8")
         self.assertIn(
             'register-with-taints: "tcp-lab.io/database=true:NoSchedule"',
             content,

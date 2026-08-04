@@ -19,7 +19,7 @@ try {
     }
     if ($Clusters -notcontains $Cluster) {
         Write-Host "Creating kind cluster '$Cluster'..."
-        kind create cluster --config kind/cluster.yaml
+        kind create cluster --config infra/kind/cluster.yaml
     } else {
         Write-Host "kind cluster '$Cluster' already exists."
     }

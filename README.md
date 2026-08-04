@@ -10,6 +10,23 @@ client -> NodePort/NLB -> Gateway Deployment -> TCP Server pool
 It intentionally keeps ownership and fencing inside PostgreSQL instead of
 adding a coordinator or operator.
 
+## Repository layout
+
+```text
+app/                  Replaceable gateway and server test workloads
+deploy/base/          Kubernetes resources shared by every environment
+deploy/overlays/kind/ Local workload patches and in-cluster data services
+deploy/overlays/eks/  AWS-specific workload patches
+infra/kind/           Definition of the local kind cluster and its nodes
+scripts/              Cluster lifecycle commands
+tools/                Local client, dashboard, bots, and smoke utilities
+tests/                Manifest and scheduling checks
+```
+
+`infra/kind/cluster.yaml` creates the local Kubernetes cluster. The kind
+Kustomize overlay deploys the lab into that cluster. EKS creates its cluster
+through AWS tooling and then uses the EKS overlay to deploy the same base.
+
 ## What runs
 
 - **Gateway:** four generic Go replicas that preserve the client connection
