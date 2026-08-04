@@ -286,8 +286,23 @@ func (g *gateway) handleClient(ctx context.Context, client net.Conn) {
 			continue
 		}
 		if downstream == nil {
-			writeJSONError(clientWriter, "send @location before application messages")
-			continue
+			if requested == "" {
+				writeJSONError(clientWriter, "send @location before application messages")
+				continue
+			}
+			location, routeErr := g.locationFor(ctx, clientLatitude, clientLongitude)
+			if routeErr != nil {
+				writeJSONError(clientWriter, routeErr.Error())
+				continue
+			}
+			candidate, _, routeErr := g.openRoute(ctx, location, nil)
+			if routeErr != nil {
+				writeJSONError(clientWriter, routeErr.Error())
+				continue
+			}
+			downstream = candidate
+			requested = location
+			g.updateSession(id, client.RemoteAddr().String(), candidate.info, clientLatitude, clientLongitude)
 		}
 
 		response, err := g.exchange(downstream, message)
@@ -295,10 +310,20 @@ func (g *gateway) handleClient(ctx context.Context, client net.Conn) {
 			failed := downstream.info
 			downstream.conn.Close()
 			downstream = nil
+			g.removeRoute(failed)
 			candidate, _, routeErr := g.openRoute(ctx, requested, &failed)
 			if routeErr != nil {
-				writeJSONError(clientWriter, routeErr.Error())
-				continue
+				location, nearestErr := g.locationFor(ctx, clientLatitude, clientLongitude)
+				if nearestErr != nil {
+					writeJSONError(clientWriter, nearestErr.Error())
+					continue
+				}
+				candidate, _, routeErr = g.openRoute(ctx, location, nil)
+				if routeErr != nil {
+					writeJSONError(clientWriter, routeErr.Error())
+					continue
+				}
+				requested = location
 			}
 			downstream = candidate
 			g.updateSession(id, client.RemoteAddr().String(), candidate.info, clientLatitude, clientLongitude)
@@ -315,7 +340,12 @@ func (g *gateway) handleClient(ctx context.Context, client net.Conn) {
 			ClientLatitude  float64 `json:"client_latitude"`
 			ClientLongitude float64 `json:"client_longitude"`
 		}
-		if json.Unmarshal(response, &handoff) == nil && handoff.Reroute != 0 {
+		decodedHandoff := json.Unmarshal(response, &handoff) == nil
+		if decodedHandoff && handoff.ClientUID != "" {
+			clientLatitude = handoff.ClientLatitude
+			clientLongitude = handoff.ClientLongitude
+		}
+		if decodedHandoff && handoff.Reroute != 0 {
 			nextLocation := strconv.FormatInt(handoff.Reroute, 10)
 			candidate, _, routeErr := g.openRoute(ctx, nextLocation, nil)
 			if routeErr != nil {

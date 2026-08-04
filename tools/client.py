@@ -205,6 +205,9 @@ class GatewayClient:
                     self._connect()
                 body = self._exchange(command)
             except GatewayResponseError:
+                with self.state_lock:
+                    self.connection = "gateway"
+                    self.route = None
                 raise
             except (OSError, ValueError, ConnectionError):
                 self._close()
