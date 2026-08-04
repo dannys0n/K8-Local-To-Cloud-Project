@@ -96,7 +96,8 @@ connection. Run the command again for each
 additional independent client; every process receives its own available port.
 Use `--listen-port 8082` only when a fixed port is useful.
 
-The client sidebar can spawn dummy clients in batches of up to 500. Every bot
+The infrastructure dashboard map can spawn dummy clients in batches of up to
+500; the client window cannot create or remove test load. Every bot
 uses its own gateway TCP connection, chooses a random normalized movement
 direction every three seconds, sends movement heartbeats at 20 Hz, and performs
 one idempotent durable counter increment per second. Batches can be despawned

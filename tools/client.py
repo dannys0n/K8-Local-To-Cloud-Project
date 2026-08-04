@@ -36,7 +36,6 @@ PAGE = r"""<!doctype html>
     .toggle{display:flex;align-items:center;gap:8px;color:#8b949e;cursor:pointer}.toggle+.toggle{margin-top:9px}.toggle input{width:auto;margin:0}
     button{width:100%;border:1px solid #30363d;border-radius:6px;background:#21262d;color:#e6edf3;padding:9px;cursor:pointer}
     button:hover{border-color:#58a6ff}.error{color:#f85149;min-height:20px;margin-top:10px}
-    .batch-row{display:grid;grid-template-columns:1fr auto;align-items:center;gap:8px;margin-top:8px;font:12px ui-monospace,monospace}.batch-row button{width:auto;padding:5px 8px}.bot-summary{margin:8px 0;color:#8b949e}
     .server-label{background:#161b22;color:#e6edf3;border:1px solid #58a6ff;border-radius:4px;box-shadow:none;padding:2px 5px}
     .entity-label{background:#161b22;color:#39c5cf;border:1px solid #39c5cf;border-radius:4px;box-shadow:none;padding:2px 5px}
     .other-client-pin-wrap{background:transparent;border:0}.other-client-pin{display:block;width:18px;height:18px;background:#39c5cf;border:2px solid #d7ffff;border-radius:50% 50% 50% 0;transform:rotate(-45deg);box-shadow:0 2px 5px #0009}
@@ -59,7 +58,6 @@ PAGE = r"""<!doctype html>
     <div class="card"><div class="label">Server pod</div><div id="instance" class="value">—</div></div>
     <div class="card"><div class="label">Ownership generation</div><div id="generation" class="value">—</div></div>
     <div class="card"><label class="toggle"><input id="showAllServers" type="checkbox">Show all active servers</label><label class="toggle"><input id="showProxies" type="checkbox">Show proxies</label><label class="toggle"><input id="showHotSwaps" type="checkbox">Show hot swaps</label></div>
-    <div class="card"><div class="label">Dummy clients</div><input id="botBatchSize" type="number" min="1" max="500" value="10"><button id="spawnBots">Spawn batch</button><div id="botSummary" class="bot-summary">0 active</div><div id="botBatches"></div><button id="despawnAllBots">Despawn all</button></div>
     <button id="reconnect">Reconnect gateway client</button><div id="error" class="error"></div>
   </aside></main>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
@@ -82,8 +80,6 @@ PAGE = r"""<!doctype html>
     function connection(state){connectionState=state;const dot=el('dot');dot.classList.toggle('ok',state==='ready');dot.classList.toggle('waiting',state==='gateway');el('connection').textContent=state==='ready'?'Connected':state==='gateway'?'Gateway connected; waiting for server':'Disconnected';}
     async function request(path,options){const response=await fetch(path,options);const body=await response.json();if(!response.ok)throw new Error(body.error||response.statusText);return body}
     function applyAuthoritativePosition(body){if(!Number.isFinite(body.client_latitude)||!Number.isFinite(body.client_longitude))return;selectedPosition=[body.client_latitude,body.client_longitude];el('coordinate').textContent=`${body.client_latitude.toFixed(5)}, ${body.client_longitude.toFixed(5)}`;if(selectedMarker)selectedMarker.setLatLng(selectedPosition);else selectedMarker=L.marker(selectedPosition).addTo(map)}
-    function renderBots(state){el('botSummary').textContent=`${state.states.ready} ready · ${state.states.gateway} gateway · ${state.states.disconnected} disconnected`;const list=el('botBatches');list.replaceChildren();for(const batch of state.batches){const row=document.createElement('div');row.className='batch-row';const label=document.createElement('span');label.textContent=`Batch ${batch.id}: ${batch.count}`;const remove=document.createElement('button');remove.textContent='Despawn';remove.addEventListener('click',async()=>{await request('/api/bots/despawn',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({batch_id:batch.id})});refreshBots()});row.append(label,remove);list.appendChild(row)}}
-    async function refreshBots(){try{renderBots(await request('/api/bots'))}catch(error){el('error').textContent=error.message}}
     function infraNode(item,kind){const node=document.createElement('div');node.className=`infra-node ${kind} ${item.status||''}`;node.dataset.name=item.name;node.textContent=item.name;node.title=[item.name,item.role,item.status?.replace('_',' '),item.ip,item.node].filter(Boolean).join('\n');return node}
     function drawProxyEdge(){const svg=el('infraEdges');svg.replaceChildren();if(!el('showProxies').checked||!selectedPosition||!currentRoute?.gateway)return;const node=[...el('proxyRow').children].find(item=>item.dataset.name===currentRoute.gateway);if(!node)return;const mapRect=el('map').getBoundingClientRect(),nodeRect=node.getBoundingClientRect(),start=map.latLngToContainerPoint(selectedPosition);svg.setAttribute('viewBox',`0 0 ${mapRect.width} ${mapRect.height}`);const line=document.createElementNS('http://www.w3.org/2000/svg','line');line.setAttribute('x1',start.x);line.setAttribute('y1',start.y);line.setAttribute('x2',nodeRect.left-mapRect.left+nodeRect.width/2);line.setAttribute('y2',nodeRect.top-mapRect.top+nodeRect.height/2);line.setAttribute('stroke','#3fb950');line.setAttribute('stroke-width','2');line.setAttribute('stroke-dasharray','7 6');svg.appendChild(line)}
     function renderInfra(){const proxies=el('proxyRow'),spares=el('spareRow');proxies.replaceChildren();spares.replaceChildren();if(infra&&el('showProxies').checked)for(const gateway of (infra.gateway_instances||infra.gateways)){const node=infraNode(gateway,'proxy');if(gateway.status==='ready'&&gateway.name===currentRoute?.gateway)node.classList.add('active');proxies.appendChild(node)}if(infra&&el('showHotSwaps').checked)for(const server of infra.server_instances.filter(item=>item.role==='spare'||item.status!=='ready'))spares.appendChild(infraNode(server,'spare'));requestAnimationFrame(drawProxyEdge)}
@@ -122,8 +118,6 @@ PAGE = r"""<!doctype html>
       catch(error){el('error').textContent=error.message;refresh()}finally{if(teleportTargetMarker){teleportTargetMarker.remove();teleportTargetMarker=null}teleporting=false;inputDirty=true}
     });
     el('increment').addEventListener('click',()=>{pendingCommands.push({kind:'increment',operation_id:crypto.randomUUID()});localStorage.setItem(pendingKey,JSON.stringify(pendingCommands));drainCommands()});
-    el('spawnBots').addEventListener('click',async()=>{try{await request('/api/bots/spawn',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({count:Number(el('botBatchSize').value)})});refreshBots()}catch(error){el('error').textContent=error.message}});
-    el('despawnAllBots').addEventListener('click',async()=>{try{await request('/api/bots/despawn-all',{method:'POST'});refreshBots()}catch(error){el('error').textContent=error.message}});
     function setKey(event,pressed){const key=event.key.toLowerCase();if(!'wasd'.includes(key))return;event.preventDefault();if(pressed)keys.add(key);else keys.delete(key);inputDirty=true}
     addEventListener('keydown',event=>setKey(event,true));addEventListener('keyup',event=>setKey(event,false));addEventListener('blur',()=>{keys.clear();inputDirty=true});
     async function sendInput(){
@@ -138,7 +132,7 @@ PAGE = r"""<!doctype html>
     async function reconnect(silent=false){if(reconnecting)return;reconnecting=true;try{const body=await request('/api/reconnect',{method:'POST'});showRoute(body||{});connection(body?'ready':'gateway');inputDirty=true;el('error').textContent=''}catch(error){if(!silent)el('error').textContent=error.message;refresh()}finally{reconnecting=false}}
     el('reconnect').addEventListener('click',()=>reconnect(false));
     async function refresh(){try{const state=await request('/api/state');connection(state.connection);if(state.latitude!==null&&!pendingCommands.length&&!teleporting)applyAuthoritativePosition({client_latitude:state.latitude,client_longitude:state.longitude});showRoute(state.route||{gateway:state.gateway})}catch(error){connection('disconnected')}}
-    loadLocations().then(()=>{refresh();refreshBots();drainCommands()}).catch(error=>{el('error').textContent=error.message;refresh()});setInterval(sendInput,25);setInterval(expireEntityMarkers,250);setInterval(refresh,1000);setInterval(refreshBots,1000);setInterval(()=>{if(connectionState!=='ready')reconnect(true)},1000);setInterval(drainCommands,1000);setInterval(loadInfra,2000);setInterval(()=>loadLocations().catch(()=>{}),5000);
+    loadLocations().then(()=>{refresh();drainCommands()}).catch(error=>{el('error').textContent=error.message;refresh()});setInterval(sendInput,25);setInterval(expireEntityMarkers,250);setInterval(refresh,1000);setInterval(()=>{if(connectionState!=='ready')reconnect(true)},1000);setInterval(drainCommands,1000);setInterval(loadInfra,2000);setInterval(()=>loadLocations().catch(()=>{}),5000);
   </script>
 </body>
 </html>"""
@@ -396,7 +390,7 @@ class BotManager:
         return {"total": len(bots), "states": states, "batches": batches}
 
 
-def make_handler(client: GatewayClient, bots: BotManager):
+def make_handler(client: GatewayClient):
     class Handler(BaseHTTPRequestHandler):
         def send_json(self, body, status=200):
             encoded = json.dumps(body).encode()
@@ -420,8 +414,6 @@ def make_handler(client: GatewayClient, bots: BotManager):
                     self.send_json(client.snapshot())
                 elif path == "/api/locations":
                     self.send_json(client.exchange("@locations"))
-                elif path == "/api/bots":
-                    self.send_json(bots.snapshot())
                 else:
                     self.send_json({"error": "not found"}, 404)
             except (GatewayResponseError, OSError, ValueError, ConnectionError) as error:
@@ -430,17 +422,7 @@ def make_handler(client: GatewayClient, bots: BotManager):
         def do_POST(self):
             path = urlparse(self.path).path
             try:
-                if path == "/api/bots/spawn":
-                    length = int(self.headers.get("Content-Length", "0"))
-                    payload = json.loads(self.rfile.read(length) or b"{}")
-                    self.send_json(bots.spawn(int(payload["count"])))
-                elif path == "/api/bots/despawn":
-                    length = int(self.headers.get("Content-Length", "0"))
-                    payload = json.loads(self.rfile.read(length) or b"{}")
-                    self.send_json(bots.despawn(int(payload["batch_id"])))
-                elif path == "/api/bots/despawn-all":
-                    self.send_json(bots.despawn_all())
-                elif path == "/api/location":
+                if path == "/api/location":
                     length = int(self.headers.get("Content-Length", "0"))
                     payload = json.loads(self.rfile.read(length) or b"{}")
                     latitude, longitude = float(payload["latitude"]), float(payload["longitude"])
@@ -477,8 +459,7 @@ def main() -> int:
     parser.add_argument("--no-browser", action="store_true")
     args = parser.parse_args()
     client = GatewayClient(args.gateway_host, args.gateway_port)
-    bots = BotManager(args.gateway_host, args.gateway_port)
-    server = ThreadingHTTPServer((args.listen_host, args.listen_port), make_handler(client, bots))
+    server = ThreadingHTTPServer((args.listen_host, args.listen_port), make_handler(client))
     actual_port = server.server_address[1]
     url = f"http://{args.listen_host}:{actual_port}"
     print(f"Map client: {url}")
@@ -491,7 +472,6 @@ def main() -> int:
         pass
     finally:
         server.server_close()
-        bots.despawn_all()
         client.close()
     return 0
 
