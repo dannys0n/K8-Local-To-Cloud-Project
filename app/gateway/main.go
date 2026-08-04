@@ -54,6 +54,7 @@ type publicLocation struct {
 type session struct {
 	ID          string    `json:"id"`
 	Client      string    `json:"client"`
+	ClientUID   string    `json:"client_uid,omitempty"`
 	LocationID  int64     `json:"location_id"`
 	Latitude    float64   `json:"latitude"`
 	Longitude   float64   `json:"longitude"`
@@ -242,6 +243,7 @@ func (g *gateway) handleClient(ctx context.Context, client net.Conn) {
 			clientLongitude = longitude
 			g.updateSession(id, client.RemoteAddr().String(), candidate.info, clientLatitude, clientLongitude)
 			response = g.withGatewayMetadata(response)
+			g.updateSessionFromResponse(id, response)
 			if _, err := clientWriter.Write(response); err != nil || clientWriter.Flush() != nil {
 				return
 			}
@@ -336,6 +338,7 @@ func (g *gateway) handleClient(ctx context.Context, client net.Conn) {
 			response = resumed
 		}
 		response = g.withGatewayMetadata(response)
+		g.updateSessionFromResponse(id, response)
 		if _, err := clientWriter.Write(response); err != nil || clientWriter.Flush() != nil {
 			return
 		}
@@ -611,6 +614,25 @@ func (g *gateway) updateSession(id, client string, route backend, latitude, long
 		connectedAt = current.ConnectedAt
 	}
 	g.sessions[id] = session{ID: id, Client: client, LocationID: route.LocationID, Latitude: latitude, Longitude: longitude, Server: route.Server, Instance: route.Instance, Address: route.Address, Generation: route.Generation, ConnectedAt: connectedAt, Protocol: "TCP"}
+	g.mu.Unlock()
+}
+
+func (g *gateway) updateSessionFromResponse(id string, body []byte) {
+	var state struct {
+		ClientUID       string  `json:"client_uid"`
+		ClientLatitude  float64 `json:"client_latitude"`
+		ClientLongitude float64 `json:"client_longitude"`
+	}
+	if json.Unmarshal(body, &state) != nil || state.ClientUID == "" {
+		return
+	}
+	g.mu.Lock()
+	if current, ok := g.sessions[id]; ok {
+		current.ClientUID = state.ClientUID
+		current.Latitude = state.ClientLatitude
+		current.Longitude = state.ClientLongitude
+		g.sessions[id] = current
+	}
 	g.mu.Unlock()
 }
 

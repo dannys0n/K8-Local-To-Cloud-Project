@@ -41,7 +41,7 @@ PAGE = r"""<!doctype html>
     .entity-label{background:#161b22;color:#39c5cf;border:1px solid #39c5cf;border-radius:4px;box-shadow:none;padding:2px 5px}
     .other-client-pin-wrap{background:transparent;border:0}.other-client-pin{display:block;width:18px;height:18px;background:#39c5cf;border:2px solid #d7ffff;border-radius:50% 50% 50% 0;transform:rotate(-45deg);box-shadow:0 2px 5px #0009}
     .infra-row{position:absolute;left:54px;right:12px;z-index:900;display:flex;justify-content:center;gap:7px;flex-wrap:wrap;pointer-events:none}.infra-row.top{top:12px}.infra-row.bottom{bottom:24px}
-    .infra-node{max-width:180px;padding:6px 9px;border:1px solid #8b949e;border-radius:6px;background:#161b22e8;color:#e6edf3;font:11px ui-monospace,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;pointer-events:auto;box-shadow:0 2px 8px #0008}.infra-node.active{border-color:#3fb950;color:#3fb950}.infra-node.spare{border-color:#d29922;color:#d29922}
+    .infra-node{max-width:180px;padding:6px 9px;border:1px solid #8b949e;border-radius:6px;background:#161b22e8;color:#e6edf3;font:11px ui-monospace,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;pointer-events:auto;box-shadow:0 2px 8px #0008}.infra-node.active{border-color:#3fb950;color:#3fb950}.infra-node.spare{border-color:#d29922;color:#d29922}.infra-node.not_ready{border-color:#f85149;color:#f85149}.infra-node.unknown{border-color:#8b949e;color:#8b949e}
     #infraEdges{position:absolute;inset:0;width:100%;height:100%;z-index:899;pointer-events:none}#infraStatus{position:absolute;left:12px;bottom:12px;z-index:901;color:#f85149;background:#161b22dd;padding:4px 7px;border-radius:4px;font-size:11px}
     @media(max-width:720px){main{grid-template-columns:1fr;grid-template-rows:minmax(360px,1fr) auto}aside{border-left:0;border-top:1px solid #30363d}}
   </style>
@@ -65,7 +65,7 @@ PAGE = r"""<!doctype html>
   <script>
     const map=L.map('map',{worldCopyJump:true,minZoom:2}).setView([25,0],2);
     L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:18,attribution:'&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'}).addTo(map);
-    let selectedMarker=null, connectionLine=null, serverLayers=[], otherMarkers=new Map(), locations=[], infra=null, currentRoute=null, selectedPosition=null, connectionState='disconnected',lastInputAt=0,draining=false,inputInFlight=false,inputDirty=true,teleporting=false,reconnecting=false;
+    let selectedMarker=null, connectionLine=null, serverLayers=new Map(), otherMarkers=new Map(), locations=[], infra=null, currentRoute=null, selectedPosition=null, connectionState='disconnected',lastInputAt=0,draining=false,inputInFlight=false,inputDirty=true,teleporting=false,reconnecting=false;
     const keys=new Set();
     const el=id=>document.getElementById(id);
     const clientUid=localStorage.getItem('tcp-lab-client-uid')||crypto.randomUUID();localStorage.setItem('tcp-lab-client-uid',clientUid);el('clientUid').textContent=clientUid;
@@ -82,22 +82,24 @@ PAGE = r"""<!doctype html>
     async function request(path,options){const response=await fetch(path,options);const body=await response.json();if(!response.ok)throw new Error(body.error||response.statusText);return body}
     function renderBots(state){el('botSummary').textContent=`${state.total} active in ${state.batches.length} batches`;const list=el('botBatches');list.replaceChildren();for(const batch of state.batches){const row=document.createElement('div');row.className='batch-row';const label=document.createElement('span');label.textContent=`Batch ${batch.id}: ${batch.count}`;const remove=document.createElement('button');remove.textContent='Despawn';remove.addEventListener('click',async()=>{await request('/api/bots/despawn',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({batch_id:batch.id})});refreshBots()});row.append(label,remove);list.appendChild(row)}}
     async function refreshBots(){try{renderBots(await request('/api/bots'))}catch(error){el('error').textContent=error.message}}
-    function infraNode(item,kind){const node=document.createElement('div');node.className=`infra-node ${kind}`;node.dataset.name=item.name;node.textContent=item.name;node.title=[item.name,item.ip,item.node].filter(Boolean).join('\n');return node}
+    function infraNode(item,kind){const node=document.createElement('div');node.className=`infra-node ${kind} ${item.status||''}`;node.dataset.name=item.name;node.textContent=item.name;node.title=[item.name,item.role,item.status?.replace('_',' '),item.ip,item.node].filter(Boolean).join('\n');return node}
     function drawProxyEdge(){const svg=el('infraEdges');svg.replaceChildren();if(!el('showProxies').checked||!selectedPosition||!currentRoute?.gateway)return;const node=[...el('proxyRow').children].find(item=>item.dataset.name===currentRoute.gateway);if(!node)return;const mapRect=el('map').getBoundingClientRect(),nodeRect=node.getBoundingClientRect(),start=map.latLngToContainerPoint(selectedPosition);svg.setAttribute('viewBox',`0 0 ${mapRect.width} ${mapRect.height}`);const line=document.createElementNS('http://www.w3.org/2000/svg','line');line.setAttribute('x1',start.x);line.setAttribute('y1',start.y);line.setAttribute('x2',nodeRect.left-mapRect.left+nodeRect.width/2);line.setAttribute('y2',nodeRect.top-mapRect.top+nodeRect.height/2);line.setAttribute('stroke','#3fb950');line.setAttribute('stroke-width','2');line.setAttribute('stroke-dasharray','7 6');svg.appendChild(line)}
-    function renderInfra(){const proxies=el('proxyRow'),spares=el('spareRow');proxies.replaceChildren();spares.replaceChildren();if(infra&&el('showProxies').checked)for(const gateway of infra.gateways){const node=infraNode(gateway,'proxy');if(gateway.name===currentRoute?.gateway)node.classList.add('active');proxies.appendChild(node)}if(infra&&el('showHotSwaps').checked)for(const server of infra.server_instances.filter(item=>item.role==='spare'))spares.appendChild(infraNode(server,'spare'));requestAnimationFrame(drawProxyEdge)}
+    function renderInfra(){const proxies=el('proxyRow'),spares=el('spareRow');proxies.replaceChildren();spares.replaceChildren();if(infra&&el('showProxies').checked)for(const gateway of (infra.gateway_instances||infra.gateways)){const node=infraNode(gateway,'proxy');if(gateway.status==='ready'&&gateway.name===currentRoute?.gateway)node.classList.add('active');proxies.appendChild(node)}if(infra&&el('showHotSwaps').checked)for(const server of infra.server_instances.filter(item=>item.role==='spare'||item.status!=='ready'))spares.appendChild(infraNode(server,'spare'));requestAnimationFrame(drawProxyEdge)}
     async function loadInfra(){if(!el('showProxies').checked&&!el('showHotSwaps').checked){el('infraStatus').hidden=true;renderInfra();return}try{const response=await fetch('http://127.0.0.1:8080/api/connections',{cache:'no-store'});const body=await response.json();if(!response.ok)throw new Error(body.error||response.statusText);infra=body;el('infraStatus').hidden=true;renderInfra()}catch(error){infra=null;el('infraStatus').textContent='Infrastructure dashboard unavailable';el('infraStatus').hidden=false;renderInfra()}}
     function renderServers(){
-      serverLayers.forEach(layer=>layer.remove());serverLayers=[];
       if(connectionLine){connectionLine.remove();connectionLine=null}
       const showAll=el('showAllServers').checked;
+      const visible=new Set();
       locations.filter(server=>showAll||(currentRoute&&server.server===currentRoute.server)).forEach(server=>{
+        visible.add(server.server);
         const active=currentRoute&&server.server===currentRoute.server;
-        const layer=L.circleMarker([server.latitude,server.longitude],{radius:active?11:7,color:active?'#3fb950':'#58a6ff',weight:active?4:2,fillColor:'#0d1117',fillOpacity:1}).addTo(map);
-        layer.bindTooltip(`Location ${server.location_id}`,{permanent:true,direction:'top',className:'server-label'});
-        layer.bindPopup(`<b>Location ${server.location_id}</b><br>${server.server}<br>${server.latitude.toFixed(4)}, ${server.longitude.toFixed(4)}`);
-        serverLayers.push(layer);
+        let layer=serverLayers.get(server.server);
+        if(!layer){layer=L.circleMarker([server.latitude,server.longitude]).addTo(map);layer.bindTooltip('',{permanent:true,direction:'top',className:'server-label'});layer.bindPopup('');serverLayers.set(server.server,layer)}
+        layer.setLatLng([server.latitude,server.longitude]);layer.setRadius(active?11:7);layer.setStyle({color:active?'#3fb950':'#58a6ff',weight:active?4:2,fillColor:'#0d1117',fillOpacity:1});
+        layer.getTooltip().setContent(`Location ${server.location_id}`);layer.getPopup().setContent(`<b>Location ${server.location_id}</b><br>${server.server}<br>${server.latitude.toFixed(4)}, ${server.longitude.toFixed(4)}`);
         if(active&&selectedPosition)connectionLine=L.polyline([selectedPosition,[server.latitude,server.longitude]],{color:'#3fb950',weight:2,dashArray:'7 7',opacity:.8}).addTo(map);
       });
+      for(const [server,layer] of serverLayers)if(!visible.has(server)){layer.remove();serverLayers.delete(server)}
     }
     function renderEntities(entities){const visible=new Set();for(const entity of entities){visible.add(entity.uid);let marker=otherMarkers.get(entity.uid);if(!marker){const icon=L.divIcon({className:'other-client-pin-wrap',html:'<span class="other-client-pin"></span>',iconSize:[18,25],iconAnchor:[9,25]});marker=L.marker([entity.latitude,entity.longitude],{icon}).addTo(map);marker.bindTooltip(entity.uid,{className:'entity-label'});otherMarkers.set(entity.uid,marker)}else marker.setLatLng([entity.latitude,entity.longitude])}for(const [uid,marker] of otherMarkers)if(!visible.has(uid)){marker.remove();otherMarkers.delete(uid)}}
     async function loadLocations(){

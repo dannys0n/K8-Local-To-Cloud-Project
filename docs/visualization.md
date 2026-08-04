@@ -18,6 +18,27 @@ holding that identity. It uses the current `kubectl` context and binds only
 to local loopback by default. It reads pod endpoints through the Kubernetes API;
 the per-replica statistics Service is not exposed publicly on EKS.
 
+Application pod inventory retains failed and terminating API objects for
+diagnostics but excludes them from ready gateway, server-pool, and hot-spare
+counts. Separate counters report `NotReady` and `Unknown` pods. Map infrastructure
+nodes use red for `NotReady`, gray for `Unknown`, yellow for ready spares, and the
+normal gateway/active styling for ready pods. Health combines the pod readiness
+condition with the assigned node's Kubernetes `Ready` condition.
+
+The map update-rate slider targets 1–20 Hz and persists its setting in the
+browser. Refreshes use a one-request-in-flight scheduler: if Kubernetes inventory
+collection takes longer than the selected period, the next refresh waits rather
+than overlapping or queuing stale snapshots.
+
+Use the `Interactive map` tab, or open `http://127.0.0.1:8080/map`, to see
+active geographic locations, client positions, gateways, and spare server pods.
+The layer switches only affect visualization. The map also provides explicit
+debug controls to spawn/despawn local dummy-client batches, create a randomly
+positioned location, create a location at a clicked coordinate, or disable a
+selected location. Location controls call the PostgreSQL lifecycle functions
+through the dashboard process and its current `kubectl` context; they are not
+served by the public gateway or exposed through the EKS load balancer.
+
 While the dashboard is running, the local map client can enable `Show proxies`
 and `Show hot swaps`. Proxies appear in a screen-space row below the map, hot
 spare server pods appear above it, and the selected gateway is connected to the
@@ -36,8 +57,9 @@ endpoints, restart counts, and readiness. It does not inspect database contents
 or credentials. Managed EKS databases run outside the cluster and therefore do
 not appear in this local infrastructure table.
 
-The client address represents the network connection seen by the gateway, not an
-application user identity. This lab's line protocol has no client identity.
+The client address represents the network connection seen by the gateway. Once
+the client has sent entity input, the gateway statistics also include its
+application client UID and latest authoritative coordinates for map display.
 
 ## Per-replica page
 

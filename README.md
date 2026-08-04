@@ -73,7 +73,10 @@ Deletion is intentionally a soft delete so historical entity and transaction
 records keep a valid location reference. Servers reload enabled locations once per
 second. Disabling a location atomically fences its assignment; its former server
 drops the in-memory claim on refresh and gateways remove the route through normal
-discovery. The database sequence allocates IDs atomically across concurrent callers.
+discovery. The PostgreSQL sequence allocates IDs atomically across concurrent
+callers. Location IDs are permanent identities, not list indexes: they are never
+renumbered, compacted, or reused. Deletion can therefore leave gaps, and sequence
+values can also be skipped by rolled-back creation attempts.
 
 `tools/client.py` asks the operating system for a free local port, prints the
 resulting URL, and opens it in the default browser. It keeps a stable client UID
