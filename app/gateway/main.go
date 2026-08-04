@@ -9,7 +9,6 @@ import (
 	"log/slog"
 	"math"
 	"net"
-	"net/http"
 	"os"
 	"os/signal"
 	"sort"
@@ -20,8 +19,6 @@ import (
 	"syscall"
 	"time"
 )
-
-const statsPage = `<!doctype html><html><head><meta charset="utf-8"><title>Gateway stats</title><style>body{background:#0d1117;color:#e6edf3;font:14px monospace;margin:2rem}pre{background:#161b22;border:1px solid #30363d;padding:1rem;overflow:auto}</style></head><body><h1>Gateway replica</h1><p>Read-only live state; refreshes every two seconds.</p><pre id="data">loading</pre><script>async function r(){let x=await fetch('/stats',{cache:'no-store'});document.querySelector('#data').textContent=JSON.stringify(await x.json(),null,2)}r();setInterval(r,2000)</script></body></html>`
 
 type backend struct {
 	Server     string  `json:"server"`
@@ -683,40 +680,6 @@ func (g *gateway) updateSessionFromResponse(id string, body []byte) {
 		g.sessions[id] = current
 	}
 	g.mu.Unlock()
-}
-
-func (g *gateway) serveHTTP(ctx context.Context, address string) {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", func(writer http.ResponseWriter, _ *http.Request) {
-		writer.WriteHeader(http.StatusOK)
-		_, _ = writer.Write([]byte("ok\n"))
-	})
-	mux.HandleFunc("/stats", func(writer http.ResponseWriter, _ *http.Request) {
-		writer.Header().Set("Content-Type", "application/json")
-		g.mu.RLock()
-		sessions := make([]session, 0, len(g.sessions))
-		for _, item := range g.sessions {
-			sessions = append(sessions, item)
-		}
-		g.mu.RUnlock()
-		sort.Slice(sessions, func(i, j int) bool { return sessions[i].ID < sessions[j].ID })
-		routes := g.routesSnapshot()
-		_ = json.NewEncoder(writer).Encode(map[string]any{"instance": g.instance, "accepted": g.accepted.Load(), "sessions": sessions, "routes": routes})
-	})
-	mux.HandleFunc("/", func(writer http.ResponseWriter, _ *http.Request) {
-		writer.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = writer.Write([]byte(statsPage))
-	})
-	server := &http.Server{Addr: address, Handler: mux, ReadHeaderTimeout: 2 * time.Second}
-	go func() {
-		<-ctx.Done()
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		_ = server.Shutdown(shutdownCtx)
-	}()
-	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		g.logger.Error("stats server", "error", err)
-	}
 }
 
 func responseHasError(body []byte) bool {

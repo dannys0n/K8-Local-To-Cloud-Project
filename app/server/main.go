@@ -32,15 +32,18 @@ const (
 	movementSpeed         = 40.0
 	inputTimeoutTicks     = 8
 	visibilityActiveTicks = 20
+	visibilityInterval    = 100 * time.Millisecond
+	visibilityLease       = 5 * time.Second
 	entityCleanupTicks    = 600
 	mercatorLatitudeLimit = 85.05112878
 )
 
 type locationDefinition struct {
-	serverID  string
+	serverID   string
 	locationID int64
-	latitude  float64
-	longitude float64
+	latitude   float64
+	longitude  float64
+	generation int64
 }
 
 var bootstrapLocations = []locationDefinition{
@@ -61,24 +64,25 @@ type assignment struct {
 }
 
 type server struct {
-	instanceID    string
-	podName       string
-	db            *sql.DB
-	redis         *redis.Client
-	leaseDuration time.Duration
-	renewInterval time.Duration
-	tickInterval  time.Duration
-	tick          atomic.Uint64
-	durable       chan durableCommand
-	inputs        chan inputCommand
-	entityMu      sync.Mutex
-	entities      map[string]*entityState
-	visibilityMu  sync.RWMutex
-	visible       []visibleEntity
-	topologyMu    sync.RWMutex
-	topology      []locationDefinition
-	mu            sync.RWMutex
-	assignment    *assignment
+	instanceID       string
+	podName          string
+	db               *sql.DB
+	redis            *redis.Client
+	leaseDuration    time.Duration
+	renewInterval    time.Duration
+	tickInterval     time.Duration
+	tick             atomic.Uint64
+	durable          chan durableCommand
+	inputs           chan inputCommand
+	entityMu         sync.Mutex
+	entities         map[string]*entityState
+	visibilityMu     sync.RWMutex
+	visible          []visibleEntity
+	visibilityReadAt time.Time
+	topologyMu       sync.RWMutex
+	topology         []locationDefinition
+	mu               sync.RWMutex
+	assignment       *assignment
 }
 
 type response struct {
@@ -290,94 +294,6 @@ func (s *server) runDurableCommands(ctx context.Context) {
 			s.commitDurableCommands(ctx, s.tick.Load())
 		}
 	}
-}
-
-func (s *server) runVisibility(ctx context.Context) {
-	ticker := time.NewTicker(s.tickInterval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			current := s.currentAssignment()
-			if current == nil {
-				continue
-			}
-			visibilityCtx, cancel := context.WithTimeout(ctx, s.tickInterval)
-			s.publishVisibility(visibilityCtx, current)
-			s.pullVisibility(visibilityCtx)
-			cancel()
-		}
-	}
-}
-
-func (s *server) publishVisibility(ctx context.Context, current *assignment) {
-	s.entityMu.Lock()
-	entities := make([]visibleEntity, 0, len(s.entities))
-	currentTick := s.tick.Load()
-	for uid, entity := range s.entities {
-		if currentTick-entity.lastInputTick < visibilityActiveTicks {
-			entities = append(entities, visibleEntity{
-				UID: uid, Latitude: entity.latitude, Longitude: entity.longitude, Sequence: entity.sequence,
-			})
-		}
-	}
-	s.entityMu.Unlock()
-	body, err := json.Marshal(visibilitySnapshot{
-		Generation: current.Generation,
-		UpdatedAt:  time.Now().UnixMilli(),
-		Entities:   entities,
-	})
-	if err == nil {
-		_ = s.redis.HSet(ctx, "tcp-lab:visibility", current.ServerID, body).Err()
-	}
-}
-
-func (s *server) pullVisibility(ctx context.Context) {
-	values, err := s.redis.HGetAll(ctx, "tcp-lab:visibility").Result()
-	if err != nil {
-		s.visibilityMu.Lock()
-		s.visible = nil
-		s.visibilityMu.Unlock()
-		return
-	}
-	cutoff := time.Now().Add(-time.Second).UnixMilli()
-	latest := make(map[string]visibleEntity)
-	updated := make(map[string]int64)
-	for _, body := range values {
-		var snapshot visibilitySnapshot
-		if json.Unmarshal([]byte(body), &snapshot) != nil || snapshot.UpdatedAt < cutoff {
-			continue
-		}
-		for _, entity := range snapshot.Entities {
-			current, exists := latest[entity.UID]
-			if !exists || entity.Sequence > current.Sequence ||
-				(entity.Sequence == current.Sequence && snapshot.UpdatedAt > updated[entity.UID]) {
-				latest[entity.UID] = entity
-				updated[entity.UID] = snapshot.UpdatedAt
-			}
-		}
-	}
-	visible := make([]visibleEntity, 0, len(latest))
-	for _, entity := range latest {
-		visible = append(visible, entity)
-	}
-	s.visibilityMu.Lock()
-	s.visible = visible
-	s.visibilityMu.Unlock()
-}
-
-func (s *server) visibleEntities(excludeUID string) []visibleEntity {
-	s.visibilityMu.RLock()
-	entities := make([]visibleEntity, 0, len(s.visible))
-	for _, entity := range s.visible {
-		if entity.UID != excludeUID {
-			entities = append(entities, entity)
-		}
-	}
-	s.visibilityMu.RUnlock()
-	return entities
 }
 
 func (s *server) commitDurableCommands(ctx context.Context, tick uint64) {
@@ -604,8 +520,11 @@ func (s *server) refreshTopology(ctx context.Context) error {
 	queryCtx, cancel := context.WithTimeout(ctx, time.Second)
 	defer cancel()
 	rows, err := s.db.QueryContext(queryCtx, `
-		SELECT server_id, location_id, latitude, longitude
-		FROM tcp_server_state WHERE enabled ORDER BY location_id`)
+		SELECT state.server_id, state.location_id, state.latitude, state.longitude,
+			assignment.generation
+		FROM tcp_server_state AS state
+		JOIN tcp_server_assignment AS assignment USING (server_id)
+		WHERE state.enabled ORDER BY state.location_id`)
 	if err != nil {
 		return err
 	}
@@ -613,7 +532,7 @@ func (s *server) refreshTopology(ctx context.Context) error {
 	loaded := make([]locationDefinition, 0)
 	for rows.Next() {
 		var item locationDefinition
-		if err := rows.Scan(&item.serverID, &item.locationID, &item.latitude, &item.longitude); err != nil {
+		if err := rows.Scan(&item.serverID, &item.locationID, &item.latitude, &item.longitude, &item.generation); err != nil {
 			return err
 		}
 		loaded = append(loaded, item)
@@ -630,6 +549,7 @@ func (s *server) refreshTopology(ctx context.Context) error {
 			}
 		}
 		if !enabled {
+			s.deleteVisibility(ctx, current)
 			s.clearAssignment(current.Generation)
 		}
 	}
@@ -918,6 +838,7 @@ func (s *server) manageAssignment(ctx context.Context, logger *slog.Logger) {
 			}
 		} else if renewed, err := s.renew(operationCtx, current); err != nil {
 			if time.Now().After(current.LeaseUntil) {
+				s.deleteVisibility(operationCtx, current)
 				s.clearAssignment(current.Generation)
 				logger.Warn("location lease lost", "instance", s.podName, "server", current.ServerID, "generation", current.Generation)
 			}
@@ -986,6 +907,7 @@ func (s *server) release(ctx context.Context) {
 		WHERE server_id = $1 AND owner_instance_id = $2 AND generation = $3`,
 		current.ServerID, s.instanceID, current.Generation,
 	)
+	s.deleteVisibility(ctx, current)
 }
 
 func (s *server) heartbeat(ctx context.Context, logger *slog.Logger) {
@@ -1383,9 +1305,18 @@ func (s *server) currentAssignment() *assignment {
 
 func (s *server) setAssignment(value *assignment) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	copy := *value
 	s.assignment = &copy
+	s.mu.Unlock()
+
+	s.topologyMu.Lock()
+	for index := range s.topology {
+		if s.topology[index].serverID == value.ServerID {
+			s.topology[index].generation = value.Generation
+			break
+		}
+	}
+	s.topologyMu.Unlock()
 }
 
 func (s *server) clearAssignment(generation int64) {

@@ -19,11 +19,18 @@ adding a coordinator or operator.
   authoritative simulation clock and includes its current tick in responses.
 - **PostgreSQL:** authoritative location identity, counters, leases, and ownership
   generations; one PVC on the dedicated kind database worker.
-- **Redis:** ephemeral server presence and 20 Hz entity visibility on the same
-  kind database worker. It is not part of authoritative client state.
+- **Redis:** ephemeral server presence and 10 Hz entity visibility on a
+  separate best-effort loop. It is not part of authoritative client state.
 - **Client entry:** `127.0.0.1:9000`; the browser map keeps one TCP connection
   through its local bridge. The EKS overlay uses an AWS NLB.
 - **Manifest management:** a shared Kustomize base plus kind and EKS overlays.
+
+The Go workloads remain single packages with narrow source boundaries. Server
+startup, protocol, ownership, simulation, and durable transactions stay in
+`app/server/main.go`; disposable Redis entity visibility is isolated in
+`app/server/visibility.go`. Gateway routing and client sessions stay in
+`app/gateway/main.go`; its private health and statistics HTTP surface is isolated
+in `app/gateway/stats.go`. This separation does not add runtime components.
 
 ## Prerequisites
 
@@ -93,8 +100,9 @@ The client sidebar can spawn dummy clients in batches of up to 500. Every bot
 uses its own gateway TCP connection, chooses a random normalized movement
 direction every three seconds, sends movement heartbeats at 20 Hz, and performs
 one idempotent durable counter increment per second. Batches can be despawned
-individually or together. Their cyan pins disappear from visibility after one
-second, and abandoned in-memory server entities are removed after 30 seconds.
+individually or together. Their cyan pins become stale after one second without
+an observation and disappear after five seconds; abandoned in-memory server
+entities are removed after 30 seconds.
 When routing is unavailable, bots pause application commands and retry their
 existing reconnect/resume path with 0.75–1.25 seconds of per-bot jitter. The UI
 reports ready, gateway-only, and disconnected bots separately instead of treating
@@ -118,12 +126,14 @@ refresh arrives for eight ticks (400 ms). Movement is not written on each tick.
 PostgreSQL records the last server-claim coordinate as a recovery point and
 stores the durable counter independently.
 
-Active servers publish one best-effort visibility snapshot per tick and pull
-the combined snapshots into a local cache. Input responses include that cache,
+Active servers publish one best-effort visibility snapshot at 10 Hz and pull
+the combined snapshots into a local cache independently of the 20 Hz simulation
+tick. Input responses include that cache,
 so the map renders other clients as cyan pins. Newer input sequences fence stale
 copies left behind by direct teleports. Idle clients send zero-axis heartbeats
-at 20 Hz, and entities disappear after one second without input. Redis failure
-only hides those markers; it cannot affect movement, ownership, or durable state.
+at 20 Hz. Snapshot keys include the logical-server ownership generation and
+expire after five seconds. Redis failure only makes markers stale and eventually
+hides them; it cannot affect movement, ownership, or durable state.
 
 After every movement tick, the server checks the resulting coordinate against
 the geographic locations. When ownership changes, it returns a transient
