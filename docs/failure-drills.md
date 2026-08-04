@@ -28,7 +28,7 @@ Every gateway discovers server endpoints through the headless Service DNS.
 ## Server persistence
 
 1. Start `tools/client.ps1`, then click near New York on the browser map.
-2. Press the durable counter button several times and note `tcp-server-1`, `new-york`, and the client counter.
+2. Press the durable counter button several times and note the numeric location ID, logical server, and client counter.
 3. Find the physical owner and generation in PostgreSQL:
 
    ```bash

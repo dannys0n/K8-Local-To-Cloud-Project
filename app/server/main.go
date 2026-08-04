@@ -3,7 +3,9 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -36,22 +38,22 @@ const (
 
 type locationDefinition struct {
 	serverID  string
-	location  string
+	locationID int64
 	latitude  float64
 	longitude float64
 }
 
-var locations = []locationDefinition{
-	{"tcp-server-0", "los-angeles", 34.0522, -118.2437},
-	{"tcp-server-1", "new-york", 40.7128, -74.0060},
-	{"tcp-server-2", "london", 51.5074, -0.1278},
-	{"tcp-server-3", "singapore", 1.3521, 103.8198},
-	{"tcp-server-4", "frankfurt", 50.1109, 8.6821},
+var bootstrapLocations = []locationDefinition{
+	{serverID: "tcp-server-0", locationID: 1},
+	{serverID: "tcp-server-1", locationID: 2},
+	{serverID: "tcp-server-2", locationID: 3},
+	{serverID: "tcp-server-3", locationID: 4},
+	{serverID: "tcp-server-4", locationID: 5},
 }
 
 type assignment struct {
 	ServerID   string
-	Location   string
+	LocationID int64
 	Latitude   float64
 	Longitude  float64
 	Generation int64
@@ -73,13 +75,15 @@ type server struct {
 	entities      map[string]*entityState
 	visibilityMu  sync.RWMutex
 	visible       []visibleEntity
+	topologyMu    sync.RWMutex
+	topology      []locationDefinition
 	mu            sync.RWMutex
 	assignment    *assignment
 }
 
 type response struct {
 	Server          string          `json:"server"`
-	Location        string          `json:"location"`
+	LocationID      int64           `json:"location_id"`
 	Latitude        float64         `json:"latitude"`
 	Longitude       float64         `json:"longitude"`
 	Instance        string          `json:"instance"`
@@ -93,7 +97,7 @@ type response struct {
 	ClientLatitude  float64         `json:"client_latitude"`
 	ClientLongitude float64         `json:"client_longitude"`
 	InputSequence   uint64          `json:"input_sequence,omitempty"`
-	Reroute         string          `json:"reroute,omitempty"`
+	Reroute         int64           `json:"reroute,omitempty"`
 	Entities        []visibleEntity `json:"entities,omitempty"`
 }
 
@@ -155,7 +159,7 @@ type inputResult struct {
 	tick      uint64
 	claim     bool
 	err       error
-	reroute   string
+	reroute   int64
 }
 
 type entityState struct {
@@ -166,7 +170,7 @@ type entityState struct {
 	axisX         float64
 	axisY         float64
 	lastInputTick uint64
-	reroute       string
+	reroute       int64
 }
 
 func main() {
@@ -210,7 +214,12 @@ func main() {
 		durable: make(chan durableCommand, 4096),
 		inputs:  make(chan inputCommand, 8192), entities: make(map[string]*entityState),
 	}
+	if err := s.refreshTopology(ctx); err != nil {
+		logger.Error("load location topology", "error", err)
+		os.Exit(1)
+	}
 	go s.manageAssignment(ctx, logger)
+	go s.runTopologyRefresh(ctx, logger)
 	go s.heartbeat(ctx, logger)
 	go s.runTicks(ctx)
 	go s.runDurableCommands(ctx)
@@ -540,9 +549,9 @@ drained:
 	current := s.currentAssignment()
 	if current != nil {
 		for _, entity := range s.entities {
-			if entity.reroute == "" {
-				destination := nearestLocation(entity.latitude, entity.longitude)
-				if destination != current.Location {
+			if entity.reroute == 0 {
+				destination := s.nearestLocation(entity.latitude, entity.longitude)
+				if destination != current.LocationID {
 					entity.reroute = destination
 					entity.axisX = 0
 					entity.axisY = 0
@@ -550,11 +559,11 @@ drained:
 			}
 		}
 	}
-	handoffs := make(map[string]string)
+	handoffs := make(map[string]int64)
 	for _, command := range commands {
 		if entity := s.entities[command.intent.ClientUID]; entity != nil {
 			reroute := entity.reroute
-			if reroute != "" {
+			if reroute != 0 {
 				handoffs[command.intent.ClientUID] = reroute
 			}
 			command.result <- inputResult{
@@ -569,11 +578,13 @@ drained:
 	s.entityMu.Unlock()
 }
 
-func nearestLocation(latitude, longitude float64) string {
-	best := ""
+func (s *server) nearestLocation(latitude, longitude float64) int64 {
+	var best int64
 	bestDistance := math.Inf(1)
 	latitudeRadians := latitude * math.Pi / 180
-	for _, location := range locations {
+	s.topologyMu.RLock()
+	defer s.topologyMu.RUnlock()
+	for _, location := range s.topology {
 		locationLatitude := location.latitude * math.Pi / 180
 		deltaLatitude := locationLatitude - latitudeRadians
 		deltaLongitude := (location.longitude - longitude) * math.Pi / 180
@@ -581,12 +592,66 @@ func nearestLocation(latitude, longitude float64) string {
 			math.Cos(latitudeRadians)*math.Cos(locationLatitude)*math.Sin(deltaLongitude/2)*math.Sin(deltaLongitude/2)
 		a = math.Max(0, math.Min(1, a))
 		distance := 2 * math.Atan2(math.Sqrt(a), math.Sqrt(1-a))
-		if distance < bestDistance || (distance == bestDistance && location.location < best) {
+		if distance < bestDistance || (distance == bestDistance && (best == 0 || location.locationID < best)) {
 			bestDistance = distance
-			best = location.location
+			best = location.locationID
 		}
 	}
 	return best
+}
+
+func (s *server) refreshTopology(ctx context.Context) error {
+	queryCtx, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	rows, err := s.db.QueryContext(queryCtx, `
+		SELECT server_id, location_id, latitude, longitude
+		FROM tcp_server_state WHERE enabled ORDER BY location_id`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	loaded := make([]locationDefinition, 0)
+	for rows.Next() {
+		var item locationDefinition
+		if err := rows.Scan(&item.serverID, &item.locationID, &item.latitude, &item.longitude); err != nil {
+			return err
+		}
+		loaded = append(loaded, item)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if current := s.currentAssignment(); current != nil {
+		enabled := false
+		for _, item := range loaded {
+			if item.locationID == current.LocationID {
+				enabled = true
+				break
+			}
+		}
+		if !enabled {
+			s.clearAssignment(current.Generation)
+		}
+	}
+	s.topologyMu.Lock()
+	s.topology = loaded
+	s.topologyMu.Unlock()
+	return nil
+}
+
+func (s *server) runTopologyRefresh(ctx context.Context, logger *slog.Logger) {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := s.refreshTopology(ctx); err != nil && ctx.Err() == nil {
+				logger.Warn("refresh location topology", "error", err)
+			}
+		}
+	}
 }
 
 func (s *server) ensureEntity(ctx context.Context, clientUID string, refreshCounter bool) (bool, error) {
@@ -675,9 +740,10 @@ func createSchema(ctx context.Context, db *sql.DB) error {
 	const schema = `
 		CREATE TABLE IF NOT EXISTS tcp_server_state (
 			server_id TEXT PRIMARY KEY,
-			location TEXT NOT NULL UNIQUE,
+			location_id BIGINT NOT NULL UNIQUE,
 			latitude DOUBLE PRECISION NOT NULL DEFAULT 0,
 			longitude DOUBLE PRECISION NOT NULL DEFAULT 0,
+			enabled BOOLEAN NOT NULL DEFAULT TRUE,
 			counter BIGINT NOT NULL DEFAULT 0 CHECK (counter >= 0),
 			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		);
@@ -697,7 +763,7 @@ func createSchema(ctx context.Context, db *sql.DB) error {
 		CREATE TABLE IF NOT EXISTS entity_state (
 			entity_uid TEXT PRIMARY KEY,
 			server_id TEXT NOT NULL REFERENCES tcp_server_state(server_id),
-			location TEXT NOT NULL,
+			location_id BIGINT NOT NULL,
 			latitude DOUBLE PRECISION NOT NULL,
 			longitude DOUBLE PRECISION NOT NULL,
 			server_generation BIGINT NOT NULL,
@@ -714,33 +780,125 @@ func createSchema(ctx context.Context, db *sql.DB) error {
 			committed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 			PRIMARY KEY (client_uid, operation_id)
 		);
-		CREATE UNIQUE INDEX IF NOT EXISTS tcp_server_state_location
-			ON tcp_server_state (location);
+		ALTER TABLE tcp_server_state ADD COLUMN IF NOT EXISTS location_id BIGINT;
+		WITH numbered AS (
+			SELECT server_id, ROW_NUMBER() OVER (ORDER BY server_id) AS location_id
+			FROM tcp_server_state WHERE location_id IS NULL
+		)
+		UPDATE tcp_server_state AS state SET location_id = numbered.location_id
+		FROM numbered WHERE state.server_id = numbered.server_id;
+		ALTER TABLE tcp_server_state ALTER COLUMN location_id SET NOT NULL;
+		CREATE UNIQUE INDEX IF NOT EXISTS tcp_server_state_location_id
+			ON tcp_server_state (location_id);
+		ALTER TABLE entity_state ADD COLUMN IF NOT EXISTS location_id BIGINT;
+		UPDATE entity_state AS entity SET location_id = state.location_id
+		FROM tcp_server_state AS state
+		WHERE entity.server_id = state.server_id AND entity.location_id IS NULL;
+		ALTER TABLE entity_state ALTER COLUMN location_id SET NOT NULL;
+		DROP INDEX IF EXISTS tcp_server_state_location;
+		ALTER TABLE entity_state DROP COLUMN IF EXISTS location;
+		ALTER TABLE tcp_server_state DROP COLUMN IF EXISTS location;
 		ALTER TABLE tcp_server_state ADD COLUMN IF NOT EXISTS latitude DOUBLE PRECISION NOT NULL DEFAULT 0;
 		ALTER TABLE tcp_server_state ADD COLUMN IF NOT EXISTS longitude DOUBLE PRECISION NOT NULL DEFAULT 0;
+		ALTER TABLE tcp_server_state ADD COLUMN IF NOT EXISTS enabled BOOLEAN NOT NULL DEFAULT TRUE;
+		CREATE SEQUENCE IF NOT EXISTS tcp_location_id_seq;
 		ALTER TABLE client_operation ADD COLUMN IF NOT EXISTS operation_type TEXT NOT NULL DEFAULT 'increment';
 		ALTER TABLE client_operation ALTER COLUMN operation_type SET DEFAULT 'increment'`
 	if _, err := db.ExecContext(ctx, schema); err != nil {
 		return fmt.Errorf("create schema: %w", err)
 	}
-	for _, item := range locations {
-		if _, err := db.ExecContext(ctx, `
-			INSERT INTO tcp_server_state (server_id, location, latitude, longitude)
-			VALUES ($1, $2, $3, $4)
-			ON CONFLICT (server_id) DO UPDATE SET
-				location = EXCLUDED.location,
-				latitude = EXCLUDED.latitude,
-				longitude = EXCLUDED.longitude`,
-			item.serverID, item.location, item.latitude, item.longitude); err != nil {
-			return fmt.Errorf("seed location %s: %w", item.location, err)
+	coordinates := make([]float64, 0, len(bootstrapLocations)*2)
+	for _, item := range bootstrapLocations {
+		latitude, longitude, err := randomCoordinate()
+		if err != nil {
+			return fmt.Errorf("generate location %d coordinates: %w", item.locationID, err)
 		}
-		if _, err := db.ExecContext(ctx, `
-			INSERT INTO tcp_server_assignment (server_id) VALUES ($1)
-			ON CONFLICT (server_id) DO NOTHING`, item.serverID); err != nil {
-			return fmt.Errorf("seed assignment %s: %w", item.serverID, err)
-		}
+		coordinates = append(coordinates, latitude, longitude)
+	}
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO tcp_server_state (server_id, location_id, latitude, longitude)
+		SELECT seed.* FROM (VALUES
+			('tcp-server-0', 1, $1::DOUBLE PRECISION, $2::DOUBLE PRECISION),
+			('tcp-server-1', 2, $3::DOUBLE PRECISION, $4::DOUBLE PRECISION),
+			('tcp-server-2', 3, $5::DOUBLE PRECISION, $6::DOUBLE PRECISION),
+			('tcp-server-3', 4, $7::DOUBLE PRECISION, $8::DOUBLE PRECISION),
+			('tcp-server-4', 5, $9::DOUBLE PRECISION, $10::DOUBLE PRECISION)
+		) AS seed(server_id, location_id, latitude, longitude)
+		WHERE NOT EXISTS (SELECT 1 FROM tcp_server_state)
+		ON CONFLICT DO NOTHING`,
+		coordinates[0], coordinates[1], coordinates[2], coordinates[3], coordinates[4],
+		coordinates[5], coordinates[6], coordinates[7], coordinates[8], coordinates[9]); err != nil {
+		return fmt.Errorf("seed locations: %w", err)
+	}
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO tcp_server_assignment (server_id)
+		SELECT server_id FROM tcp_server_state
+		ON CONFLICT (server_id) DO NOTHING`); err != nil {
+		return fmt.Errorf("seed assignments: %w", err)
+	}
+	if _, err := db.ExecContext(ctx, `
+		SELECT setval('tcp_location_id_seq',
+			GREATEST((SELECT last_value FROM tcp_location_id_seq),
+				(SELECT COALESCE(MAX(location_id), 1) FROM tcp_server_state)), true);
+		CREATE OR REPLACE FUNCTION tcp_create_location(
+			p_latitude DOUBLE PRECISION DEFAULT NULL,
+			p_longitude DOUBLE PRECISION DEFAULT NULL
+		) RETURNS TABLE(location_id BIGINT, latitude DOUBLE PRECISION, longitude DOUBLE PRECISION)
+		LANGUAGE plpgsql AS $$
+		DECLARE
+			new_id BIGINT;
+			new_latitude DOUBLE PRECISION;
+			new_longitude DOUBLE PRECISION;
+		BEGIN
+			IF (p_latitude IS NULL) <> (p_longitude IS NULL) THEN
+				RAISE EXCEPTION 'latitude and longitude must both be supplied or both omitted';
+			END IF;
+			new_latitude := COALESCE(p_latitude, (random() * 2 - 1) * 85.05112878);
+			new_longitude := COALESCE(p_longitude, random() * 360 - 180);
+			IF new_latitude < -85.05112878 OR new_latitude > 85.05112878 OR
+				new_longitude < -180 OR new_longitude > 180 THEN
+				RAISE EXCEPTION 'coordinates are outside the Leaflet world bounds';
+			END IF;
+			new_id := nextval('tcp_location_id_seq');
+			INSERT INTO tcp_server_state (server_id, location_id, latitude, longitude)
+			VALUES ('tcp-server-location-' || new_id, new_id, new_latitude, new_longitude);
+			INSERT INTO tcp_server_assignment (server_id)
+			VALUES ('tcp-server-location-' || new_id);
+			RETURN QUERY SELECT new_id, new_latitude, new_longitude;
+		END $$;
+		CREATE OR REPLACE FUNCTION tcp_delete_location(p_location_id BIGINT)
+		RETURNS BOOLEAN LANGUAGE sql AS $$
+			WITH deleted AS (
+				UPDATE tcp_server_state
+				SET enabled = FALSE, updated_at = NOW()
+				WHERE location_id = p_location_id AND enabled
+				RETURNING server_id
+			), unassigned AS (
+				UPDATE tcp_server_assignment AS assignment
+				SET owner_instance_id = NULL, lease_until = NULL,
+					generation = generation + 1
+				FROM deleted
+				WHERE assignment.server_id = deleted.server_id
+				RETURNING 1
+			)
+			SELECT EXISTS(SELECT 1 FROM deleted)
+		$$;`); err != nil {
+		return fmt.Errorf("create location operations: %w", err)
 	}
 	return nil
+}
+
+func randomCoordinate() (float64, float64, error) {
+	var bytes [16]byte
+	if _, err := rand.Read(bytes[:]); err != nil {
+		return 0, 0, err
+	}
+	unit := func(value uint64) float64 {
+		return float64(value>>11) / float64(uint64(1)<<53)
+	}
+	latitude := (unit(binary.LittleEndian.Uint64(bytes[:8]))*2 - 1) * mercatorLatitudeLimit
+	longitude := unit(binary.LittleEndian.Uint64(bytes[8:]))*360 - 180
+	return latitude, longitude, nil
 }
 
 func (s *server) manageAssignment(ctx context.Context, logger *slog.Logger) {
@@ -756,7 +914,7 @@ func (s *server) manageAssignment(ctx context.Context, logger *slog.Logger) {
 				}
 			} else if claimed != nil {
 				s.setAssignment(claimed)
-				logger.Info("location claimed", "instance", s.podName, "server", claimed.ServerID, "location", claimed.Location, "generation", claimed.Generation)
+				logger.Info("location claimed", "instance", s.podName, "server", claimed.ServerID, "location_id", claimed.LocationID, "generation", claimed.Generation)
 			}
 		} else if renewed, err := s.renew(operationCtx, current); err != nil {
 			if time.Now().After(current.LeaseUntil) {
@@ -779,9 +937,10 @@ func (s *server) manageAssignment(ctx context.Context, logger *slog.Logger) {
 func (s *server) claim(ctx context.Context) (*assignment, error) {
 	const query = `
 		WITH candidate AS (
-			SELECT server_id FROM tcp_server_assignment
-			WHERE owner_instance_id IS NULL OR lease_until < NOW()
-			ORDER BY server_id
+			SELECT assignment.server_id FROM tcp_server_assignment AS assignment
+			JOIN tcp_server_state AS state USING (server_id)
+			WHERE state.enabled AND (assignment.owner_instance_id IS NULL OR assignment.lease_until < NOW())
+			ORDER BY assignment.server_id
 			FOR UPDATE SKIP LOCKED LIMIT 1
 		), claimed AS (
 			UPDATE tcp_server_assignment AS a
@@ -790,12 +949,12 @@ func (s *server) claim(ctx context.Context) (*assignment, error) {
 			FROM candidate c WHERE a.server_id = c.server_id
 			RETURNING a.server_id, a.generation, a.lease_until
 		)
-		SELECT c.server_id, s.location, s.latitude, s.longitude,
+		SELECT c.server_id, s.location_id, s.latitude, s.longitude,
 			c.generation, c.lease_until
 		FROM claimed c JOIN tcp_server_state s USING (server_id)`
 	claimed := &assignment{}
 	err := s.db.QueryRowContext(ctx, query, s.instanceID, s.leaseDuration.Seconds()).Scan(
-		&claimed.ServerID, &claimed.Location, &claimed.Latitude, &claimed.Longitude,
+		&claimed.ServerID, &claimed.LocationID, &claimed.Latitude, &claimed.Longitude,
 		&claimed.Generation, &claimed.LeaseUntil,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -806,10 +965,12 @@ func (s *server) claim(ctx context.Context) (*assignment, error) {
 
 func (s *server) renew(ctx context.Context, current *assignment) (*assignment, error) {
 	const query = `
-		UPDATE tcp_server_assignment
+		UPDATE tcp_server_assignment AS assignment
 		SET lease_until = NOW() + ($4 * INTERVAL '1 second')
-		WHERE server_id = $1 AND owner_instance_id = $2 AND generation = $3
-		RETURNING lease_until`
+		FROM tcp_server_state AS state
+		WHERE assignment.server_id = $1 AND assignment.owner_instance_id = $2
+			AND assignment.generation = $3 AND state.server_id = assignment.server_id AND state.enabled
+		RETURNING assignment.lease_until`
 	renewed := *current
 	err := s.db.QueryRowContext(ctx, query, current.ServerID, s.instanceID, current.Generation, s.leaseDuration.Seconds()).Scan(&renewed.LeaseUntil)
 	return &renewed, err
@@ -835,7 +996,7 @@ func (s *server) heartbeat(ctx context.Context, logger *slog.Logger) {
 		if current := s.currentAssignment(); current != nil {
 			value["status"] = "active"
 			value["server"] = current.ServerID
-			value["location"] = current.Location
+			value["location_id"] = current.LocationID
 			value["latitude"] = current.Latitude
 			value["longitude"] = current.Longitude
 			value["generation"] = current.Generation
@@ -884,7 +1045,7 @@ func (s *server) handleConnection(ctx context.Context, conn net.Conn, logger *sl
 			if current != nil {
 				body["status"] = "active"
 				body["server"] = current.ServerID
-				body["location"] = current.Location
+				body["location_id"] = current.LocationID
 				body["latitude"] = current.Latitude
 				body["longitude"] = current.Longitude
 				body["generation"] = current.Generation
@@ -897,7 +1058,7 @@ func (s *server) handleConnection(ctx context.Context, conn net.Conn, logger *sl
 		if requested, found := strings.CutPrefix(message, "@probe "); found {
 			current := s.currentAssignment()
 			status := "spare"
-			if current != nil && (requested == "any" || requested == current.Location) {
+			if current != nil && (requested == "any" || requested == strconv.FormatInt(current.LocationID, 10)) {
 				status = "ready"
 			}
 			_, _ = fmt.Fprintf(writer, `{"status":%q}`+"\n", status)
@@ -907,7 +1068,7 @@ func (s *server) handleConnection(ctx context.Context, conn net.Conn, logger *sl
 
 		current := s.currentAssignment()
 		if requested, found := strings.CutPrefix(message, "@location "); found {
-			if current == nil || (requested != "any" && requested != current.Location) {
+			if current == nil || (requested != "any" && requested != strconv.FormatInt(current.LocationID, 10)) {
 				_, _ = fmt.Fprintln(writer, `{"error":"location unavailable"}`)
 				_ = writer.Flush()
 				return
@@ -1020,9 +1181,9 @@ func (s *server) storeEntityClaim(ctx context.Context, current *assignment, enti
 	defer cancel()
 	result, err := s.db.ExecContext(queryCtx, `
 		INSERT INTO entity_state (
-			entity_uid, server_id, location, latitude, longitude, server_generation
+			entity_uid, server_id, location_id, latitude, longitude, server_generation
 		)
-		SELECT $1, assignment.server_id, state.location, $2, $3, assignment.generation
+		SELECT $1, assignment.server_id, state.location_id, $2, $3, assignment.generation
 		FROM tcp_server_assignment AS assignment
 		JOIN tcp_server_state AS state USING (server_id)
 		WHERE assignment.server_id = $4
@@ -1031,7 +1192,7 @@ func (s *server) storeEntityClaim(ctx context.Context, current *assignment, enti
 			AND assignment.lease_until > NOW()
 		ON CONFLICT (entity_uid) DO UPDATE SET
 			server_id = EXCLUDED.server_id,
-			location = EXCLUDED.location,
+			location_id = EXCLUDED.location_id,
 			latitude = EXCLUDED.latitude,
 			longitude = EXCLUDED.longitude,
 			server_generation = EXCLUDED.server_generation,
@@ -1148,7 +1309,7 @@ func validIdentifier(value string) bool {
 func (s *server) writeDurableResponse(writer *bufio.Writer, current *assignment, command durableRequest, result durableResult) bool {
 	message := command.Kind
 	body, err := json.Marshal(response{
-		Server: current.ServerID, Location: current.Location,
+		Server: current.ServerID, LocationID: current.LocationID,
 		Latitude: current.Latitude, Longitude: current.Longitude, Instance: s.podName,
 		Generation: current.Generation, Counter: result.counter, Message: message,
 		Time: time.Now().UTC().Format(time.RFC3339Nano), Tick: result.tick,
@@ -1170,7 +1331,7 @@ func (s *server) writeInputResponse(writer *bufio.Writer, current *assignment, i
 		message = "teleport"
 	}
 	body, err := json.Marshal(response{
-		Server: current.ServerID, Location: current.Location,
+		Server: current.ServerID, LocationID: current.LocationID,
 		Latitude: current.Latitude, Longitude: current.Longitude, Instance: s.podName,
 		Generation: current.Generation, Counter: result.counter, Message: message,
 		Time: time.Now().UTC().Format(time.RFC3339Nano), Tick: result.tick,
@@ -1189,7 +1350,7 @@ func (s *server) writeInputResponse(writer *bufio.Writer, current *assignment, i
 
 func (s *server) writeResponse(writer *bufio.Writer, current *assignment, counter uint64, message string) bool {
 	body, err := json.Marshal(response{
-		Server: current.ServerID, Location: current.Location,
+		Server: current.ServerID, LocationID: current.LocationID,
 		Latitude: current.Latitude, Longitude: current.Longitude,
 		Instance:   s.podName,
 		Generation: current.Generation, Counter: counter, Message: message,

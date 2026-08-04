@@ -25,7 +25,7 @@ const statsPage = `<!doctype html><html><head><meta charset="utf-8"><title>Gatew
 
 type backend struct {
 	Server     string  `json:"server"`
-	Location   string  `json:"location"`
+	LocationID int64   `json:"location_id"`
 	Latitude   float64 `json:"latitude"`
 	Longitude  float64 `json:"longitude"`
 	Instance   string  `json:"instance"`
@@ -36,7 +36,7 @@ type backend struct {
 type discoveryResponse struct {
 	Status     string  `json:"status"`
 	Server     string  `json:"server"`
-	Location   string  `json:"location"`
+	LocationID int64   `json:"location_id"`
 	Latitude   float64 `json:"latitude"`
 	Longitude  float64 `json:"longitude"`
 	Instance   string  `json:"instance"`
@@ -45,7 +45,7 @@ type discoveryResponse struct {
 
 type publicLocation struct {
 	Server     string  `json:"server"`
-	Location   string  `json:"location"`
+	LocationID int64   `json:"location_id"`
 	Latitude   float64 `json:"latitude"`
 	Longitude  float64 `json:"longitude"`
 	Generation int64   `json:"generation"`
@@ -54,7 +54,7 @@ type publicLocation struct {
 type session struct {
 	ID          string    `json:"id"`
 	Client      string    `json:"client"`
-	Location    string    `json:"location"`
+	LocationID  int64     `json:"location_id"`
 	Latitude    float64   `json:"latitude"`
 	Longitude   float64   `json:"longitude"`
 	Server      string    `json:"server"`
@@ -307,14 +307,15 @@ func (g *gateway) handleClient(ctx context.Context, client net.Conn) {
 			continue
 		}
 		var handoff struct {
-			Reroute         string  `json:"reroute"`
+			Reroute         int64   `json:"reroute"`
 			ClientUID       string  `json:"client_uid"`
 			InputSequence   uint64  `json:"input_sequence"`
 			ClientLatitude  float64 `json:"client_latitude"`
 			ClientLongitude float64 `json:"client_longitude"`
 		}
-		if json.Unmarshal(response, &handoff) == nil && handoff.Reroute != "" {
-			candidate, _, routeErr := g.openRoute(ctx, handoff.Reroute, nil)
+		if json.Unmarshal(response, &handoff) == nil && handoff.Reroute != 0 {
+			nextLocation := strconv.FormatInt(handoff.Reroute, 10)
+			candidate, _, routeErr := g.openRoute(ctx, nextLocation, nil)
 			if routeErr != nil {
 				writeJSONError(clientWriter, routeErr.Error())
 				continue
@@ -328,7 +329,7 @@ func (g *gateway) handleClient(ctx context.Context, client net.Conn) {
 			}
 			downstream.conn.Close()
 			downstream = candidate
-			requested = handoff.Reroute
+			requested = nextLocation
 			clientLatitude = handoff.ClientLatitude
 			clientLongitude = handoff.ClientLongitude
 			g.updateSession(id, client.RemoteAddr().String(), candidate.info, clientLatitude, clientLongitude)
@@ -393,7 +394,7 @@ func (g *gateway) connectBackend(info backend) (*backendConnection, []byte, erro
 		return nil, nil, err
 	}
 	connection := &backendConnection{info: info, conn: conn, reader: bufio.NewReader(conn), writer: bufio.NewWriter(conn)}
-	hello, err := g.exchange(connection, "@location "+info.Location)
+	hello, err := g.exchange(connection, "@location "+strconv.FormatInt(info.LocationID, 10))
 	if err != nil {
 		conn.Close()
 		return nil, nil, err
@@ -453,7 +454,7 @@ func (g *gateway) discover(ctx context.Context) {
 				return
 			}
 			results <- result{info: backend{
-				Server: discovered.Server, Location: discovered.Location,
+				Server: discovered.Server, LocationID: discovered.LocationID,
 				Latitude: discovered.Latitude, Longitude: discovered.Longitude,
 				Instance: discovered.Instance, Address: endpoint, Generation: discovered.Generation,
 			}, ok: true}
@@ -462,8 +463,9 @@ func (g *gateway) discover(ctx context.Context) {
 	found := make(map[string]backend)
 	for range addresses {
 		result := <-results
-		if current, exists := found[result.info.Location]; result.ok && (!exists || result.info.Generation > current.Generation) {
-			found[result.info.Location] = result.info
+		key := strconv.FormatInt(result.info.LocationID, 10)
+		if current, exists := found[key]; result.ok && (!exists || result.info.Generation > current.Generation) {
+			found[key] = result.info
 		}
 	}
 	g.mu.Lock()
@@ -515,7 +517,7 @@ func (g *gateway) publicLocations() []publicLocation {
 	locations := make([]publicLocation, 0, len(routes))
 	for _, route := range routes {
 		locations = append(locations, publicLocation{
-			Server: route.Server, Location: route.Location,
+			Server: route.Server, LocationID: route.LocationID,
 			Latitude: route.Latitude, Longitude: route.Longitude,
 			Generation: route.Generation,
 		})
@@ -530,7 +532,7 @@ func (g *gateway) nearestLocation(latitude, longitude float64) (string, error) {
 	}
 	toRadians := func(value float64) float64 { return value * math.Pi / 180 }
 	lat1 := toRadians(latitude)
-	bestLocation := ""
+	var bestLocation int64
 	bestDistance := math.Inf(1)
 	for _, route := range routes {
 		lat2 := toRadians(route.Latitude)
@@ -540,12 +542,12 @@ func (g *gateway) nearestLocation(latitude, longitude float64) (string, error) {
 			math.Cos(lat1)*math.Cos(lat2)*math.Sin(deltaLongitude/2)*math.Sin(deltaLongitude/2)
 		a = math.Max(0, math.Min(1, a))
 		distance := 2 * math.Atan2(math.Sqrt(a), math.Sqrt(1-a))
-		if distance < bestDistance || (distance == bestDistance && route.Location < bestLocation) {
+		if distance < bestDistance || (distance == bestDistance && (bestLocation == 0 || route.LocationID < bestLocation)) {
 			bestDistance = distance
-			bestLocation = route.Location
+			bestLocation = route.LocationID
 		}
 	}
-	return bestLocation, nil
+	return strconv.FormatInt(bestLocation, 10), nil
 }
 
 func (g *gateway) locationFor(ctx context.Context, latitude, longitude float64) (string, error) {
@@ -595,8 +597,9 @@ func parseTeleportRoute(message string) (float64, float64, bool, error) {
 
 func (g *gateway) removeRoute(failed backend) {
 	g.mu.Lock()
-	if current, ok := g.routes[failed.Location]; ok && current.Address == failed.Address && current.Generation == failed.Generation {
-		delete(g.routes, failed.Location)
+	key := strconv.FormatInt(failed.LocationID, 10)
+	if current, ok := g.routes[key]; ok && current.Address == failed.Address && current.Generation == failed.Generation {
+		delete(g.routes, key)
 	}
 	g.mu.Unlock()
 }
@@ -607,7 +610,7 @@ func (g *gateway) updateSession(id, client string, route backend, latitude, long
 	if current, ok := g.sessions[id]; ok {
 		connectedAt = current.ConnectedAt
 	}
-	g.sessions[id] = session{ID: id, Client: client, Location: route.Location, Latitude: latitude, Longitude: longitude, Server: route.Server, Instance: route.Instance, Address: route.Address, Generation: route.Generation, ConnectedAt: connectedAt, Protocol: "TCP"}
+	g.sessions[id] = session{ID: id, Client: client, LocationID: route.LocationID, Latitude: latitude, Longitude: longitude, Server: route.Server, Instance: route.Instance, Address: route.Address, Generation: route.Generation, ConnectedAt: connectedAt, Protocol: "TCP"}
 	g.mu.Unlock()
 }
 

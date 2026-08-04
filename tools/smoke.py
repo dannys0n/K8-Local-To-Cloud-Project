@@ -22,13 +22,13 @@ def main() -> int:
             if not response:
                 raise RuntimeError("connection closed without a response")
             print(response.decode().rstrip())
-        stream.write(b"@location new-york\n")
+        stream.write(b"@location 2\n")
         routed = json.loads(stream.readline())
-        if routed.get("location") != "new-york":
+        if routed.get("location_id") != 2:
             raise RuntimeError(f"runtime route change failed: {routed}")
         stream.write(b"smoke-routed\n")
         response = json.loads(stream.readline())
-        if response.get("location") != "new-york":
+        if response.get("location_id") != 2:
             raise RuntimeError(f"message used wrong route: {response}")
         print(json.dumps(response, separators=(",", ":")))
     return 0

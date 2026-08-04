@@ -20,13 +20,13 @@ try {
         if ([string]::IsNullOrWhiteSpace($Response)) { throw "No response received" }
         Write-Host $Response
     }
-    $Writer.WriteLine("@location new-york")
+    $Writer.WriteLine("@location 2")
     $Routed = $Reader.ReadLine() | ConvertFrom-Json
-    if ($Routed.location -ne "new-york") { throw "Runtime route change failed" }
+    if ($Routed.location_id -ne 2) { throw "Runtime route change failed" }
     $Writer.WriteLine("smoke-routed")
     $Response = $Reader.ReadLine()
     $Body = $Response | ConvertFrom-Json
-    if ($Body.location -ne "new-york") { throw "Message used wrong route" }
+    if ($Body.location_id -ne 2) { throw "Message used wrong route" }
     Write-Host $Response
 } finally {
     $Writer.Dispose()

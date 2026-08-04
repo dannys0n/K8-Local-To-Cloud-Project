@@ -52,7 +52,7 @@ PAGE = r"""<!doctype html>
     <div class="card"><div class="label">Selected coordinate</div><div id="coordinate" class="value">Click the map</div></div>
     <div class="card"><div class="label">Client UID</div><div id="clientUid" class="value">—</div></div>
     <div class="card"><div class="label">Durable counter</div><div id="counter" class="value route">0</div><button id="increment">Increase counter</button></div>
-    <div class="card"><div class="label">Nearest active location</div><div id="location" class="value route">—</div></div>
+    <div class="card"><div class="label">Nearest active location ID</div><div id="location" class="value route">—</div></div>
     <div class="card"><div class="label">Connected gateway pod</div><div id="gateway" class="value">—</div></div>
     <div class="card"><div class="label">Logical server</div><div id="server" class="value">—</div></div>
     <div class="card"><div class="label">Server pod</div><div id="instance" class="value">—</div></div>
@@ -73,7 +73,7 @@ PAGE = r"""<!doctype html>
     const pendingKey=`tcp-lab-pending-${clientUid}`;let pendingCommands=JSON.parse(localStorage.getItem(pendingKey)||'[]').filter(command=>command.kind==='increment');localStorage.setItem(pendingKey,JSON.stringify(pendingCommands));
     function showRoute(body){
       currentRoute=body;
-      el('location').textContent=body.location||'—'; el('server').textContent=body.server||'—';
+      el('location').textContent=body.location_id??'—'; el('server').textContent=body.server||'—';
       el('gateway').textContent=body.gateway||'—';el('instance').textContent=body.instance||'—';el('generation').textContent=body.generation??'—';
       if(body.client_uid===clientUid&&body.counter!==undefined)el('counter').textContent=body.counter;
       renderServers();renderInfra();
@@ -93,8 +93,8 @@ PAGE = r"""<!doctype html>
       locations.filter(server=>showAll||(currentRoute&&server.server===currentRoute.server)).forEach(server=>{
         const active=currentRoute&&server.server===currentRoute.server;
         const layer=L.circleMarker([server.latitude,server.longitude],{radius:active?11:7,color:active?'#3fb950':'#58a6ff',weight:active?4:2,fillColor:'#0d1117',fillOpacity:1}).addTo(map);
-        layer.bindTooltip(server.location,{permanent:true,direction:'top',className:'server-label'});
-        layer.bindPopup(`<b>${server.location}</b><br>${server.server}<br>${server.latitude.toFixed(4)}, ${server.longitude.toFixed(4)}`);
+        layer.bindTooltip(`Location ${server.location_id}`,{permanent:true,direction:'top',className:'server-label'});
+        layer.bindPopup(`<b>Location ${server.location_id}</b><br>${server.server}<br>${server.latitude.toFixed(4)}, ${server.longitude.toFixed(4)}`);
         serverLayers.push(layer);
         if(active&&selectedPosition)connectionLine=L.polyline([selectedPosition,[server.latitude,server.longitude]],{color:'#3fb950',weight:2,dashArray:'7 7',opacity:.8}).addTo(map);
       });

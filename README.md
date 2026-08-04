@@ -46,20 +46,34 @@ powershell -ExecutionPolicy Bypass -File tools/smoke.ps1
 powershell -ExecutionPolicy Bypass -File tools/client.ps1
 ```
 
-The location endpoints are deliberately simple and fixed for this lab:
+The lab initially creates five numeric locations. On a new database, the server
+application chooses each location's latitude and longitude once; PostgreSQL then
+preserves the numeric ID and coordinates across pod replacement and cluster
+restarts. Existing databases retain their coordinates during migration.
 
-| Location | Latitude | Longitude | kind port | Logical identity |
-|---|---:|---:|---:|---|
-| Los Angeles | 34.0522 | -118.2437 | 9000 | `tcp-server-0` |
-| New York | 40.7128 | -74.0060 | 9000 | `tcp-server-1` |
-| London | 51.5074 | -0.1278 | 9000 | `tcp-server-2` |
-| Singapore | 1.3521 | 103.8198 | 9000 | `tcp-server-3` |
-| Frankfurt | 50.1109 | 8.6821 | 9000 | `tcp-server-4` |
+Names are intentionally not part of location identity or routing. Clients display
+`Location <id>` on the Leaflet map. PostgreSQL coordinates are canonical Leaflet
+`LatLng` values and can later be indexed with Redis GEO; Leaflet's Web Mercator
+projection remains a browser display detail and is not persisted.
 
-PostgreSQL stores each location's name, latitude, and longitude. These are the
-canonical coordinates used by Leaflet `LatLng` values and can later be indexed
-directly with Redis GEO. Leaflet's Web Mercator projection remains a browser
-display detail; it is not persisted.
+PostgreSQL exposes two operations for the future location-management interface:
+
+```sql
+-- Create a location at a random coordinate.
+SELECT * FROM tcp_create_location();
+
+-- Or create one at an explicit Leaflet coordinate.
+SELECT * FROM tcp_create_location(35.0, -120.0);
+
+-- Disable a location without reusing its identity.
+SELECT tcp_delete_location(6);
+```
+
+Deletion is intentionally a soft delete so historical entity and transaction
+records keep a valid location reference. Servers reload enabled locations once per
+second. Disabling a location atomically fences its assignment; its former server
+drops the in-memory claim on refresh and gateways remove the route through normal
+discovery. The database sequence allocates IDs atomically across concurrent callers.
 
 `tools/client.py` asks the operating system for a free local port, prints the
 resulting URL, and opens it in the default browser. It keeps a stable client UID
@@ -179,7 +193,7 @@ Delete everything:
 Send a line such as `hello` and receive one JSON line:
 
 ```json
-{"gateway":"gateway-abc","server":"tcp-server-0","location":"los-angeles","latitude":34.0522,"longitude":-118.2437,"client_uid":"a-client-uuid","operation_id":"an-operation-uuid","client_latitude":34.1,"client_longitude":-118.2,"instance":"tcp-server-abc","generation":3,"counter":1,"message":"increment","tick":42,"time":"2026-07-31T00:00:00Z"}
+{"gateway":"gateway-abc","server":"tcp-server-0","location_id":1,"latitude":34.0522,"longitude":-118.2437,"client_uid":"a-client-uuid","operation_id":"an-operation-uuid","client_latitude":34.1,"client_longitude":-118.2,"instance":"tcp-server-abc","generation":3,"counter":1,"message":"increment","tick":42,"time":"2026-07-31T00:00:00Z"}
 ```
 
 A single browser-client process keeps one persistent TCP connection on one

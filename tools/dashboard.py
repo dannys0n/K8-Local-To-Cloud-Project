@@ -11,7 +11,6 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 NAMESPACE = "tcp-lab"
 LABEL = "app=gateway"
-LOCATIONS = ("los-angeles", "new-york", "london", "singapore", "frankfurt")
 DATA_SERVICES = {
     "postgres": ("PostgreSQL", "postgres:5432"),
     "redis": ("Redis", "redis:6379"),
@@ -52,8 +51,8 @@ PAGE = r"""<!doctype html>
     <div class="card">Hot spares<div class="value" id="spares">–</div></div>
   </div>
   <div class="panel"><h2>Per gateway</h2><table><thead><tr><th>Gateway</th><th>Pod IP</th><th>Node</th><th>Clients</th><th>Backend</th><th>Total accepted</th><th>Status</th></tr></thead><tbody id="gatewayRows"></tbody></table></div>
-  <div class="panel"><h2>Active client sessions</h2><table><thead><tr><th>Gateway</th><th>Client address</th><th>Location</th><th>Logical server</th><th>Instance</th><th>Generation</th><th>Age</th><th>Protocol</th></tr></thead><tbody id="sessionRows"></tbody></table></div>
-  <div class="panel"><h2>Backend distribution</h2><table><thead><tr><th>Logical server</th><th>Location</th><th>Active instance</th><th>Node</th><th>Endpoint</th><th>Generation</th><th>Clients</th><th>Seen by gateways</th><th>Status</th></tr></thead><tbody id="backendRows"></tbody></table></div>
+  <div class="panel"><h2>Active client sessions</h2><table><thead><tr><th>Gateway</th><th>Client address</th><th>Location ID</th><th>Logical server</th><th>Instance</th><th>Generation</th><th>Age</th><th>Protocol</th></tr></thead><tbody id="sessionRows"></tbody></table></div>
+  <div class="panel"><h2>Backend distribution</h2><table><thead><tr><th>Logical server</th><th>Location ID</th><th>Active instance</th><th>Node</th><th>Endpoint</th><th>Generation</th><th>Clients</th><th>Seen by gateways</th><th>Status</th></tr></thead><tbody id="backendRows"></tbody></table></div>
   <div class="panel"><h2>Data services</h2><table><thead><tr><th>Service</th><th>Instance</th><th>Node</th><th>Pod IP</th><th>Service endpoint</th><th>Restarts</th><th>Status</th></tr></thead><tbody id="dataRows"></tbody></table></div>
   <p class="muted" id="updated"></p>
 <script>
@@ -70,8 +69,8 @@ async function refresh(){
     document.getElementById('pool').textContent=data.server_pods;
     document.getElementById('spares').textContent=data.hot_spares;
     fill('gatewayRows', data.gateways, ['name','ip','node','clients','backend_sessions','total_accepted',p=>p.error?'ERROR':'OK']);
-    fill('sessionRows', data.sessions, ['gateway','src','location','server','instance','generation','age','proto']);
-    fill('backendRows', data.backends, ['server','location','instance','node','address','generation','current','gateways','status']);
+    fill('sessionRows', data.sessions, ['gateway','src','location_id','server','instance','generation','age','proto']);
+    fill('backendRows', data.backends, ['server','location_id','instance','node','address','generation','current','gateways','status']);
     fill('dataRows', data.data_services, ['service','instance','node','ip','endpoint','restarts','status'], 'No in-cluster data services');
     document.getElementById('updated').textContent='Updated '+new Date().toLocaleTimeString();
   } catch(error) { document.getElementById('error').textContent=error.message; }
@@ -173,10 +172,6 @@ def list_data_services() -> list[dict]:
     return sorted(result, key=lambda item: (item["service"], item["instance"]))
 
 
-def logical_server(location: str) -> str:
-    return f"tcp-server-{LOCATIONS.index(location)}" if location in LOCATIONS else "pending"
-
-
 def inspect_pod(pod: dict) -> dict:
     pod = dict(pod)
     pod.update(clients=0, backend_sessions=0, total_accepted=0, backends=[], sessions=[], error="")
@@ -193,7 +188,7 @@ def inspect_pod(pod: dict) -> dict:
             age = max(0, int((now - started).total_seconds()))
             pod["sessions"].append({
                 "gateway": pod["name"], "src": item.get("client", ""),
-                "location": item.get("location", ""), "server": item.get("server", ""),
+                "location_id": item.get("location_id"), "server": item.get("server", ""),
                 "instance": item.get("instance", ""), "address": item.get("address", ""),
                 "generation": item.get("generation", 0), "age": f"{age}s",
                 "proto": item.get("protocol", "TCP"),
@@ -203,7 +198,7 @@ def inspect_pod(pod: dict) -> dict:
         for item in stats.get("routes", []):
             pod["backends"].append({
                 "gateway": pod["name"], "server": item.get("server", ""),
-                "location": item.get("location", ""), "instance": item.get("instance", ""),
+                "location_id": item.get("location_id"), "instance": item.get("instance", ""),
                 "address": item.get("address", ""), "generation": item.get("generation", 0),
                 "status": "UP",
             })
@@ -218,16 +213,13 @@ def snapshot() -> dict:
     data_services = list_data_services()
     with ThreadPoolExecutor(max_workers=max(1, len(pods))) as pool:
         gateways = list(pool.map(inspect_pod, pods))
-    unique_backends = {
-        logical_server(location): {
-            "server": logical_server(location), "location": location,
+    unique_backends = {}
+    for backend in (item for gateway in gateways for item in gateway["backends"]):
+        current = unique_backends.setdefault(backend["server"], {
+            "server": backend["server"], "location_id": backend["location_id"],
             "address": "", "instance": "", "node": "", "generation": 0, "current": 0,
             "gateways": set(),
-        }
-        for location in LOCATIONS
-    }
-    for backend in (item for gateway in gateways for item in gateway["backends"]):
-        current = unique_backends[backend["server"]]
+        })
         if backend["status"] == "UP" and backend["generation"] >= current["generation"]:
             if backend["generation"] > current["generation"]:
                 current["gateways"].clear()
