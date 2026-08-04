@@ -46,11 +46,13 @@ selected location. Location controls call the PostgreSQL lifecycle functions
 through the dashboard process and its current `kubectl` context; they are not
 served by the public gateway or exposed through the EKS load balancer.
 
-While the dashboard is running, the local map client can enable `Show proxies`
-and `Show hot swaps`. Proxies appear in a screen-space row below the map, hot
-spare server pods appear above it, and the selected gateway is connected to the
-client marker. These optional layers read the dashboard's localhost-only JSON;
-the gateway and server protocols do not expose Kubernetes inventory.
+The client is independent of the infrastructure dashboard. It displays only
+application data returned through its gateway connection: its selected gateway,
+logical server, active server pod, locations, and nearby clients. Kubernetes
+inventory such as every gateway, reserve pod, worker, and unhealthy pod remains
+dashboard-only and is read through the operator's current `kubectl` context.
+This keeps Kubernetes credentials and administrative data out of external
+clients and the public EKS load balancer.
 
 Other connected clients are shown as cyan map pins. Active servers exchange
 best-effort visibility snapshots through Redis at 10 Hz, independently of the

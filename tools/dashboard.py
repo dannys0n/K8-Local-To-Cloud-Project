@@ -10,9 +10,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
 try:
-    from client import BotManager
+    from bots import BotManager
 except ModuleNotFoundError:
-    from tools.client import BotManager
+    from tools.bots import BotManager
 
 
 NAMESPACE = "tcp-lab"
