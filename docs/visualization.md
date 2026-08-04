@@ -48,7 +48,11 @@ served by the public gateway or exposed through the EKS load balancer.
 
 The client is independent of the infrastructure dashboard. It displays only
 application data returned through its gateway connection: its selected gateway,
-logical server, active server pod, locations, and nearby clients. Kubernetes
+logical server, active server pod, locations, and nearby clients. The proxy layer
+always draws the current gateway below the map with an edge to the client. Gateways
+previously observed while that client page remains open stay in memory and appear
+gray; they are forgotten on reload, and it does not enumerate gateway pods the
+client has never used. Kubernetes
 inventory such as every gateway, reserve pod, worker, and unhealthy pod remains
 dashboard-only and is read through the operator's current `kubectl` context.
 This keeps Kubernetes credentials and administrative data out of external

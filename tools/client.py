@@ -36,12 +36,15 @@ PAGE = r"""<!doctype html>
     .entity-label{background:#161b22;color:#39c5cf;border:1px solid #39c5cf;border-radius:4px;box-shadow:none;padding:2px 5px}
     .other-client-pin-wrap{background:transparent;border:0}.other-client-pin{display:block;width:18px;height:18px;background:#39c5cf;border:2px solid #d7ffff;border-radius:50% 50% 50% 0;transform:rotate(-45deg);box-shadow:0 2px 5px #0009}
     .other-client-pin.stale{background:#8b949e;border-color:#c9d1d9}
+    .proxy-row{position:absolute;left:54px;right:12px;bottom:24px;z-index:900;display:flex;justify-content:center;gap:7px;flex-wrap:wrap;pointer-events:none}
+    .proxy-node{max-width:220px;padding:6px 9px;border:1px solid #8b949e;border-radius:6px;background:#161b22e8;color:#8b949e;font:11px ui-monospace,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;box-shadow:0 2px 8px #0008}.proxy-node.active{border-color:#3fb950;color:#3fb950}
+    #proxyEdge{position:absolute;inset:0;width:100%;height:100%;z-index:899;pointer-events:none}
     @media(max-width:720px){main{grid-template-columns:1fr;grid-template-rows:minmax(360px,1fr) auto}aside{border-left:0;border-top:1px solid #30363d}}
   </style>
 </head>
 <body>
   <header><h1>Geographic client</h1><span class="hint">Click to teleport; use WASD to move</span><span class="status"><span id="dot" class="dot"></span><span id="connection">Connecting</span></span></header>
-  <main><div id="map"></div><aside>
+  <main><div id="map"><svg id="proxyEdge"></svg><div id="proxyRow" class="proxy-row"></div></div><aside>
     <div class="card"><div class="label">Selected coordinate</div><div id="coordinate" class="value">Click the map</div></div>
     <div class="card"><div class="label">Client UID</div><div id="clientUid" class="value">—</div></div>
     <div class="card"><div class="label">Durable counter</div><div id="counter" class="value route">0</div><button id="increment">Increase counter</button></div>
@@ -61,18 +64,22 @@ PAGE = r"""<!doctype html>
     const keys=new Set();
     const el=id=>document.getElementById(id);
     const clientUid=localStorage.getItem('tcp-lab-client-uid')||crypto.randomUUID();localStorage.setItem('tcp-lab-client-uid',clientUid);el('clientUid').textContent=clientUid;
+    const observedGateways=new Set();
     const inputSequenceKey=`tcp-lab-input-sequence-${clientUid}`;let inputSequence=Number(localStorage.getItem(inputSequenceKey)||0);
     const pendingKey=`tcp-lab-pending-${clientUid}`;let pendingCommands=JSON.parse(localStorage.getItem(pendingKey)||'[]').filter(command=>command.kind==='increment');localStorage.setItem(pendingKey,JSON.stringify(pendingCommands));
     function showRoute(body){
       currentRoute=body;
+      if(body.gateway)observedGateways.add(body.gateway);
       el('location').textContent=body.location_id??'—'; el('server').textContent=body.server||'—';
       el('gateway').textContent=body.gateway||'—';el('instance').textContent=body.instance||'—';el('generation').textContent=body.generation??'—';
       if(body.client_uid===clientUid&&body.counter!==undefined)el('counter').textContent=body.counter;
-      renderServers();
+      renderServers();renderProxy();
     }
     function connection(state){connectionState=state;const dot=el('dot');dot.classList.toggle('ok',state==='ready');dot.classList.toggle('waiting',state==='gateway');el('connection').textContent=state==='ready'?'Connected':state==='gateway'?'Gateway connected; waiting for server':'Disconnected';}
     async function request(path,options){const response=await fetch(path,options);const body=await response.json();if(!response.ok)throw new Error(body.error||response.statusText);return body}
     function applyAuthoritativePosition(body){if(!Number.isFinite(body.client_latitude)||!Number.isFinite(body.client_longitude))return;selectedPosition=[body.client_latitude,body.client_longitude];el('coordinate').textContent=`${body.client_latitude.toFixed(5)}, ${body.client_longitude.toFixed(5)}`;if(selectedMarker)selectedMarker.setLatLng(selectedPosition);else selectedMarker=L.marker(selectedPosition).addTo(map)}
+    function drawProxyEdge(){const svg=el('proxyEdge');svg.replaceChildren();const node=el('proxyRow').querySelector('.active');if(!node||!selectedPosition)return;const mapRect=el('map').getBoundingClientRect(),nodeRect=node.getBoundingClientRect(),start=map.latLngToContainerPoint(selectedPosition);svg.setAttribute('viewBox',`0 0 ${mapRect.width} ${mapRect.height}`);const line=document.createElementNS('http://www.w3.org/2000/svg','line');line.setAttribute('x1',start.x);line.setAttribute('y1',start.y);line.setAttribute('x2',nodeRect.left-mapRect.left+nodeRect.width/2);line.setAttribute('y2',nodeRect.top-mapRect.top+nodeRect.height/2);line.setAttribute('stroke','#3fb950');line.setAttribute('stroke-width','2');line.setAttribute('stroke-dasharray','7 6');svg.appendChild(line)}
+    function renderProxy(){const row=el('proxyRow');row.replaceChildren();for(const gateway of observedGateways){const active=gateway===currentRoute?.gateway,node=document.createElement('div');node.className=`proxy-node${active?' active':''}`;node.textContent=gateway;node.title=active?'Connected gateway pod':'Previously connected gateway pod';row.appendChild(node)}requestAnimationFrame(drawProxyEdge)}
     function renderServers(){
       if(connectionLine){connectionLine.remove();connectionLine=null}
       const showAll=el('showAllServers').checked;
@@ -117,6 +124,7 @@ PAGE = r"""<!doctype html>
       catch(error){el('error').textContent=error.message;inputDirty=true}finally{inputInFlight=false}
     }
     el('showAllServers').addEventListener('change',renderServers);
+    map.on('move zoom resize',drawProxyEdge);
     async function reconnect(silent=false){if(reconnecting)return;reconnecting=true;try{const body=await request('/api/reconnect',{method:'POST'});showRoute(body||{});connection(body?'ready':'gateway');inputDirty=true;el('error').textContent=''}catch(error){if(!silent)el('error').textContent=error.message;refresh()}finally{reconnecting=false}}
     el('reconnect').addEventListener('click',()=>reconnect(false));
     async function refresh(){try{const state=await request('/api/state');connection(state.connection);if(state.latitude!==null&&!pendingCommands.length&&!teleporting)applyAuthoritativePosition({client_latitude:state.latitude,client_longitude:state.longitude});showRoute(state.route||{gateway:state.gateway})}catch(error){connection('disconnected')}}
