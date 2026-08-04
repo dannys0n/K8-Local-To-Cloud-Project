@@ -4,7 +4,7 @@ metadata:
   name: tcp-server
   namespace: tcp-lab
 spec:
-  replicas: 10
+  replicas: 5
   strategy:
     rollingUpdate:
       maxUnavailable: 0
@@ -17,6 +17,7 @@ spec:
       labels:
         app: tcp-server
     spec:
+      priorityClassName: tcp-lab-critical
       terminationGracePeriodSeconds: 10
       tolerations:
         - key: node.kubernetes.io/not-ready

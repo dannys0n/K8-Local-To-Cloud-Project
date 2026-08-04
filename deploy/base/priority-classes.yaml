@@ -1,0 +1,15 @@
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: tcp-lab-critical
+value: 100000
+globalDefault: false
+description: Gateway and location-server workloads that may preempt reserved capacity.
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: tcp-lab-reserve
+value: -10
+globalDefault: false
+description: Disposable capacity reservations preempted by application replacements.

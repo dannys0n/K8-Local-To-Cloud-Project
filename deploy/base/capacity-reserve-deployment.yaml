@@ -1,0 +1,46 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: capacity-reserve
+  namespace: tcp-lab
+spec:
+  replicas: 10
+  selector:
+    matchLabels:
+      app: capacity-reserve
+  template:
+    metadata:
+      labels:
+        app: capacity-reserve
+    spec:
+      priorityClassName: tcp-lab-reserve
+      terminationGracePeriodSeconds: 0
+      tolerations:
+        - key: node.kubernetes.io/not-ready
+          operator: Exists
+          effect: NoExecute
+          tolerationSeconds: 0
+        - key: node.kubernetes.io/unreachable
+          operator: Exists
+          effect: NoExecute
+          tolerationSeconds: 0
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          nodeTaintsPolicy: Honor
+          matchLabelKeys:
+            - pod-template-hash
+          labelSelector:
+            matchLabels:
+              app: capacity-reserve
+      containers:
+        - name: reserve
+          image: registry.k8s.io/pause:3.10
+          resources:
+            requests:
+              cpu: 25m
+              memory: 32Mi
+            limits:
+              cpu: 25m
+              memory: 32Mi

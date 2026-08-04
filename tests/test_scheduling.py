@@ -13,6 +13,10 @@ DATABASE_WORKLOADS = (
     ROOT / "deploy/overlays/kind/redis-deployment.yaml",
     ROOT / "deploy/overlays/kind/postgres-statefulset.yaml",
 )
+CAPACITY_RESERVE = ROOT / "deploy/base/capacity-reserve-deployment.yaml"
+PRIORITY_CLASSES = ROOT / "deploy/base/priority-classes.yaml"
+
+
 class WorkerSchedulingTests(unittest.TestCase):
     def test_general_workloads_have_no_hard_node_placement(self) -> None:
         forbidden = (
@@ -94,6 +98,24 @@ class WorkerSchedulingTests(unittest.TestCase):
                     ["15", "15"],
                     re.findall(r"tolerationSeconds\s*:\s*(\d+)", content),
                 )
+
+    def test_critical_workloads_preempt_server_sized_reservations(self) -> None:
+        priorities = PRIORITY_CLASSES.read_text(encoding="utf-8")
+        reserve = CAPACITY_RESERVE.read_text(encoding="utf-8")
+        server = GENERAL_WORKLOADS[0].read_text(encoding="utf-8")
+
+        self.assertIn("name: tcp-lab-critical", priorities)
+        self.assertIn("name: tcp-lab-reserve", priorities)
+        self.assertIn("priorityClassName: tcp-lab-reserve", reserve)
+        self.assertIn("replicas: 10", reserve)
+        self.assertIn("cpu: 25m", reserve)
+        self.assertIn("memory: 32Mi", reserve)
+        self.assertIn("priorityClassName: tcp-lab-critical", server)
+        for workload in GENERAL_WORKLOADS:
+            self.assertIn(
+                "priorityClassName: tcp-lab-critical",
+                workload.read_text(encoding="utf-8"),
+            )
 
 
 if __name__ == "__main__":

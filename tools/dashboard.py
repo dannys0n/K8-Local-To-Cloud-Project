@@ -4,6 +4,8 @@
 import argparse
 import json
 import subprocess
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -20,6 +22,13 @@ LABEL = "app=gateway"
 DATA_SERVICES = {
     "postgres": ("PostgreSQL", "postgres:5432"),
     "redis": ("Redis", "redis:6379"),
+}
+CAPACITY_LOCK = threading.Lock()
+CAPACITY_STATE = {
+    "desired_servers": 0,
+    "deployment_servers": 0,
+    "status": "starting",
+    "error": "",
 }
 
 
@@ -60,7 +69,9 @@ PAGE = r"""<!doctype html>
     <div class="card">Dummy threads<div class="value" id="dummyThreads">–</div></div>
     <div class="card">Backend sessions<div class="value" id="backends">–</div></div>
     <div class="card">Server pool<div class="value" id="pool">–</div></div>
-    <div class="card">Hot spares<div class="value" id="spares">–</div></div>
+    <div class="card">Desired servers<div class="value" id="desiredServers">–</div></div>
+    <div class="card">Reserve ready<div class="value" id="reserveReady">–</div></div>
+    <div class="card">Reserve pending<div class="value" id="reservePending">–</div></div>
   </div>
   <div class="panel"><h2>Per gateway</h2><table><thead><tr><th>Gateway</th><th>Pod IP</th><th>Node</th><th>Clients</th><th>Backend</th><th>Total accepted</th><th>Status</th></tr></thead><tbody id="gatewayRows"></tbody></table></div>
   <div class="panel"><h2>Client sessions</h2><table><thead><tr><th>Gateway</th><th>Client address</th><th>Status</th><th>Location ID</th><th>Logical server</th><th>Instance</th><th>Generation</th><th>Age</th><th>Protocol</th></tr></thead><tbody id="sessionRows"></tbody></table></div>
@@ -81,7 +92,9 @@ async function refresh(){
     document.getElementById('dummyThreads').textContent=data.dummy_threads;
     document.getElementById('backends').textContent=data.total_backends;
     document.getElementById('pool').textContent=data.server_pods;
-    document.getElementById('spares').textContent=data.hot_spares;
+    document.getElementById('desiredServers').textContent=data.capacity.desired_servers;
+    document.getElementById('reserveReady').textContent=data.reserve_ready;
+    document.getElementById('reservePending').textContent=data.reserve_pending;
     document.getElementById('notReady').textContent=data.not_ready_pods;
     document.getElementById('unknown').textContent=data.unknown_pods;
     fill('gatewayRows', data.gateways, ['name','ip','node','clients','backend_sessions','total_accepted',p=>p.error?'ERROR':'OK']);
@@ -100,13 +113,13 @@ MAP_PAGE = r"""<!doctype html>
 <title>TCP lab map</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <style>
-:root{color-scheme:dark;font:14px system-ui,sans-serif;background:#0d1117;color:#e6edf3}*{box-sizing:border-box}body{margin:0;height:100vh;background:#0d1117;color:#e6edf3;display:grid;grid-template-rows:auto 1fr}header{display:flex;align-items:center;gap:18px;padding:12px 16px;background:#161b22;border-bottom:1px solid #30363d;z-index:1000}.tabs{display:flex;gap:8px}.tabs a{color:#e6edf3;text-decoration:none;padding:7px 10px;border:1px solid #30363d;border-radius:6px}.tabs .active{background:#1f6feb;border-color:#1f6feb}.summary{margin-left:auto;color:#8b949e}main{display:grid;grid-template-columns:minmax(0,1fr) 300px;min-height:0}.map-wrap{position:relative;min-width:0}#map{height:100%;background:#0d1117}.node-row{position:absolute;z-index:500;left:54px;right:12px;display:flex;justify-content:center;gap:7px;flex-wrap:wrap;pointer-events:none}.node-row.top{top:12px}.node-row.bottom{bottom:24px}.node{max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:6px 9px;border:1px solid #8b949e;border-radius:6px;background:#161b22e8;color:#e6edf3;font:11px ui-monospace,monospace;box-shadow:0 2px 8px #0008}.gateway{border-color:#a371f7}.spare{border-color:#d29922;color:#d29922}.node.not_ready{border-color:#f85149;color:#f85149}.node.unknown{border-color:#8b949e;color:#8b949e}aside{padding:16px;background:#161b22;border-left:1px solid #30363d;overflow:auto}.card{padding:13px;margin-bottom:12px;border:1px solid #30363d;border-radius:7px;background:#0d1117}.label{color:#8b949e;font-size:11px;text-transform:uppercase;letter-spacing:.08em;margin-bottom:5px}.value{font-family:ui-monospace,monospace;overflow-wrap:anywhere}.route{font-size:18px;color:#58a6ff}input{width:100%;margin-bottom:8px;border:1px solid #30363d;border-radius:6px;background:#161b22;color:#e6edf3;padding:9px}.toggle{display:flex;align-items:center;gap:8px;color:#8b949e;cursor:pointer}.toggle+.toggle{margin-top:9px}.toggle input{width:auto;margin:0}button{width:100%;border:1px solid #30363d;border-radius:6px;background:#21262d;color:#e6edf3;padding:9px;cursor:pointer;margin-top:8px}button:hover{border-color:#58a6ff}button:disabled{cursor:not-allowed;opacity:.5}button.danger{border-color:#f85149;color:#ff7b72}.muted{font-size:11px;color:#8b949e;line-height:1.45}.error{color:#f85149;min-height:20px;margin-top:10px}.batch-row{display:grid;grid-template-columns:1fr auto;align-items:center;gap:8px;margin-top:8px;font:12px ui-monospace,monospace}.batch-row button{width:auto;padding:5px 8px;margin:0}.bot-summary{margin:8px 0;color:#8b949e}.client-pin{width:18px;height:18px;border-radius:50% 50% 50% 0;background:#39c5cf;border:2px solid #d7ffff;transform:rotate(-45deg);box-shadow:0 2px 5px #0009}.client-pin-wrap{background:transparent;border:0}.server-label{background:#161b22;color:#e6edf3;border:1px solid #58a6ff;border-radius:4px;box-shadow:none;padding:2px 5px}.leaflet-control-attribution{background:#161b22cc!important;color:#8b949e}.leaflet-control-attribution a{color:#58a6ff}@media(max-width:720px){header{flex-wrap:wrap}.summary{width:100%;margin-left:0}main{grid-template-columns:1fr;grid-template-rows:minmax(360px,1fr) auto}aside{border-left:0;border-top:1px solid #30363d}}
+:root{color-scheme:dark;font:14px system-ui,sans-serif;background:#0d1117;color:#e6edf3}*{box-sizing:border-box}body{margin:0;height:100vh;background:#0d1117;color:#e6edf3;display:grid;grid-template-rows:auto 1fr}header{display:flex;align-items:center;gap:18px;padding:12px 16px;background:#161b22;border-bottom:1px solid #30363d;z-index:1000}.tabs{display:flex;gap:8px}.tabs a{color:#e6edf3;text-decoration:none;padding:7px 10px;border:1px solid #30363d;border-radius:6px}.tabs .active{background:#1f6feb;border-color:#1f6feb}.summary{margin-left:auto;color:#8b949e}main{display:grid;grid-template-columns:minmax(0,1fr) 300px;min-height:0}.map-wrap{position:relative;min-width:0}#map{height:100%;background:#0d1117}.node-row{position:absolute;z-index:500;left:54px;right:12px;display:flex;justify-content:center;gap:7px;flex-wrap:wrap;pointer-events:none}.node-row.top{top:12px}.node-row.bottom{bottom:24px}.node{max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:6px 9px;border:1px solid #8b949e;border-radius:6px;background:#161b22e8;color:#e6edf3;font:11px ui-monospace,monospace;box-shadow:0 2px 8px #0008}.gateway{border-color:#a371f7}.spare,.node.pending{border-color:#d29922;color:#d29922}.node.not_ready{border-color:#f85149;color:#f85149}.node.unknown{border-color:#8b949e;color:#8b949e}aside{padding:16px;background:#161b22;border-left:1px solid #30363d;overflow:auto}.card{padding:13px;margin-bottom:12px;border:1px solid #30363d;border-radius:7px;background:#0d1117}.label{color:#8b949e;font-size:11px;text-transform:uppercase;letter-spacing:.08em;margin-bottom:5px}.value{font-family:ui-monospace,monospace;overflow-wrap:anywhere}.route{font-size:18px;color:#58a6ff}input{width:100%;margin-bottom:8px;border:1px solid #30363d;border-radius:6px;background:#161b22;color:#e6edf3;padding:9px}.toggle{display:flex;align-items:center;gap:8px;color:#8b949e;cursor:pointer}.toggle+.toggle{margin-top:9px}.toggle input{width:auto;margin:0}button{width:100%;border:1px solid #30363d;border-radius:6px;background:#21262d;color:#e6edf3;padding:9px;cursor:pointer;margin-top:8px}button:hover{border-color:#58a6ff}button:disabled{cursor:not-allowed;opacity:.5}button.danger{border-color:#f85149;color:#ff7b72}.muted{font-size:11px;color:#8b949e;line-height:1.45}.error{color:#f85149;min-height:20px;margin-top:10px}.batch-row{display:grid;grid-template-columns:1fr auto;align-items:center;gap:8px;margin-top:8px;font:12px ui-monospace,monospace}.batch-row button{width:auto;padding:5px 8px;margin:0}.bot-summary{margin:8px 0;color:#8b949e}.client-pin{width:18px;height:18px;border-radius:50% 50% 50% 0;background:#39c5cf;border:2px solid #d7ffff;transform:rotate(-45deg);box-shadow:0 2px 5px #0009}.client-pin-wrap{background:transparent;border:0}.server-label{background:#161b22;color:#e6edf3;border:1px solid #58a6ff;border-radius:4px;box-shadow:none;padding:2px 5px}.leaflet-control-attribution{background:#161b22cc!important;color:#8b949e}.leaflet-control-attribution a{color:#58a6ff}@media(max-width:720px){header{flex-wrap:wrap}.summary{width:100%;margin-left:0}main{grid-template-columns:1fr;grid-template-rows:minmax(360px,1fr) auto}aside{border-left:0;border-top:1px solid #30363d}}
 </style></head><body>
 <header><strong>TCP lab</strong><nav class="tabs"><a href="/">TCP dashboard</a><a class="active" href="/map">Interactive map</a></nav><div id="summary" class="summary">Loading...</div></header>
 <main><div class="map-wrap"><div id="map"></div><div id="spares" class="node-row top"></div><div id="gateways" class="node-row bottom"></div></div>
 <aside>
 <div class="card"><div class="label">Selected coordinate</div><div id="selection" class="value">Click the map</div></div>
-<div class="card"><div class="label">Map layers</div><label class="toggle"><input id="showClients" type="checkbox" checked>Show clients</label><label class="toggle"><input id="showServers" type="checkbox" checked>Show active locations</label><label class="toggle"><input id="showGateways" type="checkbox" checked>Show gateways</label><label class="toggle"><input id="showSpares" type="checkbox" checked>Show hot swaps</label></div>
+<div class="card"><div class="label">Map layers</div><label class="toggle"><input id="showClients" type="checkbox" checked>Show clients</label><label class="toggle"><input id="showServers" type="checkbox" checked>Show active locations</label><label class="toggle"><input id="showGateways" type="checkbox" checked>Show gateways</label><label class="toggle"><input id="showSpares" type="checkbox" checked>Show reserve capacity</label></div>
 <div class="card"><div class="label">Map update rate</div><div id="refreshRateValue" class="value route">4 Hz</div><input id="refreshRate" type="range" min="1" max="20" step="1" value="4"><div class="muted">Target rate; slow Kubernetes snapshots never overlap.</div></div>
 <div class="card"><div class="label">Dummy clients</div><input id="botCount" type="number" min="1" max="500" value="10"><button id="spawn">Spawn batch</button><div id="botState" class="bot-summary">0 active</div><div id="botBatches"></div><button id="despawn">Despawn all</button></div>
 <div class="card"><div class="label">Location controls</div><button id="createSelected" disabled>Create at selected coordinate</button><button id="createRandom">Create random location</button><button id="deleteLocation" class="danger" disabled>Disable selected location</button><div class="muted" style="margin-top:9px">Click a server marker to select its location. Changes are stored by PostgreSQL and discovered by the running pool.</div></div>
@@ -117,11 +130,11 @@ const map=L.map('map',{worldCopyJump:true,minZoom:2}).setView([20,0],2);L.tileLa
 const serverLayer=L.layerGroup().addTo(map),clientLayer=L.layerGroup().addTo(map),serverMarkers=new Map(),clientMarkers=new Map();let selectedPoint=null,selectedLocation=null,lastData=null,refreshHz=4;
 const request=async(path,options={})=>{const response=await fetch(path,{cache:'no-store',...options});const body=await response.json();if(!response.ok)throw new Error(body.error||response.statusText);return body};
 const post=(path,body={})=>request(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-function render(data){lastData=data;document.getElementById('summary').textContent=`${data.gateways.length} gateways · ${data.connected_clients}/${data.total_clients} clients connected · ${data.dummy_threads} dummy threads · ${data.backends.length} locations · ${data.hot_spares} spares · ${data.not_ready_pods} not ready · ${data.unknown_pods} unknown`;const visibleServers=new Set(),visibleClients=new Set();
+function render(data){lastData=data;document.getElementById('summary').textContent=`${data.gateways.length} gateways · ${data.connected_clients}/${data.total_clients} clients connected · ${data.dummy_threads} dummy threads · ${data.backends.length} locations · ${data.reserve_ready} reserve ready · ${data.reserve_pending} reserve pending · ${data.not_ready_pods} not ready · ${data.unknown_pods} unknown`;const visibleServers=new Set(),visibleClients=new Set();
  if(document.getElementById('showServers').checked)for(const server of data.backends){if(!server.latitude&&server.latitude!==0)continue;visibleServers.add(server.server);let marker=serverMarkers.get(server.server);if(!marker){marker=L.circleMarker([server.latitude,server.longitude],{radius:10,color:'#3fb950',weight:3,fillColor:'#0d1117',fillOpacity:1}).addTo(serverLayer);marker.bindTooltip('',{permanent:true,direction:'top',className:'server-label'});marker.bindPopup('');marker.on('click',()=>selectLocation(marker.serverData));serverMarkers.set(server.server,marker)}marker.serverData=server;marker.setLatLng([server.latitude,server.longitude]);marker.getTooltip().setContent(`Location ${server.location_id}`);marker.getPopup().setContent(`<b>Location ${server.location_id}</b><br>${server.server}<br>${server.instance}<br>${server.node}<br>${server.current} clients`)}for(const [key,marker] of serverMarkers)if(!visibleServers.has(key)){marker.remove();serverMarkers.delete(key)}
  if(document.getElementById('showClients').checked)for(const client of data.sessions){if(client.latitude==null||client.longitude==null)continue;const key=`${client.gateway}:${client.id||client.src}`;visibleClients.add(key);let marker=clientMarkers.get(key);if(!marker){const icon=L.divIcon({className:'client-pin-wrap',html:'<div class="client-pin"></div>',iconSize:[18,25],iconAnchor:[9,25]});marker=L.marker([client.latitude,client.longitude],{icon}).addTo(clientLayer);marker.bindTooltip('');marker.bindPopup('');clientMarkers.set(key,marker)}marker.setLatLng([client.latitude,client.longitude]);marker.getTooltip().setContent(client.client_uid||client.src);marker.getPopup().setContent(`<b>${client.client_uid||'Client'}</b><br>Status: ${client.status}<br>Gateway: ${client.gateway}<br>Location: ${client.location_id}<br>Server: ${client.server}`)}for(const [key,marker] of clientMarkers)if(!visibleClients.has(key)){marker.remove();clientMarkers.delete(key)}
  const gateways=document.getElementById('gateways');gateways.replaceChildren();if(document.getElementById('showGateways').checked)for(const item of data.gateway_instances){const node=document.createElement('div');node.className=`node gateway ${item.status}`;node.textContent=item.name;node.title=`${item.status.replace('_',' ')} · ${item.node}`;gateways.appendChild(node)}
- const spares=document.getElementById('spares');spares.replaceChildren();if(document.getElementById('showSpares').checked)for(const item of data.server_instances.filter(x=>x.role==='spare'||x.status!=='ready')){const node=document.createElement('div');node.className=`node spare ${item.status}`;node.textContent=item.name;node.title=`${item.role} · ${item.status.replace('_',' ')} · ${item.node}`;spares.appendChild(node)}}
+ const spares=document.getElementById('spares');spares.replaceChildren();if(document.getElementById('showSpares').checked)for(const item of [...data.capacity_reservations,...data.server_instances.filter(x=>x.role==='spare'||x.status!=='ready')]){const node=document.createElement('div');node.className=`node spare ${item.status}`;node.textContent=item.name;node.title=`${item.role||'capacity reserve'} · ${item.status.replace('_',' ')} · ${item.node||'pending'}`;spares.appendChild(node)}}
 function selectLocation(server){selectedLocation=server;selectedPoint=[server.latitude,server.longitude];document.getElementById('selection').textContent=`Location ${server.location_id} · ${server.latitude.toFixed(5)}, ${server.longitude.toFixed(5)}`;document.getElementById('createSelected').disabled=false;document.getElementById('deleteLocation').disabled=false}
 map.on('click',event=>{const point=event.latlng.wrap();selectedPoint=[point.lat,point.lng];selectedLocation=null;document.getElementById('selection').textContent=`${point.lat.toFixed(5)}, ${point.lng.toFixed(5)}`;document.getElementById('createSelected').disabled=false;document.getElementById('deleteLocation').disabled=true});
 async function refresh(){try{render(await request('/api/connections'));document.getElementById('error').textContent=''}catch(error){document.getElementById('error').textContent=error.message}}
@@ -197,6 +210,38 @@ def list_server_pods(node_statuses: dict[str, str]) -> list[dict[str, str]]:
     return [application_pod(item, node_statuses) for item in json.loads(raw).get("items", [])]
 
 
+def list_capacity_reservations() -> list[dict[str, str]]:
+    raw = run(
+        "kubectl", "get", "pods", "-n", NAMESPACE, "-l", "app=capacity-reserve",
+        "-o", "json",
+    )
+    reservations = []
+    for item in json.loads(raw).get("items", []):
+        metadata = item.get("metadata", {})
+        spec = item.get("spec", {})
+        status = item.get("status", {})
+        ready = any(
+            condition.get("type") == "Ready" and condition.get("status") == "True"
+            for condition in status.get("conditions", [])
+        )
+        phase = status.get("phase", "Unknown")
+        if metadata.get("deletionTimestamp"):
+            health = "not_ready"
+        elif phase == "Pending":
+            health = "pending"
+        elif phase == "Running" and ready:
+            health = "ready"
+        else:
+            health = "unknown"
+        reservations.append({
+            "name": metadata.get("name", "unknown"),
+            "node": spec.get("nodeName", ""),
+            "status": health,
+            "role": "capacity reserve",
+        })
+    return sorted(reservations, key=lambda item: item["name"])
+
+
 def list_data_services() -> list[dict]:
     raw = run(
         "kubectl", "get", "pods", "-n", NAMESPACE,
@@ -258,6 +303,108 @@ def postgres_query(sql: str) -> str:
     ).strip()
 
 
+def enabled_location_count() -> int:
+    return int(postgres_query("SELECT COUNT(*) FROM tcp_server_state WHERE enabled"))
+
+
+def deployment_server_replicas() -> int:
+    raw = run(
+        "kubectl", "get", "deployment/tcp-server", "-n", NAMESPACE,
+        "-o", "json",
+    )
+    return int(json.loads(raw).get("spec", {}).get("replicas", 0))
+
+
+def scale_server_replicas(replicas: int) -> None:
+    if replicas < 0:
+        raise ValueError("server replica count cannot be negative")
+    run(
+        "kubectl", "scale", "deployment/tcp-server", "-n", NAMESPACE,
+        f"--replicas={replicas}",
+    )
+
+
+def wait_for_server_replicas(replicas: int, timeout: float = 90) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        raw = run(
+            "kubectl", "get", "deployment/tcp-server", "-n", NAMESPACE,
+            "-o", "json",
+        )
+        status = json.loads(raw).get("status", {})
+        if int(status.get("availableReplicas", 0)) >= replicas:
+            return
+        time.sleep(0.5)
+    raise RuntimeError(f"timed out waiting for {replicas} available server pods")
+
+
+def reconcile_server_capacity(wait: bool = False) -> dict:
+    with CAPACITY_LOCK:
+        try:
+            desired = enabled_location_count()
+            current = deployment_server_replicas()
+            if current != desired:
+                scale_server_replicas(desired)
+                current = desired
+            if wait:
+                wait_for_server_replicas(desired)
+            CAPACITY_STATE.update({
+                "desired_servers": desired,
+                "deployment_servers": current,
+                "status": "ready",
+                "error": "",
+            })
+        except Exception as error:
+            CAPACITY_STATE.update({"status": "error", "error": str(error)})
+            raise
+        return dict(CAPACITY_STATE)
+
+
+def capacity_reconcile_loop(stop: threading.Event) -> None:
+    while not stop.is_set():
+        try:
+            reconcile_server_capacity()
+        except Exception:
+            pass
+        stop.wait(2)
+
+
+def create_location(arguments: str) -> dict:
+    with CAPACITY_LOCK:
+        current_locations = enabled_location_count()
+        target = current_locations + 1
+        scale_server_replicas(target)
+        try:
+            wait_for_server_replicas(target)
+            result = postgres_query(
+                f"SELECT row_to_json(location) FROM tcp_create_location({arguments}) AS location"
+            )
+        except Exception:
+            scale_server_replicas(current_locations)
+            raise
+        CAPACITY_STATE.update({
+            "desired_servers": target,
+            "deployment_servers": target,
+            "status": "ready",
+            "error": "",
+        })
+        return json.loads(result)
+
+
+def delete_location(location_id: int) -> bool:
+    with CAPACITY_LOCK:
+        deleted = postgres_query(f"SELECT tcp_delete_location({location_id})") == "t"
+        desired = enabled_location_count()
+        scale_server_replicas(desired)
+        CAPACITY_STATE.update({
+            "desired_servers": desired,
+            "deployment_servers": desired,
+            "status": "ready",
+            "error": "",
+        })
+        return deleted
+
+
 def inspect_pod(pod: dict) -> dict:
     pod = dict(pod)
     pod.update(clients=0, backend_sessions=0, total_accepted=0, backends=[], sessions=[], error="")
@@ -301,6 +448,7 @@ def snapshot() -> dict:
     gateway_instances = list_pods(node_statuses)
     pods = [pod for pod in gateway_instances if pod["status"] == "ready"]
     server_pods = list_server_pods(node_statuses)
+    capacity_reservations = list_capacity_reservations()
     server_pods_by_ip = {pod["ip"]: pod for pod in server_pods if pod["ip"]}
     data_services = list_data_services()
     with ThreadPoolExecutor(max_workers=max(1, len(pods))) as pool:
@@ -352,6 +500,10 @@ def snapshot() -> dict:
         "total_backends": sum(p["backend_sessions"] for p in gateways),
         "server_pods": sum(instance["status"] == "ready" for instance in server_instances),
         "hot_spares": sum(instance["role"] == "spare" and instance["status"] == "ready" for instance in server_instances),
+        "reserve_ready": sum(item["status"] == "ready" for item in capacity_reservations),
+        "reserve_pending": sum(item["status"] == "pending" for item in capacity_reservations),
+        "capacity_reservations": capacity_reservations,
+        "capacity": dict(CAPACITY_STATE),
         "not_ready_pods": sum(instance["status"] == "not_ready" for instance in application_instances),
         "unknown_pods": sum(instance["status"] == "unknown" for instance in application_instances),
         "server_instances": server_instances,
@@ -407,15 +559,12 @@ class Handler(BaseHTTPRequestHandler):
                     arguments = f"{latitude:.8f}, {longitude:.8f}"
                 else:
                     arguments = ""
-                result = postgres_query(
-                    f"SELECT row_to_json(location) FROM tcp_create_location({arguments}) AS location"
-                )
-                self.send_json(json.loads(result))
+                self.send_json(create_location(arguments))
             elif path == "/api/locations/delete":
                 location_id = int(payload["location_id"])
                 if location_id < 1:
                     raise ValueError("location ID must be positive")
-                deleted = postgres_query(f"SELECT tcp_delete_location({location_id})") == "t"
+                deleted = delete_location(location_id)
                 self.send_json({"location_id": location_id, "deleted": deleted})
             else:
                 self.send_json({"error": "not found"}, 404)
@@ -444,9 +593,25 @@ def main() -> int:
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--gateway-host", default="127.0.0.1")
     parser.add_argument("--gateway-port", type=int, default=9000)
+    parser.add_argument("--reconcile-only", action="store_true")
     args = parser.parse_args()
+    if args.reconcile_only:
+        print(json.dumps(reconcile_server_capacity(wait=True)))
+        return 0
     global BOT_MANAGER
     BOT_MANAGER = BotManager(args.gateway_host, args.gateway_port)
+    try:
+        reconcile_server_capacity()
+    except Exception:
+        pass
+    capacity_stop = threading.Event()
+    capacity_thread = threading.Thread(
+        target=capacity_reconcile_loop,
+        args=(capacity_stop,),
+        name="server-capacity-reconciler",
+        daemon=True,
+    )
+    capacity_thread.start()
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     print(f"Dashboard: http://{args.host}:{args.port}")
     print("Press Ctrl+C to stop.")
@@ -456,6 +621,8 @@ def main() -> int:
         pass
     finally:
         server.server_close()
+        capacity_stop.set()
+        capacity_thread.join(timeout=3)
         BOT_MANAGER.despawn_all()
     return 0
 

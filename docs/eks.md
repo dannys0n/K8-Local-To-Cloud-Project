@@ -39,9 +39,12 @@ gateway's local health endpoint for faster in-cluster readiness and liveness
 detection. Neither health mechanism changes server ownership.
 
 All worker nodes are general capacity. Zone and hostname spreading use a maximum
-skew of one and honor failed-node taints. Warm replicas spread during normal
-operation and replacement pods may consolidate across the remaining eligible
-workers after a failure.
+skew of one and honor failed-node taints. Gateway and server pods have higher
+priority than ten server-sized capacity reservations. Replacements can preempt
+those placeholders on surviving nodes; displaced Pending reservations provide a
+standard scheduling signal to EKS Auto Mode, Karpenter, or Cluster Autoscaler.
+Configure one of those node autoscalers outside this repository and size the
+reservation requests to the failure headroom required by the selected instances.
 
 The workload startup probes protect up to 90 seconds of initialization before
 liveness checks can restart a container. The zero-second `NotReady` and

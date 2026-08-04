@@ -14,9 +14,12 @@ adding a coordinator or operator.
 
 - **Gateway:** four generic Go replicas that preserve the client connection
   while switching downstream location servers at runtime.
-- **TCP server:** ten interchangeable Deployment replicas: five active location
-  owners and five ready hot spares. Each active process runs a 20 Hz
-  authoritative simulation clock and includes its current tick in responses.
+- **TCP server:** one interchangeable Deployment replica per enabled location.
+  Each active process runs a 20 Hz authoritative simulation clock and includes
+  its current tick in responses.
+- **Capacity reserve:** ten low-priority, server-sized placeholder pods. Critical
+  gateway and server replacements preempt them; Pending placeholders then signal
+  an EKS node autoscaler to replenish compute capacity.
 - **PostgreSQL:** authoritative location identity, counters, leases, and ownership
   generations; one PVC on the dedicated kind database worker.
 - **Redis:** ephemeral server presence and 10 Hz entity visibility on a
@@ -85,6 +88,12 @@ callers. Location IDs are permanent identities, not list indexes: they are never
 renumbered, compacted, or reused. Deletion can therefore leave gaps, and sequence
 values can also be skipped by rolled-back creation attempts.
 
+The local infrastructure dashboard is the only location control surface. It
+automatically maintains one server Deployment replica per enabled location:
+creation first makes capacity Ready and then commits the location, while deletion
+disables the location before scaling down. The kind startup scripts run the same
+idempotent reconciliation once so persisted location counts survive re-apply.
+
 `tools/client.py` asks the operating system for a free local port, prints the
 resulting URL, and opens it in the default browser. It keeps a stable client UID
 and unacknowledged counter operations in browser local storage. Map clicks are
@@ -148,7 +157,7 @@ PostgreSQL, while the browser retries any unacknowledged counter operation with
 the same operation ID.
 The logical server identity, durable counter, and last entity claim remain in
 PostgreSQL when a pod is replaced. Movement after that claim remains transient.
-An expired 1.5-second lease is claimed by an already-running spare;
+An expired 1.5-second lease is claimed by the replacement server pod;
 the generation increases to fence the old owner. Redis presence keys expire and
 repopulate automatically. Generic test messages remain at-least-once, while
 counter increments have exactly-once database effects. Without a location handshake, port 9000 remains the
@@ -224,7 +233,7 @@ kubectl get pods,svc,pvc,pdb -n tcp-lab -o wide
 kubectl logs -n tcp-lab deployment/gateway
 kubectl logs -n tcp-lab deployment/tcp-server
 kubectl scale deployment/gateway -n tcp-lab --replicas=4
-kubectl scale deployment/tcp-server -n tcp-lab --replicas=10
+kubectl get deployment/capacity-reserve -n tcp-lab
 ```
 
 See:
@@ -250,10 +259,12 @@ outside the worker pool.
 Changing the dedicated kind database worker requires recreating the cluster;
 the startup scripts reject an in-place move that would strand the local PVC.
 
-Kubernetes restores failed pods and nodes, but location recovery does not wait
-for node eviction. Ready spare pods poll PostgreSQL-backed leases every 250ms;
-after a 1.5-second lease expires, one spare atomically claims the location and
-increments its fencing generation. These lab defaults are configurable through
+Kubernetes restores failed pods and nodes. Server and gateway pods use a higher
+PriorityClass than the disposable capacity reservations, so replacements can
+preempt reserved slots on surviving workers. The server Deployment continuously
+maintains one replica per enabled PostgreSQL location; after a 1.5-second lease
+expires, a replacement atomically claims the location and increments its fencing
+generation. These lab defaults are configurable through
 `ASSIGNMENT_LEASE_DURATION` and `ASSIGNMENT_RENEW_INTERVAL`; production values
 must be validated against database and network latency. The replacement
 application remains responsible for resumable sessions and application-specific
@@ -271,10 +282,11 @@ Gateway health is independent from server ownership. Kubernetes readiness and
 liveness checks remove or restart an unhealthy gateway, and the EKS NLB checks
 gateway targets directly. Gateways discover every active location owner and do
 not claim, rebalance, or exclusively own servers. Hard hostname spreading keeps
-the ten server pods and four gateways distributed across kind's four general
+the location servers and four gateways distributed across kind's four general
 workers; spread counts the current rollout revision, and failed-node taints are
-honored so replacement pods can consolidate on survivors. The five ready server
-spares provide immediate location handoff, while Kubernetes promptly creates
-replacement pods to replenish that pool.
+honored so replacement pods can consolidate on survivors. Ten low-priority,
+server-sized reservations provide preemptible headroom. In EKS, reservations
+left Pending after preemption signal the node autoscaler to restore that
+headroom; node launch is replenishment rather than immediate failover.
 Kubernetes does not automatically rebalance healthy pods when repaired workers
 return; the failure drill documents the explicit rolling rebalance command.

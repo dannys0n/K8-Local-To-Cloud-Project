@@ -4,7 +4,7 @@ $Cluster = "tcp-lab"
 $ServerImage = "simple-tcp-server:dev"
 $GatewayImage = "tcp-gateway:dev"
 
-foreach ($Command in @("docker", "kind", "kubectl")) {
+foreach ($Command in @("docker", "kind", "kubectl", "python")) {
     if (-not (Get-Command $Command -ErrorAction SilentlyContinue)) {
         throw "Required command not found: $Command"
     }
@@ -45,6 +45,10 @@ try {
 
     Write-Host "Applying Kubernetes resources..."
     kubectl apply -k deploy/overlays/kind
+    kubectl rollout status statefulset/postgres -n tcp-lab --timeout=180s
+    kubectl rollout status deployment/tcp-server -n tcp-lab --timeout=180s
+    python tools/dashboard.py --reconcile-only
+    if ($LASTEXITCODE -ne 0) { throw "Server capacity reconciliation failed." }
     kubectl rollout restart deployment/tcp-server -n tcp-lab
     kubectl rollout restart deployment/gateway -n tcp-lab
 

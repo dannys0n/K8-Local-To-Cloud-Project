@@ -5,7 +5,7 @@ CLUSTER="tcp-lab"
 SERVER_IMAGE="simple-tcp-server:dev"
 GATEWAY_IMAGE="tcp-gateway:dev"
 
-for command in docker kind kubectl; do
+for command in docker kind kubectl python3; do
   command -v "$command" >/dev/null 2>&1 || { echo "Required command not found: $command" >&2; exit 1; }
 done
 
@@ -38,6 +38,9 @@ kind load docker-image "$SERVER_IMAGE" "$GATEWAY_IMAGE" --name "$CLUSTER"
 
 echo "Applying Kubernetes resources..."
 kubectl apply -k deploy/overlays/kind
+kubectl rollout status statefulset/postgres -n tcp-lab --timeout=180s
+kubectl rollout status deployment/tcp-server -n tcp-lab --timeout=180s
+python3 tools/dashboard.py --reconcile-only
 kubectl rollout restart deployment/tcp-server -n tcp-lab
 kubectl rollout restart deployment/gateway -n tcp-lab
 kubectl rollout status deployment/tcp-server -n tcp-lab --timeout=180s

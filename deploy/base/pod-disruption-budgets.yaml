@@ -15,7 +15,7 @@ metadata:
   name: tcp-server
   namespace: tcp-lab
 spec:
-  minAvailable: 9
+  maxUnavailable: 1
   selector:
     matchLabels:
       app: tcp-server

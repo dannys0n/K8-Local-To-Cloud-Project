@@ -12,16 +12,16 @@ Open `http://127.0.0.1:8080`. The page discovers all gateway pods, combines
 their current counters, routes, and active sessions from each gateway's
 read-only statistics endpoint. Backend rows are one per logical location and show the
 currently assigned physical server pod and worker node, while the summary shows
-available hot spares. `Logical server` is the durable location identity such as
+ready and Pending capacity reservations. `Logical server` is the durable location identity such as
 `tcp-server-1`; `Active instance` is the replaceable Kubernetes pod currently
 holding that identity. It uses the current `kubectl` context and binds only
 to local loopback by default. It reads pod endpoints through the Kubernetes API;
 the per-replica statistics Service is not exposed publicly on EKS.
 
 Application pod inventory retains failed and terminating API objects for
-diagnostics but excludes them from ready gateway, server-pool, and hot-spare
-counts. Separate counters report `NotReady` and `Unknown` pods. Map infrastructure
-nodes use red for `NotReady`, gray for `Unknown`, yellow for ready spares, and the
+diagnostics but excludes them from ready gateway and server-pool counts. Separate
+counters report `NotReady` and `Unknown` pods. Map infrastructure
+nodes use red for `NotReady`, gray for `Unknown`, yellow for capacity reservations, and the
 normal gateway/active styling for ready pods. Health combines the pod readiness
 condition with the assigned node's Kubernetes `Ready` condition.
 
@@ -38,7 +38,7 @@ collection takes longer than the selected period, the next refresh waits rather
 than overlapping or queuing stale snapshots.
 
 Use the `Interactive map` tab, or open `http://127.0.0.1:8080/map`, to see
-active geographic locations, client positions, gateways, and spare server pods.
+active geographic locations, client positions, gateways, and capacity reservations.
 The layer switches only affect visualization. The map also provides explicit
 debug controls to spawn/despawn local dummy-client batches, create a randomly
 positioned location, create a location at a clicked coordinate, or disable a
@@ -46,9 +46,16 @@ selected location. Location controls call the PostgreSQL lifecycle functions
 through the dashboard process and its current `kubectl` context; they are not
 served by the public gateway or exposed through the EKS load balancer.
 
+The dashboard is also the location-capacity reconciler. It maintains one server
+Deployment replica per enabled PostgreSQL location every two seconds. Creation
+scales up and waits for a Ready server before committing the location; deletion
+disables the location before scaling down. `scripts/up.ps1` and `scripts/up.sh`
+run the same idempotent reconciliation once during kind startup. Gateway replicas
+and worker counts are deliberately outside this application-level calculation.
+
 While the dashboard is running, the local map client can enable `Show proxies`
-and `Show hot swaps`. Proxies appear in a screen-space row below the map, hot
-spare server pods appear above it, and the selected gateway is connected to the
+and `Show reserve capacity`. Proxies appear in a screen-space row below the map,
+capacity reservations appear above it, and the selected gateway is connected to the
 client marker. These optional layers read the dashboard's localhost-only JSON;
 the gateway and server protocols do not expose Kubernetes inventory.
 

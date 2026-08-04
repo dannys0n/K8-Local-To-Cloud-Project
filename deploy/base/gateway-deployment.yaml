@@ -17,6 +17,7 @@ spec:
       labels:
         app: gateway
     spec:
+      priorityClassName: tcp-lab-critical
       terminationGracePeriodSeconds: 10
       tolerations:
         - key: node.kubernetes.io/not-ready

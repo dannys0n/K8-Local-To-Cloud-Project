@@ -19,7 +19,7 @@ replacement.
 
 ```bash
 kubectl scale deployment/gateway -n tcp-lab --replicas=4
-kubectl scale deployment/tcp-server -n tcp-lab --replicas=10
+kubectl get deployment/tcp-server deployment/capacity-reserve -n tcp-lab
 kubectl get pods -n tcp-lab -w
 ```
 
@@ -40,7 +40,7 @@ Every gateway discovers server endpoints through the headless Service DNS.
    replacement, and the new server restores the durable counter and last claim
    coordinate from PostgreSQL.
    Any unacknowledged counter operation retries with the same operation ID.
-6. Confirm an existing spare owns `tcp-server-1`, the generation increased, and
+6. Confirm the replacement pod owns `tcp-server-1`, the generation increased, and
    the PostgreSQL `client_state` counter continues from its previous value.
 
 The server-side TCP socket cannot survive a pod failure, but the client-to-gateway
@@ -79,11 +79,12 @@ For an abrupt hardware-style failure, use `docker kill` instead of draining the
 node. Fresh kind clusters use one-second kubelet status updates and a five-second
 controller grace period. Application pods have zero additional tolerance for
 `NotReady` or `Unreachable`, so replacement begins as soon as the failed-node
-taint is applied. The controller permits ten failed-node evictions per second,
+taint is applied. Critical replacement pods can preempt low-priority capacity
+reservations on surviving nodes. The controller permits ten failed-node evictions per second,
 including the small-cluster unhealthy-zone path, so simultaneous worker losses
-are not serialized by Kubernetes' conservative default rate. That slower loop
-replenishes the five-pod spare pool; it is not the location failover
-mechanism. EKS node repair remains a background capacity mechanism.
+are not serialized by Kubernetes' conservative default rate. In EKS, displaced
+reservation pods remain Pending until the node autoscaler replenishes capacity;
+kind intentionally has no native node provisioner.
 
 Server and gateway startup probes allow up to 90 seconds for initialization and
 prevent readiness or liveness checks from running until startup succeeds. This
