@@ -102,6 +102,11 @@ callers. Location IDs are permanent identities, not list indexes: they are never
 renumbered, compacted, or reused. Deletion can therefore leave gaps, and sequence
 values can also be skipped by rolled-back creation attempts.
 
+When the dashboard creates more enabled locations
+than the current `tcp-server` replica count, it scales that Deployment to the
+enabled-location count. Existing spare pods are used first; location deletion
+does not automatically scale the Deployment down.
+
 `tools/client.py` asks the operating system for a free local port, prints the
 resulting URL, and opens it in the default browser. It keeps a stable client UID
 and unacknowledged counter operations in browser local storage. Map clicks are

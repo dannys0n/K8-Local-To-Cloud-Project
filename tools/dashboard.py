@@ -258,6 +258,19 @@ def postgres_query(sql: str) -> str:
     ).strip()
 
 
+def ensure_server_replicas() -> None:
+    enabled = int(postgres_query("SELECT COUNT(*) FROM tcp_server_state WHERE enabled"))
+    deployment = json.loads(run(
+        "kubectl", "get", "deployment", "tcp-server", "-n", NAMESPACE, "-o", "json",
+    ))
+    replicas = int(deployment.get("spec", {}).get("replicas", 0))
+    if enabled > replicas:
+        run(
+            "kubectl", "scale", "deployment", "tcp-server", "-n", NAMESPACE,
+            f"--replicas={enabled}",
+        )
+
+
 def inspect_pod(pod: dict) -> dict:
     pod = dict(pod)
     pod.update(clients=0, backend_sessions=0, total_accepted=0, backends=[], sessions=[], error="")
@@ -410,6 +423,7 @@ class Handler(BaseHTTPRequestHandler):
                 result = postgres_query(
                     f"SELECT row_to_json(location) FROM tcp_create_location({arguments}) AS location"
                 )
+                ensure_server_replicas()
                 self.send_json(json.loads(result))
             elif path == "/api/locations/delete":
                 location_id = int(payload["location_id"])
