@@ -4,6 +4,8 @@
 import argparse
 import json
 import subprocess
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -21,6 +23,9 @@ DATA_SERVICES = {
     "postgres": ("PostgreSQL", "postgres:5432"),
     "redis": ("Redis", "redis:6379"),
 }
+INFRASTRUCTURE_REFRESH_SECONDS = 2
+INFRASTRUCTURE_CACHE = {"data": None, "error": ""}
+INFRASTRUCTURE_LOCK = threading.Lock()
 
 
 PAGE = r"""<!doctype html>
@@ -309,13 +314,46 @@ def inspect_pod(pod: dict) -> dict:
     return pod
 
 
-def snapshot() -> dict:
+def collect_infrastructure() -> dict:
     node_statuses = list_node_statuses()
-    gateway_instances = list_pods(node_statuses)
+    return {
+        "gateway_instances": list_pods(node_statuses),
+        "server_pods": list_server_pods(node_statuses),
+        "data_services": list_data_services(),
+    }
+
+
+def refresh_infrastructure() -> None:
+    while True:
+        try:
+            data = collect_infrastructure()
+            with INFRASTRUCTURE_LOCK:
+                INFRASTRUCTURE_CACHE.update(data=data, error="")
+        except Exception as error:
+            with INFRASTRUCTURE_LOCK:
+                INFRASTRUCTURE_CACHE["error"] = str(error)
+        time.sleep(INFRASTRUCTURE_REFRESH_SECONDS)
+
+
+def cached_infrastructure() -> tuple[dict, str]:
+    with INFRASTRUCTURE_LOCK:
+        data = INFRASTRUCTURE_CACHE["data"]
+        error = INFRASTRUCTURE_CACHE["error"]
+    if data is None:
+        data = collect_infrastructure()
+        with INFRASTRUCTURE_LOCK:
+            INFRASTRUCTURE_CACHE.update(data=data, error="")
+        error = ""
+    return data, error
+
+
+def snapshot() -> dict:
+    infrastructure, infrastructure_error = cached_infrastructure()
+    gateway_instances = infrastructure["gateway_instances"]
     pods = [pod for pod in gateway_instances if pod["status"] == "ready"]
-    server_pods = list_server_pods(node_statuses)
+    server_pods = infrastructure["server_pods"]
     server_pods_by_ip = {pod["ip"]: pod for pod in server_pods if pod["ip"]}
-    data_services = list_data_services()
+    data_services = infrastructure["data_services"]
     with ThreadPoolExecutor(max_workers=max(1, len(pods))) as pool:
         gateways = list(pool.map(inspect_pod, pods))
     unique_backends = {}
@@ -371,7 +409,10 @@ def snapshot() -> dict:
         "data_services": data_services,
         "sessions": [session for p in gateways for session in p["sessions"]],
         "backends": backends,
-        "errors": [f'{p["name"]}: {p["error"]}' for p in gateways if p["error"]],
+        "errors": (
+            ([f"Kubernetes: {infrastructure_error}"] if infrastructure_error else [])
+            + [f'{p["name"]}: {p["error"]}' for p in gateways if p["error"]]
+        ),
     }
 
 
@@ -461,6 +502,7 @@ def main() -> int:
     args = parser.parse_args()
     global BOT_MANAGER
     BOT_MANAGER = BotManager(args.gateway_host, args.gateway_port)
+    threading.Thread(target=refresh_infrastructure, name="infrastructure-cache", daemon=True).start()
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     print(f"Dashboard: http://{args.host}:{args.port}")
     print("Press Ctrl+C to stop.")

@@ -135,6 +135,11 @@ reports ready, gateway-only, and disconnected bots separately instead of treatin
 every allocated bot process as connected. Each dummy runs in its own spawned
 Python process rather than sharing the dashboard interpreter.
 
+The dashboard polls live gateway session positions at the selected map rate.
+Kubernetes pod, node, placement, and data-service state is cached separately
+and refreshed every two seconds so fast map updates do not repeatedly collect
+slow-moving infrastructure data.
+
 The internal `@location` handshake remains available to smoke checks. Browser
 clients use `@teleport CLIENT_UID SEQUENCE LATITUDE LONGITUDE` and
 `@increment CLIENT_UID OPERATION_ID`; `@locations`
