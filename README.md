@@ -119,9 +119,12 @@ additional independent client; every process receives its own available port.
 Use `--listen-port 8082` only when a fixed port is useful.
 
 The infrastructure dashboard map can spawn dummy clients in batches of up to
-500; the client window cannot create or remove test load. Every bot
+500; the client window cannot create or remove test load. The dashboard only
+manages their lifecycle and reports status. Each autonomous headless client owns
+its reconnect, movement, and durable-input behavior. Every headless client
 uses its own gateway TCP connection, chooses a random normalized movement
-direction every three seconds, sends movement heartbeats at 20 Hz, and performs
+direction every three seconds, sends movement intents at the same maximum 40 Hz
+cadence as a moving browser client, and performs
 one idempotent durable counter increment per second. Batches can be despawned
 individually or together. Their cyan pins become stale after one second without
 an observation and disappear after five seconds; abandoned in-memory server
@@ -129,7 +132,8 @@ entities are removed after 30 seconds.
 When routing is unavailable, bots pause application commands and retry their
 existing reconnect/resume path with 0.75–1.25 seconds of per-bot jitter. The UI
 reports ready, gateway-only, and disconnected bots separately instead of treating
-every allocated bot thread as connected.
+every allocated bot process as connected. Each dummy runs in its own spawned
+Python process rather than sharing the dashboard interpreter.
 
 The internal `@location` handshake remains available to smoke checks. Browser
 clients use `@teleport CLIENT_UID SEQUENCE LATITUDE LONGITUDE` and

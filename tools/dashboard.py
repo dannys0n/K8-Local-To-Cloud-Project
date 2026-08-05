@@ -57,7 +57,7 @@ PAGE = r"""<!doctype html>
     <div class="card">Gateway replicas<div class="value" id="gateways">–</div></div>
     <div class="card">Total clients<div class="value" id="clients">–</div></div>
     <div class="card">Connected clients<div class="value" id="connectedClients">–</div></div>
-    <div class="card">Dummy threads<div class="value" id="dummyThreads">–</div></div>
+    <div class="card">Dummy processes<div class="value" id="dummyProcesses">–</div></div>
     <div class="card">Backend sessions<div class="value" id="backends">–</div></div>
     <div class="card">Server pool<div class="value" id="pool">–</div></div>
     <div class="card">Hot spares<div class="value" id="spares">–</div></div>
@@ -78,7 +78,7 @@ async function refresh(){
     document.getElementById('gateways').textContent=data.gateways.length;
     document.getElementById('clients').textContent=data.total_clients;
     document.getElementById('connectedClients').textContent=data.connected_clients;
-    document.getElementById('dummyThreads').textContent=data.dummy_threads;
+    document.getElementById('dummyProcesses').textContent=data.dummy_processes;
     document.getElementById('backends').textContent=data.total_backends;
     document.getElementById('pool').textContent=data.server_pods;
     document.getElementById('spares').textContent=data.hot_spares;
@@ -117,7 +117,7 @@ const map=L.map('map',{worldCopyJump:true,minZoom:2}).setView([20,0],2);L.tileLa
 const serverLayer=L.layerGroup().addTo(map),clientLayer=L.layerGroup().addTo(map),serverMarkers=new Map(),clientMarkers=new Map();let selectedPoint=null,selectedLocation=null,lastData=null,refreshHz=4;
 const request=async(path,options={})=>{const response=await fetch(path,{cache:'no-store',...options});const body=await response.json();if(!response.ok)throw new Error(body.error||response.statusText);return body};
 const post=(path,body={})=>request(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-function render(data){lastData=data;document.getElementById('summary').textContent=`${data.gateways.length} gateways · ${data.connected_clients}/${data.total_clients} clients connected · ${data.dummy_threads} dummy threads · ${data.backends.length} locations · ${data.hot_spares} spares · ${data.not_ready_pods} not ready · ${data.unknown_pods} unknown`;const visibleServers=new Set(),visibleClients=new Set();
+function render(data){lastData=data;document.getElementById('summary').textContent=`${data.gateways.length} gateways · ${data.connected_clients}/${data.total_clients} clients connected · ${data.dummy_processes} dummy processes · ${data.backends.length} locations · ${data.hot_spares} spares · ${data.not_ready_pods} not ready · ${data.unknown_pods} unknown`;const visibleServers=new Set(),visibleClients=new Set();
  if(document.getElementById('showServers').checked)for(const server of data.backends){if(!server.latitude&&server.latitude!==0)continue;visibleServers.add(server.server);let marker=serverMarkers.get(server.server);if(!marker){marker=L.circleMarker([server.latitude,server.longitude],{radius:10,color:'#3fb950',weight:3,fillColor:'#0d1117',fillOpacity:1}).addTo(serverLayer);marker.bindTooltip('',{permanent:true,direction:'top',className:'server-label'});marker.bindPopup('');marker.on('click',()=>selectLocation(marker.serverData));serverMarkers.set(server.server,marker)}marker.serverData=server;marker.setLatLng([server.latitude,server.longitude]);marker.getTooltip().setContent(`Location ${server.location_id}`);marker.getPopup().setContent(`<b>Location ${server.location_id}</b><br>${server.server}<br>${server.instance}<br>${server.node}<br>${server.current} clients`)}for(const [key,marker] of serverMarkers)if(!visibleServers.has(key)){marker.remove();serverMarkers.delete(key)}
  if(document.getElementById('showClients').checked)for(const client of data.sessions){if(client.latitude==null||client.longitude==null)continue;const key=`${client.gateway}:${client.id||client.src}`;visibleClients.add(key);let marker=clientMarkers.get(key);if(!marker){const icon=L.divIcon({className:'client-pin-wrap',html:'<div class="client-pin"></div>',iconSize:[18,25],iconAnchor:[9,25]});marker=L.marker([client.latitude,client.longitude],{icon}).addTo(clientLayer);marker.bindTooltip('');marker.bindPopup('');clientMarkers.set(key,marker)}marker.setLatLng([client.latitude,client.longitude]);marker.getTooltip().setContent(client.client_uid||client.src);marker.getPopup().setContent(`<b>${client.client_uid||'Client'}</b><br>Status: ${client.status}<br>Gateway: ${client.gateway}<br>Location: ${client.location_id}<br>Server: ${client.server}`)}for(const [key,marker] of clientMarkers)if(!visibleClients.has(key)){marker.remove();clientMarkers.delete(key)}
  const gateways=document.getElementById('gateways');gateways.replaceChildren();if(document.getElementById('showGateways').checked)for(const item of data.gateway_instances){const node=document.createElement('div');node.className=`node gateway ${item.status}`;node.textContent=item.name;node.title=`${item.status.replace('_',' ')} · ${item.node}`;gateways.appendChild(node)}
@@ -361,7 +361,7 @@ def snapshot() -> dict:
         "gateway_instances": gateway_instances,
         "total_clients": sum(p["clients"] for p in gateways),
         "connected_clients": sum(p["backend_sessions"] for p in gateways),
-        "dummy_threads": bot_state["total"],
+        "dummy_processes": bot_state["total"],
         "total_backends": sum(p["backend_sessions"] for p in gateways),
         "server_pods": sum(instance["status"] == "ready" for instance in server_instances),
         "hot_spares": sum(instance["role"] == "spare" and instance["status"] == "ready" for instance in server_instances),

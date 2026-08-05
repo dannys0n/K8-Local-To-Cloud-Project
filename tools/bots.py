@@ -1,94 +1,53 @@
-"""Dashboard-owned deterministic dummy clients."""
+"""Lifecycle manager for dashboard-created headless clients."""
 
-import math
-import random
-import socket
+import multiprocessing
 import threading
 import time
-import uuid
 
 try:
-    from client import GatewayClient, GatewayResponseError
+    from headless_client import run_headless
 except ModuleNotFoundError:
-    from tools.client import GatewayClient, GatewayResponseError
+    from tools.headless_client import run_headless
 
 
-class Bot:
-    def __init__(self, host: str, port: int):
-        self.uid = f"bot:{uuid.uuid4()}"
-        self.client = GatewayClient(host, port)
-        self.stopped = threading.Event()
-        self.thread = threading.Thread(target=self.run, name=self.uid, daemon=True)
+CONNECTION_NAMES = {0: "disconnected", 1: "gateway", 2: "ready"}
 
-    def start(self):
-        self.thread.start()
 
-    def stop(self):
+class HeadlessProcess:
+    def __init__(self, context, host: str, port: int):
+        self.stopped = context.Event()
+        self.status = context.Value("b", 0)
+        self.process = context.Process(
+            target=run_headless,
+            args=(host, port, self.stopped, self.status),
+            daemon=True,
+        )
+
+    def start(self) -> None:
+        self.process.start()
+
+    def request_stop(self) -> None:
         self.stopped.set()
-        sock = self.client.sock
-        if sock:
-            try:
-                sock.shutdown(socket.SHUT_RDWR)
-            except OSError:
-                pass
 
-    def run(self):
-        sequence = 0
-        axis_x = axis_y = 0.0
-        rng = random.Random(self.uid)
-        next_direction = time.monotonic()
-        next_counter = next_direction + rng.random()
-        next_reconnect = next_direction
-        pending_operation = None
-        try:
-            while not self.stopped.is_set():
-                started = time.monotonic()
-                if self.client.snapshot()["connection"] != "ready":
-                    if started >= next_reconnect:
-                        try:
-                            self.client.reconnect()
-                        except (GatewayResponseError, OSError, ValueError, ConnectionError):
-                            pass
-                        next_reconnect = time.monotonic() + 0.75 + rng.random() * 0.5
-                    self.stopped.wait(0.05)
-                    continue
-                if started >= next_direction:
-                    angle = rng.random() * math.tau
-                    axis_x, axis_y = math.cos(angle), math.sin(angle)
-                    next_direction = started + 3
-                if started >= next_counter:
-                    if pending_operation is None:
-                        pending_operation = f"bot-op:{uuid.uuid4()}"
-                    try:
-                        self.client.increment(self.uid, pending_operation)
-                        pending_operation = None
-                    except (GatewayResponseError, OSError, ValueError, ConnectionError):
-                        pass
-                    next_counter = time.monotonic() + 1
-                if self.client.snapshot()["connection"] != "ready":
-                    continue
-                sequence += 1
-                try:
-                    self.client.send_input(self.uid, sequence, axis_x, axis_y)
-                except (GatewayResponseError, OSError, ValueError, ConnectionError):
-                    pass
-                self.stopped.wait(max(0, 0.05 - (time.monotonic() - started)))
-        finally:
-            self.client.close()
+    def connection_state(self) -> str:
+        if not self.process.is_alive():
+            return "disconnected"
+        return CONNECTION_NAMES.get(self.status.value, "disconnected")
 
 
 class BotManager:
     def __init__(self, host: str, port: int):
         self.host = host
         self.port = port
+        self.context = multiprocessing.get_context("spawn")
         self.lock = threading.Lock()
         self.next_batch = 1
-        self.batches: dict[int, list[Bot]] = {}
+        self.batches: dict[int, list[HeadlessProcess]] = {}
 
     def spawn(self, count: int) -> dict:
         if count < 1 or count > 500:
             raise ValueError("batch size must be between 1 and 500")
-        bots = [Bot(self.host, self.port) for _ in range(count)]
+        bots = [HeadlessProcess(self.context, self.host, self.port) for _ in range(count)]
         with self.lock:
             batch_id = self.next_batch
             self.next_batch += 1
@@ -102,18 +61,28 @@ class BotManager:
             bots = self.batches.pop(batch_id, None)
         if bots is None:
             raise ValueError("batch not found")
-        for bot in bots:
-            bot.stop()
+        self.stop_all(bots)
         return self.snapshot()
 
     def despawn_all(self) -> dict:
         with self.lock:
             batches = list(self.batches.values())
             self.batches.clear()
-        for bots in batches:
-            for bot in bots:
-                bot.stop()
+        self.stop_all([bot for bots in batches for bot in bots])
         return self.snapshot()
+
+    @staticmethod
+    def stop_all(bots: list[HeadlessProcess]) -> None:
+        for bot in bots:
+            bot.request_stop()
+        deadline = time.monotonic() + 1
+        for bot in bots:
+            bot.process.join(timeout=max(0, deadline - time.monotonic()))
+        for bot in bots:
+            if bot.process.is_alive():
+                bot.process.terminate()
+        for bot in bots:
+            bot.process.join(timeout=0.2)
 
     def snapshot(self) -> dict:
         with self.lock:
@@ -121,6 +90,6 @@ class BotManager:
             bots = [bot for batch in self.batches.values() for bot in batch]
         states = {"ready": 0, "gateway": 0, "disconnected": 0}
         for bot in bots:
-            connection = bot.client.snapshot()["connection"]
+            connection = bot.connection_state()
             states[connection if connection in states else "disconnected"] += 1
         return {"total": len(bots), "states": states, "batches": batches}
