@@ -31,10 +31,11 @@ through AWS tooling and then uses the EKS overlay to deploy the same base.
 
 ## What runs
 
-- **Gateway:** four generic Go replicas that preserve the client connection
+- **Gateway:** generic Go replicas, starting from an HPA minimum of one, that preserve the client connection
   while switching downstream location servers at runtime.
-- **TCP server:** a minimum of ten interchangeable Deployment replicas, initially
-  providing five active location owners and five ready hot spares. Each active process runs a 20 Hz
+- **TCP server:** interchangeable Deployment replicas with an autoscaler minimum
+  of one. A fresh database seeds one logical location owned by that initial
+  replica. Each active process runs a 20 Hz
   authoritative simulation clock and includes its current tick in responses.
 - **PostgreSQL:** authoritative location identity, counters, leases, and ownership
   generations; one PVC on the dedicated kind database worker.
@@ -76,7 +77,7 @@ powershell -ExecutionPolicy Bypass -File tools/smoke.ps1
 powershell -ExecutionPolicy Bypass -File tools/client.ps1
 ```
 
-The lab initially creates five numeric locations. On a new database, the server
+The lab initially creates one numeric location. On a new database, the server
 application chooses each location's latitude and longitude once; PostgreSQL then
 preserves the numeric ID and coordinates across pod replacement and cluster
 restarts. Existing databases retain their coordinates during migration.
@@ -128,7 +129,7 @@ merging are intentionally not implemented. A pending location-creation hook
 also blocks another scale request so a transient database outage cannot add a
 new replica every evaluation interval. The Deployment manifest intentionally
 omits `spec.replicas`; the autoscaler owns that field and enforces a minimum of
-ten, preventing later Kustomize applies from resetting a scaled Deployment.
+one, preventing later Kustomize applies from resetting a scaled Deployment.
 
 The kind startup scripts install Metrics Server v0.8.1, apply the local-only
 `--kubelet-insecure-tls` patch, and install Custom Pod Autoscaler Operator
@@ -335,12 +336,13 @@ together instead of at the conservative default rate.
 
 Gateway health is independent from server ownership. Kubernetes readiness and
 liveness checks remove or restart an unhealthy gateway, and the EKS NLB checks
-gateway targets directly. Gateways discover every active location owner and do
-not claim, rebalance, or exclusively own servers. Hard hostname spreading keeps
-the ten server pods and four gateways distributed across kind's four general
-workers; spread counts the current rollout revision, and failed-node taints are
-honored so replacement pods can consolidate on survivors. The five ready server
-spares provide immediate location handoff, while Kubernetes promptly creates
-replacement pods to replenish that pool.
+gateway targets directly. A standard CPU HPA maintains 1-20 gateway replicas at
+an 80% average target. Gateways request 250 millicores without a CPU limit, so
+they can burst while replacements start. They discover every active location
+owner and do not claim, rebalance, or exclusively own servers. Hard hostname
+spreading distributes server and dynamically scaled gateway pods across kind's
+general workers; spread counts the current rollout revision, and failed-node taints are
+honored so replacement pods can consolidate on survivors. Any ready unassigned
+server pods can take over a location lease while Kubernetes creates replacements.
 Kubernetes does not automatically rebalance healthy pods when repaired workers
 return; the failure drill documents the explicit rolling rebalance command.

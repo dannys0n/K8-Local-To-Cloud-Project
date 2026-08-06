@@ -10,6 +10,7 @@ nodes:
           extraArgs:
             node-monitor-grace-period: "5s"
             node-monitor-period: "1s"
+            horizontal-pod-autoscaler-sync-period: "10s"
             node-eviction-rate: "10"
             secondary-node-eviction-rate: "10"
             large-cluster-size-threshold: "1"

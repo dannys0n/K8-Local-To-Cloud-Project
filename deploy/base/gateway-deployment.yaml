@@ -4,7 +4,6 @@ metadata:
   name: gateway
   namespace: tcp-lab
 spec:
-  replicas: 4
   strategy:
     rollingUpdate:
       maxUnavailable: 0
@@ -93,8 +92,7 @@ spec:
             terminationGracePeriodSeconds: 2
           resources:
             requests:
-              cpu: 25m
+              cpu: 250m
               memory: 32Mi
             limits:
-              cpu: 250m
               memory: 128Mi

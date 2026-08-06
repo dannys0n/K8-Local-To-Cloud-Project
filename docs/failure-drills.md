@@ -15,15 +15,15 @@ An existing TCP connection through the deleted gateway will close. A new client
 connection should work through a surviving gateway while Kubernetes creates a
 replacement.
 
-## Independent scaling
+## Autoscaler status
 
 ```bash
-kubectl scale deployment/gateway -n tcp-lab --replicas=4
-kubectl scale deployment/tcp-server -n tcp-lab --replicas=10
-kubectl get pods -n tcp-lab -w
+kubectl get hpa/gateway -n tcp-lab -w
+kubectl get custompodautoscaler/tcp-server-cpu -n tcp-lab
 ```
 
-Every gateway discovers server endpoints through the headless Service DNS.
+The gateway HPA owns gateway replica count. Every gateway discovers server
+endpoints through the headless Service DNS.
 
 ## Server persistence
 
@@ -82,7 +82,7 @@ controller grace period. Application pods have zero additional tolerance for
 taint is applied. The controller permits ten failed-node evictions per second,
 including the small-cluster unhealthy-zone path, so simultaneous worker losses
 are not serialized by Kubernetes' conservative default rate. That slower loop
-replenishes the five-pod spare pool; it is not the location failover
+replenishes available server capacity; it is not the location failover
 mechanism. EKS node repair remains a background capacity mechanism.
 
 Server and gateway startup probes allow up to 90 seconds for initialization and

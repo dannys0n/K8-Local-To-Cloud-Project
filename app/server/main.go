@@ -46,14 +46,6 @@ type locationDefinition struct {
 	generation int64
 }
 
-var bootstrapLocations = []locationDefinition{
-	{serverID: "tcp-server-0", locationID: 1},
-	{serverID: "tcp-server-1", locationID: 2},
-	{serverID: "tcp-server-2", locationID: 3},
-	{serverID: "tcp-server-3", locationID: 4},
-	{serverID: "tcp-server-4", locationID: 5},
-}
-
 type assignment struct {
 	ServerID   string
 	LocationID int64
@@ -727,27 +719,16 @@ func createSchema(ctx context.Context, db *sql.DB) error {
 	if _, err := db.ExecContext(ctx, schema); err != nil {
 		return fmt.Errorf("create schema: %w", err)
 	}
-	coordinates := make([]float64, 0, len(bootstrapLocations)*2)
-	for _, item := range bootstrapLocations {
-		latitude, longitude, err := randomCoordinate()
-		if err != nil {
-			return fmt.Errorf("generate location %d coordinates: %w", item.locationID, err)
-		}
-		coordinates = append(coordinates, latitude, longitude)
+	latitude, longitude, err := randomCoordinate()
+	if err != nil {
+		return fmt.Errorf("generate bootstrap location coordinates: %w", err)
 	}
 	if _, err := db.ExecContext(ctx, `
 		INSERT INTO tcp_server_state (server_id, location_id, latitude, longitude)
-		SELECT seed.* FROM (VALUES
-			('tcp-server-0', 1, $1::DOUBLE PRECISION, $2::DOUBLE PRECISION),
-			('tcp-server-1', 2, $3::DOUBLE PRECISION, $4::DOUBLE PRECISION),
-			('tcp-server-2', 3, $5::DOUBLE PRECISION, $6::DOUBLE PRECISION),
-			('tcp-server-3', 4, $7::DOUBLE PRECISION, $8::DOUBLE PRECISION),
-			('tcp-server-4', 5, $9::DOUBLE PRECISION, $10::DOUBLE PRECISION)
-		) AS seed(server_id, location_id, latitude, longitude)
+		SELECT 'tcp-server-0', 1, $1::DOUBLE PRECISION, $2::DOUBLE PRECISION
 		WHERE NOT EXISTS (SELECT 1 FROM tcp_server_state)
 		ON CONFLICT DO NOTHING`,
-		coordinates[0], coordinates[1], coordinates[2], coordinates[3], coordinates[4],
-		coordinates[5], coordinates[6], coordinates[7], coordinates[8], coordinates[9]); err != nil {
+		latitude, longitude); err != nil {
 		return fmt.Errorf("seed locations: %w", err)
 	}
 	if _, err := db.ExecContext(ctx, `

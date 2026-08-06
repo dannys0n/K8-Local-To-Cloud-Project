@@ -24,7 +24,7 @@ kubernetesMetricSpecs:
         type: Utilization
 requireKubernetesMetrics: true
 runMode: per-resource
-minReplicas: 10
+minReplicas: 1
 maxReplicas: 50
 apiConfig:
   enabled: false

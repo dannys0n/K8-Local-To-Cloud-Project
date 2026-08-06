@@ -4,7 +4,7 @@ metadata:
   name: gateway
   namespace: tcp-lab
 spec:
-  minAvailable: 3
+  minAvailable: 1
   selector:
     matchLabels:
       app: gateway
@@ -15,7 +15,7 @@ metadata:
   name: tcp-server
   namespace: tcp-lab
 spec:
-  minAvailable: 9
+  minAvailable: 1
   selector:
     matchLabels:
       app: tcp-server

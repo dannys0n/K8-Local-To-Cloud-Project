@@ -24,11 +24,18 @@ class GatewayClient:
         self.longitude = None
 
     def _close(self):
-        if self.stream:
-            self.stream.close()
-        if self.sock:
-            self.sock.close()
+        stream, sock = self.stream, self.sock
         self.stream = self.sock = None
+        if stream:
+            try:
+                stream.close()
+            except OSError:
+                pass
+        if sock:
+            try:
+                sock.close()
+            except OSError:
+                pass
         with self.state_lock:
             self.connection = "disconnected"
             self.gateway = None
@@ -36,15 +43,19 @@ class GatewayClient:
 
     def _connect(self):
         self._close()
-        self.sock = socket.create_connection((self.host, self.port), timeout=10)
-        self.sock.settimeout(10)
-        self.stream = self.sock.makefile("rwb", buffering=0)
-        with self.state_lock:
-            self.connection = "gateway"
         try:
-            route = self._exchange("@location any")
-        except GatewayResponseError:
-            route = None
+            self.sock = socket.create_connection((self.host, self.port), timeout=10)
+            self.sock.settimeout(10)
+            self.stream = self.sock.makefile("rwb", buffering=0)
+            with self.state_lock:
+                self.connection = "gateway"
+            try:
+                route = self._exchange("@location any")
+            except GatewayResponseError:
+                route = None
+        except (OSError, ValueError, ConnectionError):
+            self._close()
+            raise
         self.sock.settimeout(None)
         with self.state_lock:
             self.route = route
@@ -118,19 +129,25 @@ class GatewayClient:
 
     def reconnect(self):
         with self.lock:
-            self._connect()
-            if self.latitude is not None:
-                try:
-                    route = self._exchange(f"@position {self.latitude:.8f} {self.longitude:.8f}")
-                except GatewayResponseError:
-                    route = None
+            try:
+                self._connect()
+                if self.latitude is not None:
+                    try:
+                        route = self._exchange(f"@position {self.latitude:.8f} {self.longitude:.8f}")
+                    except GatewayResponseError:
+                        route = None
+                    with self.state_lock:
+                        self.route = route
+                        if route:
+                            self.gateway = route.get("gateway")
+                            self.connection = "ready"
+                        else:
+                            self.connection = "gateway"
                 with self.state_lock:
-                    self.route = route
-                    if route:
-                        self.gateway = route.get("gateway")
-                        self.connection = "ready"
-            with self.state_lock:
-                return self.route
+                    return self.route
+            except (OSError, ValueError, ConnectionError):
+                self._close()
+                raise
 
     def snapshot(self):
         with self.state_lock:
