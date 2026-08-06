@@ -3,6 +3,7 @@ $Root = Split-Path -Parent $PSScriptRoot
 $Cluster = "tcp-lab"
 $ServerImage = "simple-tcp-server:dev"
 $GatewayImage = "tcp-gateway:dev"
+$AutoscalerImage = "tcp-server-autoscaler:dev"
 
 foreach ($Command in @("docker", "kind", "kubectl")) {
     if (-not (Get-Command $Command -ErrorAction SilentlyContinue)) {
@@ -36,12 +37,16 @@ try {
     kubectl label node $DatabaseNode tcp-lab.io/database=true --overwrite
     kubectl taint node $DatabaseNode tcp-lab.io/database=true:NoSchedule --overwrite
 
-    Write-Host "Building $ServerImage and $GatewayImage..."
+    Write-Host "Building $ServerImage, $GatewayImage, and $AutoscalerImage..."
     docker build -t $ServerImage app/server
     docker build -t $GatewayImage app/gateway
+    docker build -t $AutoscalerImage infra/autoscaler
 
     Write-Host "Loading image into kind..."
-    kind load docker-image $ServerImage $GatewayImage --name $Cluster
+    kind load docker-image $ServerImage $GatewayImage $AutoscalerImage --name $Cluster
+
+    Write-Host "Installing autoscaling dependencies..."
+    & "$Root/infra/autoscaler/install-kind.ps1"
 
     Write-Host "Applying Kubernetes resources..."
     kubectl apply -k deploy/overlays/kind
@@ -50,6 +55,7 @@ try {
 
     kubectl rollout status deployment/tcp-server -n tcp-lab --timeout=180s
     kubectl rollout status deployment/gateway -n tcp-lab --timeout=180s
+    kubectl wait --for=condition=Ready pod -n tcp-lab -l app=tcp-server-autoscaler --timeout=180s
 
     Write-Host ""
     Write-Host "Ready."

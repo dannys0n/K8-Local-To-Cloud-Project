@@ -4,6 +4,7 @@ resources:
   - namespace.yaml
   - server-headless-service.yaml
   - server-deployment.yaml
+  - server-autoscaler.yaml
   - gateway-deployment.yaml
   - gateway-service.yaml
   - gateway-stats-service.yaml

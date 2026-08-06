@@ -13,3 +13,6 @@ images:
   - name: tcp-gateway
     newName: 000000000000.dkr.ecr.us-west-2.amazonaws.com/tcp-gateway
     newTag: latest
+  - name: tcp-server-autoscaler
+    newName: 000000000000.dkr.ecr.us-west-2.amazonaws.com/tcp-server-autoscaler
+    newTag: latest

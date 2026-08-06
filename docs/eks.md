@@ -6,17 +6,33 @@ The local lab is fully runnable. The EKS overlay assumes an existing EKS cluster
 - Worker capacity across multiple Availability Zones.
 - The server and gateway images pushed to ECR.
 - Managed PostgreSQL and Redis-compatible endpoints available to the cluster.
+- Metrics Server installed, for example through the EKS community add-on.
+- Custom Pod Autoscaler Operator v1.4.2 installed.
 - A `tcp-server-databases` Secret containing `postgres-dsn` and `redis-addr`.
 
 Before applying:
 
 1. Replace the example ECR repository in `deploy/overlays/eks/kustomization.yaml`.
-2. Build and push `app/server` and `app/gateway` to their ECR repositories.
+2. Build and push `app/server`, `app/gateway`, and `infra/autoscaler` to their
+   ECR repositories.
 3. Create the database Secret from your AWS-integrated secret workflow; do not
    copy the kind development credentials.
 4. Confirm the NLB annotations match your controller version and security requirements.
 5. Apply with `kubectl apply -k deploy/overlays/eks`.
 6. Read the external endpoint with `kubectl get service gateway -n tcp-lab`.
+
+Install the pinned autoscaling prerequisites before applying the overlay:
+
+```bash
+aws eks create-addon --cluster-name CLUSTER --addon-name metrics-server
+kubectl apply --server-side --force-conflicts -f https://github.com/jthomperoo/custom-pod-autoscaler-operator/releases/download/v1.4.2/cluster.yaml
+kubectl wait --for=condition=Established customresourcedefinition/custompodautoscalers.custompodautoscaler.com --timeout=180s
+kubectl rollout status deployment/custom-pod-autoscaler-operator -n default --timeout=180s
+```
+
+If Metrics Server is already managed by another workflow, do not create a
+second installation. The EKS overlay maps `tcp-server-autoscaler` to its own ECR
+repository alongside the server and gateway images.
 
 The stats Service remains internal on EKS. Access it temporarily with:
 

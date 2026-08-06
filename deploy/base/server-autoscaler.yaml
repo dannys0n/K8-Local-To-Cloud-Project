@@ -1,0 +1,38 @@
+apiVersion: custompodautoscaler.com/v1
+kind: CustomPodAutoscaler
+metadata:
+  name: tcp-server-cpu
+  namespace: tcp-lab
+spec:
+  template:
+    metadata:
+      labels:
+        app: tcp-server-autoscaler
+    spec:
+      containers:
+        - name: autoscaler
+          image: tcp-server-autoscaler:dev
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: SERVER_CPU_REQUEST_MILLICORES
+              value: "250"
+            - name: POSTGRES_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: tcp-server-databases
+                  key: postgres-dsn
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: tcp-server
+  roleRequiresMetricsServer: true
+  config:
+    - name: interval
+      value: "15000"

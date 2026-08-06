@@ -10,3 +10,4 @@ resources:
 patches:
   - path: gateway-nodeport-patch.yaml
   - path: stats-nodeport-patch.yaml
+  - path: server-autoscaler-fast-patch.yaml

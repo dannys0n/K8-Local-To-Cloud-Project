@@ -36,6 +36,9 @@ jobs:
       - name: Run manifest regression checks
         run: python -m unittest discover -s tests -v
 
+      - name: Validate autoscaler scripts
+        run: python -m py_compile infra/autoscaler/*.py
+
       - name: Render Kubernetes overlays
         run: |
           kubectl kustomize deploy/overlays/kind > /dev/null

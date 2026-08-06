@@ -7,8 +7,9 @@ client -> NodePort/NLB -> Gateway Deployment -> TCP Server pool
                                               -> PostgreSQL + Redis
 ```
 
-It intentionally keeps ownership and fencing inside PostgreSQL instead of
-adding a coordinator or operator.
+It keeps ownership and fencing inside PostgreSQL. A pinned third-party Custom
+Pod Autoscaler operator is used only for infrastructure scaling decisions; it
+does not participate in routing or ownership.
 
 ## Repository layout
 
@@ -18,6 +19,7 @@ deploy/base/          Kubernetes resources shared by every environment
 deploy/overlays/kind/ Local workload patches and in-cluster data services
 deploy/overlays/eks/  AWS-specific workload patches
 infra/kind/           Definition of the local kind cluster and its nodes
+infra/autoscaler/     Server CPU policy and pinned autoscaler image
 scripts/              Cluster lifecycle commands
 tools/                Local client, dashboard, bots, and smoke utilities
 tests/                Manifest and scheduling checks
@@ -31,13 +33,15 @@ through AWS tooling and then uses the EKS overlay to deploy the same base.
 
 - **Gateway:** four generic Go replicas that preserve the client connection
   while switching downstream location servers at runtime.
-- **TCP server:** ten interchangeable Deployment replicas: five active location
-  owners and five ready hot spares. Each active process runs a 20 Hz
+- **TCP server:** a minimum of ten interchangeable Deployment replicas, initially
+  providing five active location owners and five ready hot spares. Each active process runs a 20 Hz
   authoritative simulation clock and includes its current tick in responses.
 - **PostgreSQL:** authoritative location identity, counters, leases, and ownership
   generations; one PVC on the dedicated kind database worker.
 - **Redis:** ephemeral server presence and 10 Hz entity visibility on a
   separate best-effort loop. It is not part of authoritative client state.
+- **Server autoscaler:** Metrics Server plus Custom Pod Autoscaler Framework.
+  The maximum server-pod CPU utilization is evaluated every 15 seconds.
 - **Client entry:** `127.0.0.1:9000`; the browser map keeps one TCP connection
   through its local bridge. The EKS overlay uses an AWS NLB.
 - **Manifest management:** a shared Kustomize base plus kind and EKS overlays.
@@ -59,6 +63,8 @@ Install and make available on `PATH`:
 
 - Python 3 for the local browser client and optional dashboard
 - Internet access for Leaflet and OpenStreetMap tiles in the browser
+- Internet access during cluster setup for pinned Metrics Server and Custom
+  Pod Autoscaler Operator manifests
 
 ## Run on Windows PowerShell
 
@@ -106,6 +112,27 @@ When the dashboard creates more enabled locations
 than the current `tcp-server` replica count, it scales that Deployment to the
 enabled-location count. Existing spare pods are used first; location deletion
 does not automatically scale the Deployment down.
+
+Server CPU autoscaling is scale-up only. Metrics Server reports CPU relative to
+the server container's 250 millicore request. The server has no CPU limit, so it
+can still burst when node capacity is available. If any ready server pod reaches 80%, the custom
+evaluator requests exactly one additional replica. After Kubernetes accepts the
+scale, a post-scale hook invokes `tcp_create_location()` once, using the same
+random placement operation as the dashboard. The new generic server pod then
+claims that location through the normal PostgreSQL lease path. Evaluations run
+every 10 seconds in the kind overlay and every 15 seconds in the EKS/base
+configuration, stopping at 50 replicas. Ten seconds is Metrics Server's minimum
+supported resolution, so kind sampling and evaluation remain aligned. Missing metrics stop an evaluation;
+they never trigger speculative scaling. Automatic scale-down and location
+merging are intentionally not implemented. A pending location-creation hook
+also blocks another scale request so a transient database outage cannot add a
+new replica every evaluation interval. The Deployment manifest intentionally
+omits `spec.replicas`; the autoscaler owns that field and enforces a minimum of
+ten, preventing later Kustomize applies from resetting a scaled Deployment.
+
+The kind startup scripts install Metrics Server v0.8.1, apply the local-only
+`--kubelet-insecure-tls` patch, and install Custom Pod Autoscaler Operator
+v1.4.2. The evaluator image pins Custom Pod Autoscaler Framework v2.12.2.
 
 `tools/client.py` asks the operating system for a free local port, prints the
 resulting URL, and opens it in the default browser. It keeps a stable client UID
