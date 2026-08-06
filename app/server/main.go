@@ -36,6 +36,7 @@ const (
 	visibilityActiveTicks = 20
 	visibilityInterval    = 100 * time.Millisecond
 	visibilityLease       = 5 * time.Second
+	visibilityRadiusPixels = 450.0
 	entityCleanupTicks    = 600
 	mercatorLatitudeLimit = 85.05112878
 )
@@ -156,6 +157,7 @@ type inputResult struct {
 	counter   uint64
 	sequence  uint64
 	tick      uint64
+	zoom      float64
 	claim     bool
 	err       error
 	reroute   int64
@@ -387,7 +389,10 @@ func (s *server) finishDurableBatch(batch []durableCommand, counters []uint64, l
 				if entity := s.entities[queued.request.ClientUID]; entity != nil {
 					entity.counter = result.counter
 				} else {
-					s.entities[queued.request.ClientUID] = &entityState{latitude: result.latitude, longitude: result.longitude, counter: result.counter}
+					s.entities[queued.request.ClientUID] = &entityState{
+						latitude: result.latitude, longitude: result.longitude,
+						counter: result.counter, viewZoom: minimumViewZoom,
+					}
 				}
 				s.entityMu.Unlock()
 			}
@@ -483,7 +488,7 @@ drained:
 			}
 			command.result <- inputResult{
 				latitude: entity.latitude, longitude: entity.longitude, counter: entity.counter,
-				sequence: entity.sequence, tick: tick, claim: command.claim, reroute: reroute,
+				sequence: entity.sequence, tick: tick, zoom: entity.viewZoom, claim: command.claim, reroute: reroute,
 			}
 		}
 	}
@@ -1257,7 +1262,7 @@ func (s *server) writeInputResponse(writer *bufio.Writer, current *assignment, i
 		Time: time.Now().UTC().Format(time.RFC3339Nano), Tick: result.tick,
 		ClientUID: intent.ClientUID, ClientLatitude: result.latitude,
 		ClientLongitude: result.longitude, InputSequence: result.sequence, Reroute: result.reroute,
-		Entities: s.visibleEntities(intent.ClientUID),
+		Entities: s.visibleEntities(intent.ClientUID, result.latitude, result.longitude, result.zoom),
 	})
 	if err != nil {
 		return false

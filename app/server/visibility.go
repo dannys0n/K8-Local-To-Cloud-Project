@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"time"
 )
 
@@ -99,16 +100,32 @@ func (s *server) pullVisibility(ctx context.Context) {
 	s.visibilityMu.Unlock()
 }
 
-func (s *server) visibleEntities(excludeUID string) []visibleEntity {
+func (s *server) visibleEntities(excludeUID string, latitude, longitude, zoom float64) []visibleEntity {
+	worldPixels := 256 * math.Exp2(zoom)
+	x := (longitude + 180) / 360
+	y := mercatorY(latitude)
 	s.visibilityMu.RLock()
 	entities := make([]visibleEntity, 0, len(s.visible))
 	for _, entity := range s.visible {
-		if entity.UID != excludeUID {
+		if entity.UID == excludeUID {
+			continue
+		}
+		deltaX := math.Abs((entity.Longitude+180)/360 - x)
+		deltaX = math.Min(deltaX, 1-deltaX)
+		deltaY := mercatorY(entity.Latitude) - y
+		distance := math.Hypot(deltaX, deltaY) * worldPixels
+		if distance <= visibilityRadiusPixels {
 			entities = append(entities, entity)
 		}
 	}
 	s.visibilityMu.RUnlock()
 	return entities
+}
+
+func mercatorY(latitude float64) float64 {
+	latitude = math.Max(-mercatorLatitudeLimit, math.Min(mercatorLatitudeLimit, latitude))
+	projected := math.Log(math.Tan(math.Pi/4 + latitude*math.Pi/360))
+	return (1 - projected/math.Pi) / 2
 }
 
 func visibilityKey(serverID string, generation int64) string {
