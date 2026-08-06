@@ -29,7 +29,9 @@ const (
 	defaultLeaseDuration  = 3 * time.Second
 	defaultRenewInterval  = 500 * time.Millisecond
 	defaultTickInterval   = 50 * time.Millisecond
-	movementSpeed         = 40.0
+	movementPixelsPerSecond = 120.0
+	minimumViewZoom        = 2.0
+	maximumViewZoom        = 18.0
 	inputTimeoutTicks     = 8
 	visibilityActiveTicks = 20
 	visibilityInterval    = 100 * time.Millisecond
@@ -135,6 +137,7 @@ type inputIntent struct {
 	Sequence  uint64
 	X         float64
 	Y         float64
+	Zoom      float64
 	Teleport  bool
 	Resume    bool
 	Latitude  float64
@@ -165,6 +168,7 @@ type entityState struct {
 	sequence      uint64
 	axisX         float64
 	axisY         float64
+	viewZoom      float64
 	lastInputTick uint64
 	reroute       int64
 }
@@ -424,11 +428,10 @@ drained:
 					entity.axisX = command.intent.X
 					entity.axisY = command.intent.Y
 				}
+				entity.viewZoom = command.intent.Zoom
 			}
 		}
 	}
-	distance := movementSpeed * s.tickInterval.Seconds()
-	projectedDistance := distance * math.Pi / 180
 	for uid, entity := range s.entities {
 		if tick-entity.lastInputTick >= entityCleanupTicks {
 			delete(s.entities, uid)
@@ -439,6 +442,10 @@ drained:
 			entity.axisY = 0
 		}
 		latitude := math.Max(-mercatorLatitudeLimit, math.Min(mercatorLatitudeLimit, entity.latitude))
+		worldPixels := 256 * math.Exp2(entity.viewZoom)
+		screenDistance := movementPixelsPerSecond * s.tickInterval.Seconds()
+		longitudeDistance := screenDistance / worldPixels * 360
+		projectedDistance := screenDistance / worldPixels * 2 * math.Pi
 		projectedY := math.Log(math.Tan(math.Pi/4 + latitude*math.Pi/360))
 		projectedY += entity.axisY * projectedDistance
 		if projectedY > math.Pi {
@@ -447,7 +454,7 @@ drained:
 			projectedY += 2 * math.Pi
 		}
 		entity.latitude = math.Atan(math.Sinh(projectedY)) * 180 / math.Pi
-		entity.longitude += entity.axisX * distance
+		entity.longitude += entity.axisX * longitudeDistance
 		if entity.longitude > 180 {
 			entity.longitude -= 360
 		} else if entity.longitude < -180 {
@@ -573,7 +580,7 @@ func (s *server) ensureEntity(ctx context.Context, clientUID string, refreshCoun
 	if exists && !refreshCounter {
 		return false, nil
 	}
-	loaded := &entityState{}
+	loaded := &entityState{viewZoom: minimumViewZoom}
 	queryCtx, cancel := context.WithTimeout(ctx, time.Second)
 	defer cancel()
 	err := s.db.QueryRowContext(queryCtx, `
@@ -1183,17 +1190,19 @@ func parseInput(message string) (inputIntent, bool, error) {
 		return inputIntent{}, false, nil
 	}
 	fields := strings.Fields(arguments)
-	if len(fields) != 4 || !validIdentifier(fields[0]) {
-		return inputIntent{}, true, errors.New("input requires client UID, sequence, x axis, and y axis")
+	if len(fields) != 5 || !validIdentifier(fields[0]) {
+		return inputIntent{}, true, errors.New("input requires client UID, sequence, x axis, y axis, and zoom")
 	}
 	sequence, sequenceErr := strconv.ParseUint(fields[1], 10, 64)
 	x, xErr := strconv.ParseFloat(fields[2], 64)
 	y, yErr := strconv.ParseFloat(fields[3], 64)
+	zoom, zoomErr := strconv.ParseFloat(fields[4], 64)
 	if sequenceErr != nil || xErr != nil || yErr != nil || math.IsNaN(x) || math.IsNaN(y) ||
-		math.IsInf(x, 0) || math.IsInf(y, 0) || x < -1 || x > 1 || y < -1 || y > 1 {
-		return inputIntent{}, true, errors.New("input axes must be finite values from -1 to 1")
+		zoomErr != nil || math.IsInf(x, 0) || math.IsInf(y, 0) || math.IsNaN(zoom) || math.IsInf(zoom, 0) ||
+		x < -1 || x > 1 || y < -1 || y > 1 || zoom < minimumViewZoom || zoom > maximumViewZoom {
+		return inputIntent{}, true, errors.New("input axes or zoom are outside their allowed ranges")
 	}
-	return inputIntent{ClientUID: fields[0], Sequence: sequence, X: x, Y: y}, true, nil
+	return inputIntent{ClientUID: fields[0], Sequence: sequence, X: x, Y: y, Zoom: zoom}, true, nil
 }
 
 func validIdentifier(value string) bool {

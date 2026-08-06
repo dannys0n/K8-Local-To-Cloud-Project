@@ -124,7 +124,7 @@ PAGE = r"""<!doctype html>
       if(inputInFlight||teleporting||pendingCommands.length||!currentRoute?.server)return;
       const x=(keys.has('d')?1:0)-(keys.has('a')?1:0),y=(keys.has('w')?1:0)-(keys.has('s')?1:0);
       const now=performance.now();if(x===0&&y===0&&!inputDirty&&now-lastInputAt<50)return;inputDirty=false;inputInFlight=true;lastInputAt=now;
-      try{inputSequence++;localStorage.setItem(inputSequenceKey,inputSequence);const body=await request('/api/input',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({client_uid:clientUid,sequence:inputSequence,x,y})});applyAuthoritativePosition(body);showRoute(body);renderEntities(body.entities||[])}
+      try{inputSequence++;localStorage.setItem(inputSequenceKey,inputSequence);const body=await request('/api/input',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({client_uid:clientUid,sequence:inputSequence,x,y,zoom:map.getZoom()})});applyAuthoritativePosition(body);showRoute(body);renderEntities(body.entities||[])}
       catch(error){el('error').textContent=error.message;inputDirty=true}finally{inputInFlight=false}
     }
     el('showAllServers').addEventListener('change',renderServers);
@@ -186,7 +186,7 @@ def make_handler(client: GatewayClient):
                 elif path == "/api/input":
                     length = int(self.headers.get("Content-Length", "0"))
                     payload = json.loads(self.rfile.read(length) or b"{}")
-                    self.send_json(client.send_input(str(payload["client_uid"]), int(payload["sequence"]), float(payload["x"]), float(payload["y"])))
+                    self.send_json(client.send_input(str(payload["client_uid"]), int(payload["sequence"]), float(payload["x"]), float(payload["y"]), float(payload["zoom"])))
                 else:
                     self.send_json({"error": "not found"}, 404)
             except (GatewayResponseError, KeyError, OSError, TypeError, ValueError, ConnectionError) as error:

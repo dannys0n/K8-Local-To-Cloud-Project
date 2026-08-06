@@ -35,6 +35,7 @@ class HeadlessClient:
         rng = random.Random(self.uid)
         angle = rng.random() * math.tau
         axis_x, axis_y = math.cos(angle), math.sin(angle)
+        zoom = rng.randint(2, 18)
         started_at = time.monotonic()
         next_direction = started_at + rng.random() * 3
         next_counter = started_at + rng.random()
@@ -70,7 +71,7 @@ class HeadlessClient:
                     continue
                 sequence += 1
                 try:
-                    self.client.send_input(self.uid, sequence, axis_x, axis_y)
+                    self.client.send_input(self.uid, sequence, axis_x, axis_y, zoom)
                 except (GatewayResponseError, OSError, ValueError, ConnectionError):
                     pass
                 self.stopped.wait(max(0, INPUT_INTERVAL - (time.monotonic() - started)))
