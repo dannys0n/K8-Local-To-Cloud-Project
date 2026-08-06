@@ -321,7 +321,10 @@ Gateway health is independent from server ownership. Kubernetes readiness and
 liveness checks remove or restart an unhealthy gateway, and the EKS NLB checks
 gateway targets directly. A standard CPU HPA maintains 1-20 gateway replicas at
 an 80% average target. Gateways request 250 millicores without a CPU limit, so
-they can burst while replacements start. They discover every active location
+they can burst while replacements start. The kind overlay removes scale-up and
+scale-down stabilization and permits either direction to change by 100% or four
+pods per 10-second evaluation; EKS retains Kubernetes' conservative defaults.
+Gateways discover every active location
 owner and do not claim, rebalance, or exclusively own servers. Hard hostname
 spreading distributes server and dynamically scaled gateway pods across kind's
 general workers; spread counts the current rollout revision, and failed-node taints are
