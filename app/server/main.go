@@ -741,50 +741,25 @@ func createSchema(ctx context.Context, db *sql.DB) error {
 		SELECT setval('tcp_location_id_seq',
 			GREATEST((SELECT last_value FROM tcp_location_id_seq),
 				(SELECT COALESCE(MAX(location_id), 1) FROM tcp_server_state)), true);
-		CREATE OR REPLACE FUNCTION tcp_create_location(
-			p_latitude DOUBLE PRECISION DEFAULT NULL,
-			p_longitude DOUBLE PRECISION DEFAULT NULL
-		) RETURNS TABLE(location_id BIGINT, latitude DOUBLE PRECISION, longitude DOUBLE PRECISION)
+		CREATE OR REPLACE FUNCTION tcp_create_location()
+		RETURNS TABLE(location_id BIGINT, latitude DOUBLE PRECISION, longitude DOUBLE PRECISION)
 		LANGUAGE plpgsql AS $$
 		DECLARE
 			new_id BIGINT;
 			new_latitude DOUBLE PRECISION;
 			new_longitude DOUBLE PRECISION;
 		BEGIN
-			IF (p_latitude IS NULL) <> (p_longitude IS NULL) THEN
-				RAISE EXCEPTION 'latitude and longitude must both be supplied or both omitted';
-			END IF;
-			new_latitude := COALESCE(p_latitude, (random() * 2 - 1) * 85.05112878);
-			new_longitude := COALESCE(p_longitude, random() * 360 - 180);
-			IF new_latitude < -85.05112878 OR new_latitude > 85.05112878 OR
-				new_longitude < -180 OR new_longitude > 180 THEN
-				RAISE EXCEPTION 'coordinates are outside the Leaflet world bounds';
-			END IF;
+			new_latitude := (random() * 2 - 1) * 85.05112878;
+			new_longitude := random() * 360 - 180;
 			new_id := nextval('tcp_location_id_seq');
 			INSERT INTO tcp_server_state (server_id, location_id, latitude, longitude)
 			VALUES ('tcp-server-location-' || new_id, new_id, new_latitude, new_longitude);
 			INSERT INTO tcp_server_assignment (server_id)
 			VALUES ('tcp-server-location-' || new_id);
 			RETURN QUERY SELECT new_id, new_latitude, new_longitude;
-		END $$;
-		CREATE OR REPLACE FUNCTION tcp_delete_location(p_location_id BIGINT)
-		RETURNS BOOLEAN LANGUAGE sql AS $$
-			WITH deleted AS (
-				UPDATE tcp_server_state
-				SET enabled = FALSE, updated_at = NOW()
-				WHERE location_id = p_location_id AND enabled
-				RETURNING server_id
-			), unassigned AS (
-				UPDATE tcp_server_assignment AS assignment
-				SET owner_instance_id = NULL, lease_until = NULL,
-					generation = generation + 1
-				FROM deleted
-				WHERE assignment.server_id = deleted.server_id
-				RETURNING 1
-			)
-			SELECT EXISTS(SELECT 1 FROM deleted)
+		END
 		$$;`); err != nil {
-		return fmt.Errorf("create location operations: %w", err)
+		return fmt.Errorf("create autoscaled location operation: %w", err)
 	}
 	return nil
 }

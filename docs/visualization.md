@@ -39,12 +39,9 @@ than overlapping or queuing stale snapshots.
 
 Use the `Interactive map` tab, or open `http://127.0.0.1:8080/map`, to see
 active geographic locations, client positions, gateways, and spare server pods.
-The layer switches only affect visualization. The map also provides explicit
-debug controls to spawn/despawn local dummy-client batches, create a randomly
-positioned location, create a location at a clicked coordinate, or disable a
-selected location. Location controls call the PostgreSQL lifecycle functions
-through the dashboard process and its current `kubectl` context; they are not
-served by the public gateway or exposed through the EKS load balancer.
+The layer switches only affect visualization. The dashboard can spawn and
+despawn local dummy-client batches, but location creation is owned exclusively
+by the server autoscaler and the map provides no location mutation controls.
 
 The client is independent of the infrastructure dashboard. It displays only
 application data returned through its gateway connection: its selected gateway,

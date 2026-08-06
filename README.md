@@ -87,32 +87,15 @@ Names are intentionally not part of location identity or routing. Clients displa
 `LatLng` values and can later be indexed with Redis GEO; Leaflet's Web Mercator
 projection remains a browser display detail and is not persisted.
 
-PostgreSQL exposes two operations for the future location-management interface:
+PostgreSQL exposes one internal operation used by the server autoscaler:
 
 ```sql
--- Create a location at a random coordinate.
 SELECT * FROM tcp_create_location();
-
--- Or create one at an explicit Leaflet coordinate.
-SELECT * FROM tcp_create_location(35.0, -120.0);
-
--- Disable a location without reusing its identity.
-SELECT tcp_delete_location(6);
 ```
 
-Deletion is intentionally a soft delete so historical entity and transaction
-records keep a valid location reference. Servers reload enabled locations once per
-second. Disabling a location atomically fences its assignment; its former server
-drops the in-memory claim on refresh and gateways remove the route through normal
-discovery. The PostgreSQL sequence allocates IDs atomically across concurrent
-callers. Location IDs are permanent identities, not list indexes: they are never
-renumbered, compacted, or reused. Deletion can therefore leave gaps, and sequence
-values can also be skipped by rolled-back creation attempts.
-
-When the dashboard creates more enabled locations
-than the current `tcp-server` replica count, it scales that Deployment to the
-enabled-location count. Existing spare pods are used first; location deletion
-does not automatically scale the Deployment down.
+It assigns a random coordinate and permanent atomic ID after the autoscaler adds
+a server replica. The dashboard has no location mutation or Deployment scaling
+permissions; it only visualizes locations created through this automatic path.
 
 Server CPU autoscaling is scale-up only. Metrics Server reports CPU relative to
 the server container's 250 millicore request. The server has no CPU limit, so it
