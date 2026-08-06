@@ -629,8 +629,8 @@ func connectDatabases(ctx context.Context, logger *slog.Logger) (*sql.DB, *redis
 	if err != nil {
 		return nil, nil, err
 	}
-	db.SetMaxOpenConns(10)
-	db.SetMaxIdleConns(5)
+	db.SetMaxOpenConns(2)
+	db.SetMaxIdleConns(1)
 	cache := redis.NewClient(&redis.Options{Addr: redisAddr})
 
 	startupCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
