@@ -189,6 +189,22 @@ func main() {
 	}
 	defer db.Close()
 	defer cache.Close()
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("RUN_SCHEMA_MIGRATION")), "true") {
+		ready, schemaErr := schemaReady(ctx, db)
+		if schemaErr == nil && !ready {
+			schemaErr = createSchema(ctx, db)
+		}
+		if schemaErr != nil {
+			logger.Error("migrate database schema", "error", schemaErr)
+			os.Exit(1)
+		}
+		logger.Info("database schema ready")
+		return
+	}
+	if err := waitForSchema(ctx, db); err != nil {
+		logger.Error("wait for database schema", "error", err)
+		os.Exit(1)
+	}
 
 	leaseDuration, err := durationFromEnv("ASSIGNMENT_LEASE_DURATION", defaultLeaseDuration)
 	if err != nil {
@@ -655,12 +671,36 @@ func connectDatabases(ctx context.Context, logger *slog.Logger) (*sql.DB, *redis
 	if cacheErr != nil {
 		logger.Warn("redis unavailable; continuing without cache", "error", cacheErr)
 	}
-	if err := createSchema(startupCtx, db); err != nil {
-		db.Close()
-		cache.Close()
-		return nil, nil, err
-	}
 	return db, cache, nil
+}
+
+func schemaReady(ctx context.Context, db *sql.DB) (bool, error) {
+	var ready bool
+	err := db.QueryRowContext(ctx, `
+		SELECT to_regclass('tcp_server_state') IS NOT NULL
+			AND to_regclass('tcp_server_assignment') IS NOT NULL
+			AND to_regclass('client_state') IS NOT NULL
+			AND to_regclass('entity_state') IS NOT NULL
+			AND to_regclass('client_operation') IS NOT NULL
+			AND to_regprocedure('tcp_create_location()') IS NOT NULL
+			AND to_regprocedure('tcp_retire_location()') IS NOT NULL`).Scan(&ready)
+	return ready, err
+}
+
+func waitForSchema(ctx context.Context, db *sql.DB) error {
+	waitCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
+	defer cancel()
+	for {
+		ready, err := schemaReady(waitCtx, db)
+		if err == nil && ready {
+			return nil
+		}
+		select {
+		case <-waitCtx.Done():
+			return fmt.Errorf("schema readiness timeout: %w", waitCtx.Err())
+		case <-time.After(time.Second):
+		}
+	}
 }
 
 func createSchema(ctx context.Context, db *sql.DB) error {

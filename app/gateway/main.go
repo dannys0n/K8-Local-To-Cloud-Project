@@ -84,6 +84,8 @@ type gateway struct {
 	routeTimeout     time.Duration
 	backendTimeout   time.Duration
 	logger           *slog.Logger
+	discoveryMu      sync.Mutex
+	lastDiscovery    time.Time
 	mu               sync.RWMutex
 	routes           map[string]backend
 	sessions         map[string]session
@@ -130,7 +132,7 @@ func main() {
 	g := &gateway{
 		instance:        instance,
 		gatewayMetadata: append([]byte(`"gateway":`), encodedInstance...),
-		serverHost:      envOrDefault("SERVER_HOST", "tcp-server-headless"),
+		serverHost:      envOrDefault("SERVER_HOST", "tcp-server-headless.tcp-lab.svc.cluster.local"),
 		serverPort:      envOrDefault("SERVER_PORT", "7000"),
 		discoveryEvery: discoveryEvery, discoveryTimeout: discoveryTimeout, routeTimeout: routeTimeout,
 		backendTimeout: backendTimeout, logger: logger,
@@ -474,6 +476,15 @@ func (g *gateway) discoverLoop(ctx context.Context) {
 }
 
 func (g *gateway) discover(ctx context.Context) {
+	g.discoveryMu.Lock()
+	if !g.lastDiscovery.IsZero() && time.Since(g.lastDiscovery) < g.discoveryEvery/2 {
+		g.discoveryMu.Unlock()
+		return
+	}
+	defer func() {
+		g.lastDiscovery = time.Now()
+		g.discoveryMu.Unlock()
+	}()
 	lookupCtx, cancel := context.WithTimeout(ctx, g.discoveryTimeout)
 	addresses, err := net.DefaultResolver.LookupHost(lookupCtx, g.serverHost)
 	cancel()

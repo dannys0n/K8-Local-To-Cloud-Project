@@ -42,7 +42,10 @@ echo "Installing autoscaling dependencies..."
 bash "$ROOT/infra/autoscaler/install-kind.sh"
 
 echo "Applying Kubernetes resources..."
+kubectl apply -f deploy/base/namespace.yaml
+kubectl delete job/tcp-server-schema -n tcp-lab --ignore-not-found
 kubectl apply -k deploy/overlays/kind
+kubectl wait --for=condition=Complete job/tcp-server-schema -n tcp-lab --timeout=180s
 kubectl rollout restart deployment/tcp-server -n tcp-lab
 kubectl rollout restart deployment/gateway -n tcp-lab
 kubectl rollout status deployment/tcp-server -n tcp-lab --timeout=180s
