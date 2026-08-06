@@ -1,6 +1,5 @@
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
-$MetricsServer = "https://github.com/kubernetes-sigs/metrics-server/releases/download/v0.8.1/components.yaml"
 $Operator = "https://github.com/jthomperoo/custom-pod-autoscaler-operator/releases/download/v1.4.2/cluster.yaml"
 
 function Invoke-Kubectl {
@@ -10,8 +9,7 @@ function Invoke-Kubectl {
     }
 }
 
-Invoke-Kubectl apply -f $MetricsServer
-Invoke-Kubectl patch deployment metrics-server -n kube-system --type strategic --patch-file "$Root/infra/autoscaler/metrics-server-kind-patch.yaml"
+Invoke-Kubectl apply -k "$Root/infra/autoscaler/metrics-server-kind"
 Invoke-Kubectl rollout status deployment/metrics-server -n kube-system --timeout=180s
 
 Invoke-Kubectl apply --server-side --force-conflicts -f $Operator

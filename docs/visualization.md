@@ -11,18 +11,17 @@ python tools/dashboard.py
 Open `http://127.0.0.1:8080`. The page discovers all gateway pods, combines
 their current counters, routes, and active sessions from each gateway's
 read-only statistics endpoint. Backend rows are one per logical location and show the
-currently assigned physical server pod and worker node, while the summary shows
-available hot spares. `Logical server` is the durable location identity such as
+currently assigned physical server pod and worker node. `Logical server` is the durable location identity such as
 `tcp-server-1`; `Active instance` is the replaceable Kubernetes pod currently
 holding that identity. It uses the current `kubectl` context and binds only
 to local loopback by default. It reads pod endpoints through the Kubernetes API;
 the per-replica statistics Service is not exposed publicly on EKS.
 
 Application pod inventory retains failed and terminating API objects for
-diagnostics but excludes them from ready gateway, server-pool, and hot-spare
-counts. Separate counters report `NotReady` and `Unknown` pods. Map infrastructure
-nodes use red for `NotReady`, gray for `Unknown`, yellow for ready spares, and the
-normal gateway/active styling for ready pods. Health combines the pod readiness
+diagnostics but excludes them from ready gateway and server-replica counts.
+Separate counters report `NotReady` and `Unknown` pods. Map infrastructure nodes
+use red for `NotReady`, gray for `Unknown`, and normal styling for ready pods.
+Health combines the pod readiness
 condition with the assigned node's Kubernetes `Ready` condition.
 
 Client counters intentionally measure different layers. `Total clients` is the
@@ -38,7 +37,7 @@ collection takes longer than the selected period, the next refresh waits rather
 than overlapping or queuing stale snapshots.
 
 Use the `Interactive map` tab, or open `http://127.0.0.1:8080/map`, to see
-active geographic locations, client positions, gateways, and spare server pods.
+active geographic locations, client positions, and gateways.
 The layer switches only affect visualization. The dashboard can spawn and
 despawn local dummy-client batches, but location creation is owned exclusively
 by the server autoscaler and the map provides no location mutation controls.
@@ -50,7 +49,7 @@ always draws the current gateway below the map with an edge to the client. Gatew
 previously observed while that client page remains open stay in memory and appear
 gray; they are forgotten on reload, and it does not enumerate gateway pods the
 client has never used. Kubernetes
-inventory such as every gateway, reserve pod, worker, and unhealthy pod remains
+inventory such as every gateway, server pod, worker, and unhealthy pod remains
 dashboard-only and is read through the operator's current `kubectl` context.
 This keeps Kubernetes credentials and administrative data out of external
 clients and the public EKS load balancer.

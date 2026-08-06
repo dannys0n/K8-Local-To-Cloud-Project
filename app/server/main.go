@@ -870,7 +870,7 @@ func (s *server) heartbeat(ctx context.Context, logger *slog.Logger) {
 	ticker := time.NewTicker(3 * time.Second)
 	defer ticker.Stop()
 	for {
-		value := map[string]any{"instance": s.podName, "status": "spare"}
+		value := map[string]any{"instance": s.podName, "status": "unassigned"}
 		if current := s.currentAssignment(); current != nil {
 			value["status"] = "active"
 			value["server"] = current.ServerID
@@ -919,7 +919,7 @@ func (s *server) handleConnection(ctx context.Context, conn net.Conn, logger *sl
 		}
 		if message == "@discover" {
 			current := s.currentAssignment()
-			body := map[string]any{"status": "spare", "instance": s.podName}
+			body := map[string]any{"status": "unassigned", "instance": s.podName}
 			if current != nil {
 				body["status"] = "active"
 				body["server"] = current.ServerID
@@ -935,7 +935,7 @@ func (s *server) handleConnection(ctx context.Context, conn net.Conn, logger *sl
 		}
 		if requested, found := strings.CutPrefix(message, "@probe "); found {
 			current := s.currentAssignment()
-			status := "spare"
+			status := "unassigned"
 			if current != nil && (requested == "any" || requested == strconv.FormatInt(current.LocationID, 10)) {
 				status = "ready"
 			}

@@ -55,9 +55,8 @@ gateway's local health endpoint for faster in-cluster readiness and liveness
 detection. Neither health mechanism changes server ownership.
 
 All worker nodes are general capacity. Zone and hostname spreading use a maximum
-skew of one and honor failed-node taints. Warm replicas spread during normal
-operation and replacement pods may consolidate across the remaining eligible
-workers after a failure.
+skew of one and honor failed-node taints. Cold replacement pods may consolidate
+across the remaining eligible workers after a failure.
 
 The workload startup probes protect up to 90 seconds of initialization before
 liveness checks can restart a container. The zero-second `NotReady` and

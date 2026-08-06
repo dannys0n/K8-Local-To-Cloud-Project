@@ -40,7 +40,7 @@ endpoints through the headless Service DNS.
    replacement, and the new server restores the durable counter and last claim
    coordinate from PostgreSQL.
    Any unacknowledged counter operation retries with the same operation ID.
-6. Confirm an existing spare owns `tcp-server-1`, the generation increased, and
+6. Confirm a cold replacement owns `tcp-server-1`, the generation increased, and
    the PostgreSQL `client_state` counter continues from its previous value.
 
 The server-side TCP socket cannot survive a pod failure, but the client-to-gateway

@@ -190,7 +190,7 @@ PostgreSQL, while the browser retries any unacknowledged counter operation with
 the same operation ID.
 The logical server identity, durable counter, and last entity claim remain in
 PostgreSQL when a pod is replaced. Movement after that claim remains transient.
-An expired 1.5-second lease is claimed by an already-running spare;
+An expired 1.5-second lease is claimed by a cold replacement pod;
 the generation increases to fence the old owner. Redis presence keys expire and
 repopulate automatically. Generic test messages remain at-least-once, while
 counter increments have exactly-once database effects. Without a location handshake, port 9000 remains the
@@ -300,10 +300,10 @@ outside the worker pool.
 Changing the dedicated kind database worker requires recreating the cluster;
 the startup scripts reject an in-place move that would strand the local PVC.
 
-Kubernetes restores failed pods and nodes, but location recovery does not wait
-for node eviction. Ready spare pods poll PostgreSQL-backed leases every 250ms;
-after a 1.5-second lease expires, one spare atomically claims the location and
-increments its fencing generation. These lab defaults are configurable through
+Kubernetes creates a cold replacement when a server pod fails. Replacement pods
+poll PostgreSQL-backed leases every 250ms; after a 1.5-second lease expires, one
+replacement atomically claims the location and increments its fencing generation.
+These lab defaults are configurable through
 `ASSIGNMENT_LEASE_DURATION` and `ASSIGNMENT_RENEW_INTERVAL`; production values
 must be validated against database and network latency. The replacement
 application remains responsible for resumable sessions and application-specific
@@ -325,7 +325,7 @@ they can burst while replacements start. They discover every active location
 owner and do not claim, rebalance, or exclusively own servers. Hard hostname
 spreading distributes server and dynamically scaled gateway pods across kind's
 general workers; spread counts the current rollout revision, and failed-node taints are
-honored so replacement pods can consolidate on survivors. Any ready unassigned
-server pods can take over a location lease while Kubernetes creates replacements.
+honored so cold replacement pods can consolidate on survivors. Each replacement
+claims the expired lease for the location previously owned by the failed pod.
 Kubernetes does not automatically rebalance healthy pods when repaired workers
 return; the failure drill documents the explicit rolling rebalance command.
