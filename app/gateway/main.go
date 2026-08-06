@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -48,6 +49,15 @@ type publicLocation struct {
 	Generation int64   `json:"generation"`
 }
 
+type backendResponse struct {
+	Error           string  `json:"error"`
+	Reroute         int64   `json:"reroute"`
+	ClientUID       string  `json:"client_uid"`
+	InputSequence   uint64  `json:"input_sequence"`
+	ClientLatitude  float64 `json:"client_latitude"`
+	ClientLongitude float64 `json:"client_longitude"`
+}
+
 type session struct {
 	ID          string    `json:"id"`
 	Client      string    `json:"client"`
@@ -66,6 +76,7 @@ type session struct {
 
 type gateway struct {
 	instance         string
+	gatewayMetadata  []byte
 	serverHost       string
 	serverPort       string
 	discoveryEvery   time.Duration
@@ -114,10 +125,13 @@ func main() {
 		os.Exit(1)
 	}
 
+	instance := envOrDefault("POD_NAME", hostname())
+	encodedInstance, _ := json.Marshal(instance)
 	g := &gateway{
-		instance:       envOrDefault("POD_NAME", hostname()),
-		serverHost:     envOrDefault("SERVER_HOST", "tcp-server-headless"),
-		serverPort:     envOrDefault("SERVER_PORT", "7000"),
+		instance:        instance,
+		gatewayMetadata: append([]byte(`"gateway":`), encodedInstance...),
+		serverHost:      envOrDefault("SERVER_HOST", "tcp-server-headless"),
+		serverPort:      envOrDefault("SERVER_PORT", "7000"),
 		discoveryEvery: discoveryEvery, discoveryTimeout: discoveryTimeout, routeTimeout: routeTimeout,
 		backendTimeout: backendTimeout, logger: logger,
 		routes: make(map[string]backend), sessions: make(map[string]session),
@@ -230,7 +244,8 @@ func (g *gateway) handleClient(ctx context.Context, client net.Conn) {
 				continue
 			}
 			response, err := g.exchange(candidate, message)
-			if err != nil || responseHasError(response) {
+			state, valid := decodeBackendResponse(response)
+			if err != nil || !valid || state.Error != "" {
 				candidate.conn.Close()
 				writeJSONError(clientWriter, "teleport failed")
 				continue
@@ -244,7 +259,7 @@ func (g *gateway) handleClient(ctx context.Context, client net.Conn) {
 			clientLongitude = longitude
 			g.updateSession(id, client.RemoteAddr().String(), candidate.info, clientLatitude, clientLongitude)
 			response = g.withGatewayMetadata(response)
-			g.updateSessionFromResponse(id, response)
+			g.updateSessionFromResponse(id, state)
 			if _, err := clientWriter.Write(response); err != nil || clientWriter.Flush() != nil {
 				return
 			}
@@ -307,7 +322,8 @@ func (g *gateway) handleClient(ctx context.Context, client net.Conn) {
 		}
 
 		response, err := g.exchange(downstream, message)
-		if err != nil || responseHasError(response) {
+		state, valid := decodeBackendResponse(response)
+		if err != nil || !valid || state.Error != "" {
 			failed := downstream.info
 			downstream.conn.Close()
 			downstream = nil
@@ -330,8 +346,9 @@ func (g *gateway) handleClient(ctx context.Context, client net.Conn) {
 			downstream = candidate
 			g.updateSession(id, client.RemoteAddr().String(), candidate.info, clientLatitude, clientLongitude)
 			response, err = g.exchange(downstream, message)
+			state, valid = decodeBackendResponse(response)
 		}
-		if err != nil || responseHasError(response) {
+		if err != nil || !valid || state.Error != "" {
 			if downstream != nil {
 				downstream.conn.Close()
 				downstream = nil
@@ -340,28 +357,21 @@ func (g *gateway) handleClient(ctx context.Context, client net.Conn) {
 			writeJSONError(clientWriter, "backend request failed")
 			continue
 		}
-		var handoff struct {
-			Reroute         int64   `json:"reroute"`
-			ClientUID       string  `json:"client_uid"`
-			InputSequence   uint64  `json:"input_sequence"`
-			ClientLatitude  float64 `json:"client_latitude"`
-			ClientLongitude float64 `json:"client_longitude"`
+		if state.ClientUID != "" {
+			clientLatitude = state.ClientLatitude
+			clientLongitude = state.ClientLongitude
 		}
-		decodedHandoff := json.Unmarshal(response, &handoff) == nil
-		if decodedHandoff && handoff.ClientUID != "" {
-			clientLatitude = handoff.ClientLatitude
-			clientLongitude = handoff.ClientLongitude
-		}
-		if decodedHandoff && handoff.Reroute != 0 {
-			nextLocation := strconv.FormatInt(handoff.Reroute, 10)
+		if state.Reroute != 0 {
+			nextLocation := strconv.FormatInt(state.Reroute, 10)
 			candidate, _, routeErr := g.openRoute(ctx, nextLocation, nil)
 			if routeErr != nil {
 				writeJSONError(clientWriter, routeErr.Error())
 				continue
 			}
-			resume := fmt.Sprintf("@resume %s %d %.8f %.8f", handoff.ClientUID, handoff.InputSequence, handoff.ClientLatitude, handoff.ClientLongitude)
+			resume := fmt.Sprintf("@resume %s %d %.8f %.8f", state.ClientUID, state.InputSequence, state.ClientLatitude, state.ClientLongitude)
 			resumed, resumeErr := g.exchange(candidate, resume)
-			if resumeErr != nil || responseHasError(resumed) {
+			resumedState, resumeValid := decodeBackendResponse(resumed)
+			if resumeErr != nil || !resumeValid || resumedState.Error != "" {
 				candidate.conn.Close()
 				writeJSONError(clientWriter, "server handoff failed")
 				continue
@@ -369,13 +379,14 @@ func (g *gateway) handleClient(ctx context.Context, client net.Conn) {
 			downstream.conn.Close()
 			downstream = candidate
 			requested = nextLocation
-			clientLatitude = handoff.ClientLatitude
-			clientLongitude = handoff.ClientLongitude
+			clientLatitude = state.ClientLatitude
+			clientLongitude = state.ClientLongitude
 			g.updateSession(id, client.RemoteAddr().String(), candidate.info, clientLatitude, clientLongitude)
 			response = resumed
+			state = resumedState
 		}
 		response = g.withGatewayMetadata(response)
-		g.updateSessionFromResponse(id, response)
+		g.updateSessionFromResponse(id, state)
 		if _, err := clientWriter.Write(response); err != nil || clientWriter.Flush() != nil {
 			return
 		}
@@ -383,16 +394,17 @@ func (g *gateway) handleClient(ctx context.Context, client net.Conn) {
 }
 
 func (g *gateway) withGatewayMetadata(body []byte) []byte {
-	var response map[string]any
-	if err := json.Unmarshal(body, &response); err != nil {
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) < 2 || trimmed[0] != '{' || trimmed[len(trimmed)-1] != '}' {
 		return body
 	}
-	response["gateway"] = g.instance
-	encoded, err := json.Marshal(response)
-	if err != nil {
-		return body
+	result := make([]byte, 0, len(trimmed)+len(g.gatewayMetadata)+2)
+	result = append(result, trimmed[:len(trimmed)-1]...)
+	if len(trimmed) > 2 {
+		result = append(result, ',')
 	}
-	return append(encoded, '\n')
+	result = append(result, g.gatewayMetadata...)
+	return append(result, '}', '\n')
 }
 
 func (g *gateway) openRoute(ctx context.Context, requested string, previous *backend) (*backendConnection, []byte, error) {
@@ -663,13 +675,8 @@ func (g *gateway) setSessionStatus(id, status string) {
 	g.mu.Unlock()
 }
 
-func (g *gateway) updateSessionFromResponse(id string, body []byte) {
-	var state struct {
-		ClientUID       string  `json:"client_uid"`
-		ClientLatitude  float64 `json:"client_latitude"`
-		ClientLongitude float64 `json:"client_longitude"`
-	}
-	if json.Unmarshal(body, &state) != nil || state.ClientUID == "" {
+func (g *gateway) updateSessionFromResponse(id string, state backendResponse) {
+	if state.ClientUID == "" {
 		return
 	}
 	g.mu.Lock()
@@ -682,11 +689,10 @@ func (g *gateway) updateSessionFromResponse(id string, body []byte) {
 	g.mu.Unlock()
 }
 
-func responseHasError(body []byte) bool {
-	var response struct {
-		Error string `json:"error"`
-	}
-	return json.Unmarshal(body, &response) == nil && response.Error != ""
+func decodeBackendResponse(body []byte) (backendResponse, bool) {
+	var response backendResponse
+	err := json.Unmarshal(body, &response)
+	return response, err == nil
 }
 
 func writeJSONError(writer *bufio.Writer, message string) {

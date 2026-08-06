@@ -50,7 +50,10 @@ class GatewayClient:
             with self.state_lock:
                 self.connection = "gateway"
             try:
-                route = self._exchange("@location any")
+                if self.latitude is None:
+                    route = self._exchange("@location any")
+                else:
+                    route = self._exchange(f"@position {self.latitude:.8f} {self.longitude:.8f}")
             except GatewayResponseError:
                 route = None
         except (OSError, ValueError, ConnectionError):
@@ -131,18 +134,6 @@ class GatewayClient:
         with self.lock:
             try:
                 self._connect()
-                if self.latitude is not None:
-                    try:
-                        route = self._exchange(f"@position {self.latitude:.8f} {self.longitude:.8f}")
-                    except GatewayResponseError:
-                        route = None
-                    with self.state_lock:
-                        self.route = route
-                        if route:
-                            self.gateway = route.get("gateway")
-                            self.connection = "ready"
-                        else:
-                            self.connection = "gateway"
                 with self.state_lock:
                     return self.route
             except (OSError, ValueError, ConnectionError):

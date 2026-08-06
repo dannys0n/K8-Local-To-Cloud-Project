@@ -36,7 +36,7 @@ const (
 	visibilityActiveTicks = 20
 	visibilityInterval    = 100 * time.Millisecond
 	visibilityLease       = 5 * time.Second
-	visibilityRadiusPixels = 450.0
+	visibilityRadiusPixels = 250.0
 	entityCleanupTicks    = 600
 	mercatorLatitudeLimit = 85.05112878
 )
@@ -388,11 +388,6 @@ func (s *server) finishDurableBatch(batch []durableCommand, counters []uint64, l
 				s.entityMu.Lock()
 				if entity := s.entities[queued.request.ClientUID]; entity != nil {
 					entity.counter = result.counter
-				} else {
-					s.entities[queued.request.ClientUID] = &entityState{
-						latitude: result.latitude, longitude: result.longitude,
-						counter: result.counter, viewZoom: minimumViewZoom,
-					}
 				}
 				s.entityMu.Unlock()
 			}
