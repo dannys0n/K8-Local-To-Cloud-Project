@@ -12,3 +12,10 @@ patches:
   - path: stats-nodeport-patch.yaml
   - path: gateway-hpa-fast-patch.yaml
   - path: server-autoscaler-fast-patch.yaml
+  - path: server-autoscaler-fast-env-patch.yaml
+    target:
+      group: custompodautoscaler.com
+      version: v1
+      kind: CustomPodAutoscaler
+      name: tcp-server-cpu
+      namespace: tcp-lab

@@ -758,6 +758,31 @@ func createSchema(ctx context.Context, db *sql.DB) error {
 			VALUES ('tcp-server-location-' || new_id);
 			RETURN QUERY SELECT new_id, new_latitude, new_longitude;
 		END
+		$$;
+		CREATE OR REPLACE FUNCTION tcp_retire_location()
+		RETURNS TABLE(location_id BIGINT, server_id TEXT)
+		LANGUAGE plpgsql AS $$
+		DECLARE
+			retired_server_id TEXT;
+			retired_location_id BIGINT;
+		BEGIN
+			IF (SELECT COUNT(*) FROM tcp_server_state WHERE enabled) <= 1 THEN
+				RAISE EXCEPTION 'cannot retire the final location';
+			END IF;
+			SELECT state.server_id, state.location_id
+			INTO retired_server_id, retired_location_id
+			FROM tcp_server_state AS state
+			WHERE state.enabled
+			ORDER BY state.location_id DESC
+			FOR UPDATE LIMIT 1;
+			UPDATE tcp_server_state
+			SET enabled = FALSE, updated_at = NOW()
+			WHERE tcp_server_state.server_id = retired_server_id;
+			UPDATE tcp_server_assignment
+			SET owner_instance_id = NULL, lease_until = NULL, generation = generation + 1
+			WHERE tcp_server_assignment.server_id = retired_server_id;
+			RETURN QUERY SELECT retired_location_id, retired_server_id;
+		END
 		$$;`); err != nil {
 		return fmt.Errorf("create autoscaled location operation: %w", err)
 	}

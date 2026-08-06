@@ -1,0 +1,20 @@
+- op: add
+  path: /spec/template/spec/containers/0/env/-
+  value:
+    name: SCALE_DOWN_STABILIZATION_EVALUATIONS
+    value: "1"
+- op: add
+  path: /spec/template/spec/containers/0/env/-
+  value:
+    name: SCALE_DOWN_CPU_THRESHOLD
+    value: "20"
+- op: add
+  path: /spec/template/spec/containers/0/env/-
+  value:
+    name: MAX_SCALE_CHANGE_PODS
+    value: "4"
+- op: add
+  path: /spec/template/spec/containers/0/env/-
+  value:
+    name: MAX_SCALE_CHANGE_PERCENT
+    value: "100"

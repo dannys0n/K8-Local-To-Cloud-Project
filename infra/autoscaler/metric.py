@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Reduce Kubernetes CPU samples to the busiest server pod."""
+"""Report CPU utilization independently for every sampled server pod."""
 
 import json
 import os
@@ -14,9 +14,9 @@ def main() -> None:
     if not usage_millicores:
         raise ValueError("no server CPU samples are available")
     request_millicores = float(os.environ["SERVER_CPU_REQUEST_MILLICORES"])
-    maximum = max(usage_millicores) / request_millicores * 100
+    utilizations = [usage / request_millicores * 100 for usage in usage_millicores]
     json.dump(
-        {"current_replicas": int(cpu["current_replicas"]), "maximum_utilization": maximum},
+        {"current_replicas": int(cpu["current_replicas"]), "utilizations": utilizations},
         sys.stdout,
     )
 

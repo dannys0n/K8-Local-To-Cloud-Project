@@ -87,30 +87,35 @@ Names are intentionally not part of location identity or routing. Clients displa
 `LatLng` values and can later be indexed with Redis GEO; Leaflet's Web Mercator
 projection remains a browser display detail and is not persisted.
 
-PostgreSQL exposes one internal operation used by the server autoscaler:
+PostgreSQL exposes two internal operations used by the server autoscaler:
 
 ```sql
 SELECT * FROM tcp_create_location();
+SELECT * FROM tcp_retire_location();
 ```
 
-It assigns a random coordinate and permanent atomic ID after the autoscaler adds
-a server replica. The dashboard has no location mutation or Deployment scaling
-permissions; it only visualizes locations created through this automatic path.
+The first assigns a random coordinate and permanent atomic ID after the autoscaler
+adds a server replica. The second disables the highest active location and fences
+its owner after a replica is removed; referenced durable rows are retained. The
+dashboard has no location mutation or Deployment scaling permissions.
 
-Server CPU autoscaling is scale-up only. Metrics Server reports CPU relative to
+Metrics Server reports server CPU relative to
 the server container's 250 millicore request. The server has no CPU limit, so it
-can still burst when node capacity is available. If any ready server pod reaches 80%, the custom
-evaluator requests exactly one additional replica. After Kubernetes accepts the
-scale, a post-scale hook invokes `tcp_create_location()` once, using the same
-random placement operation as the dashboard. The new generic server pod then
-claims that location through the normal PostgreSQL lease path. Evaluations run
+can still burst when node capacity is available. The evaluator examines every
+ready pod independently and sums the additional capacity implied by pods above
+80%. After Kubernetes accepts the scale, a post-scale hook creates the same
+number of locations. New generic server pods claim them through the normal
+PostgreSQL lease path. Evaluations run
 every 10 seconds in the kind overlay and every 15 seconds in the EKS/base
 configuration, stopping at 50 replicas. Ten seconds is Metrics Server's minimum
 supported resolution, so kind sampling and evaluation remain aligned. Missing metrics stop an evaluation;
-they never trigger speculative scaling. Automatic scale-down and location
-merging are intentionally not implemented. A pending location-creation hook
-also blocks another scale request so a transient database outage cannot add a
-new replica every evaluation interval. The Deployment manifest intentionally
+they never trigger speculative scaling or scale-down. Scale-down begins only
+after every replica has a sample at or below 20% for 20 evaluations, calculates
+aggregate required capacity, and retires the same number of locations as removed
+replicas. The base limits one change or 25% per evaluation. The kind overlay uses
+the same 20% threshold with one evaluation and the larger of four pods or 100%.
+A pending location operation blocks another scale request so a
+transient database outage cannot repeatedly change replicas. The Deployment manifest intentionally
 omits `spec.replicas`; the autoscaler owns that field and enforces a minimum of
 one, preventing later Kustomize applies from resetting a scaled Deployment.
 
