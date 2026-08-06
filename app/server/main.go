@@ -581,16 +581,24 @@ func (s *server) ensureEntity(ctx context.Context, clientUID string, refreshCoun
 		return false, nil
 	}
 	loaded := &entityState{viewZoom: minimumViewZoom}
+	var persisted bool
 	queryCtx, cancel := context.WithTimeout(ctx, time.Second)
 	defer cancel()
 	err := s.db.QueryRowContext(queryCtx, `
-		SELECT COALESCE(client.counter, 0), COALESCE(entity.latitude, 0), COALESCE(entity.longitude, 0)
+		SELECT COALESCE(client.counter, 0), COALESCE(entity.latitude, 0),
+			COALESCE(entity.longitude, 0), entity.entity_uid IS NOT NULL
 		FROM (SELECT $1::TEXT AS entity_uid) AS requested
 		LEFT JOIN client_state AS client ON client.client_uid = requested.entity_uid
 		LEFT JOIN entity_state AS entity ON entity.entity_uid = requested.entity_uid`, clientUID).
-		Scan(&loaded.counter, &loaded.latitude, &loaded.longitude)
+		Scan(&loaded.counter, &loaded.latitude, &loaded.longitude, &persisted)
 	if err != nil {
 		return false, err
+	}
+	if !persisted {
+		loaded.latitude, loaded.longitude, err = randomCoordinate()
+		if err != nil {
+			return false, err
+		}
 	}
 	s.entityMu.Lock()
 	if entity, exists := s.entities[clientUID]; exists {
