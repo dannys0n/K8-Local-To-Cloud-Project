@@ -11,7 +11,7 @@ except ModuleNotFoundError:
     from tools.gateway_client import GatewayClient, GatewayResponseError
 
 
-INPUT_INTERVAL = 0.025
+INPUT_INTERVAL = 1 / 30
 CONNECTION_STATES = {"disconnected": 0, "gateway": 1, "ready": 2}
 
 
