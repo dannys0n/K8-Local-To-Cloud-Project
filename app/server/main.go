@@ -92,12 +92,26 @@ type response struct {
 	Time            string          `json:"time"`
 	Tick            uint64          `json:"tick"`
 	ClientUID       string          `json:"client_uid,omitempty"`
-	OperationID     string          `json:"operation_id,omitempty"`
 	ClientLatitude  float64         `json:"client_latitude"`
 	ClientLongitude float64         `json:"client_longitude"`
 	InputSequence   uint64          `json:"input_sequence,omitempty"`
 	Reroute         int64           `json:"reroute,omitempty"`
 	Entities        []visibleEntity `json:"entities,omitempty"`
+}
+
+type durableResponse struct {
+	Server      string `json:"server"`
+	LocationID  int64  `json:"location_id"`
+	Latitude    float64 `json:"latitude"`
+	Longitude   float64 `json:"longitude"`
+	Instance    string `json:"instance"`
+	Generation  int64  `json:"generation"`
+	Counter     uint64 `json:"counter"`
+	Message     string `json:"message"`
+	Time        string `json:"time"`
+	Tick        uint64 `json:"tick"`
+	ClientUID   string `json:"client_uid"`
+	OperationID string `json:"operation_id"`
 }
 
 type visibleEntity struct {
@@ -120,17 +134,14 @@ type durableRequest struct {
 }
 
 type durableCommand struct {
-	assignment assignment
-	request    durableRequest
-	result     chan durableResult
+	request durableRequest
+	result  chan durableResult
 }
 
 type durableResult struct {
-	counter   uint64
-	latitude  float64
-	longitude float64
-	tick      uint64
-	err       error
+	counter uint64
+	tick    uint64
+	err     error
 }
 
 type inputIntent struct {
@@ -298,118 +309,33 @@ func (s *server) runTicks(ctx context.Context) {
 }
 
 func (s *server) runDurableCommands(ctx context.Context) {
-	ticker := time.NewTicker(s.tickInterval)
-	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
-			s.commitDurableCommands(ctx, s.tick.Load())
-		}
-	}
-}
-
-func (s *server) commitDurableCommands(ctx context.Context, tick uint64) {
-	batch := make([]durableCommand, 0, 256)
-	for len(batch) < 1024 {
-		select {
 		case command := <-s.durable:
-			batch = append(batch, command)
-		default:
-			if len(batch) > 0 {
-				s.applyDurableBatch(ctx, tick, batch)
-			}
-			return
+			s.applyDurableCommand(ctx, command)
 		}
 	}
-	s.applyDurableBatch(ctx, tick, batch)
 }
 
-func (s *server) applyDurableBatch(ctx context.Context, tick uint64, batch []durableCommand) {
+func (s *server) applyDurableCommand(ctx context.Context, command durableCommand) {
 	queryCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
-	tx, err := s.db.BeginTx(queryCtx, nil)
-	if err != nil {
-		s.finishDurableBatch(batch, nil, nil, nil, nil, tick, err)
-		return
+	result := durableResult{tick: s.tick.Load()}
+	var applied bool
+	result.err = s.db.QueryRowContext(queryCtx,
+		`SELECT counter_value, was_applied FROM tcp_increment_client($1, $2, $3)`,
+		command.request.ClientUID, command.request.OperationID, command.request.Kind).
+		Scan(&result.counter, &applied)
+	if result.err == nil && applied {
+		s.entityMu.Lock()
+		if entity := s.entities[command.request.ClientUID]; entity != nil {
+			entity.counter = result.counter
+		}
+		s.entityMu.Unlock()
 	}
-	defer tx.Rollback()
-	if _, err = tx.ExecContext(queryCtx, `SET LOCAL synchronous_commit = on`); err != nil {
-		s.finishDurableBatch(batch, nil, nil, nil, nil, tick, err)
-		return
-	}
-	results := make([]uint64, len(batch))
-	latitudes := make([]float64, len(batch))
-	longitudes := make([]float64, len(batch))
-	applied := make([]bool, len(batch))
-	for index, queued := range batch {
-		var lockedServer string
-		err = tx.QueryRowContext(queryCtx, `
-			SELECT server_id FROM tcp_server_assignment
-			WHERE server_id = $1 AND owner_instance_id = $2 AND generation = $3
-				AND lease_until > NOW()
-			FOR UPDATE`, queued.assignment.ServerID, s.instanceID, queued.assignment.Generation).Scan(&lockedServer)
-		if err != nil {
-			break
-		}
-		_, err = tx.ExecContext(queryCtx, `
-			INSERT INTO client_state (client_uid) VALUES ($1)
-			ON CONFLICT (client_uid) DO NOTHING`, queued.request.ClientUID)
-		if err != nil {
-			break
-		}
-		err = tx.QueryRowContext(queryCtx, `
-			SELECT resulting_counter, latitude, longitude FROM client_operation
-			WHERE client_uid = $1 AND operation_id = $2`,
-			queued.request.ClientUID, queued.request.OperationID).
-			Scan(&results[index], &latitudes[index], &longitudes[index])
-		if err == nil {
-			continue
-		}
-		if !errors.Is(err, sql.ErrNoRows) {
-			break
-		}
-		err = tx.QueryRowContext(queryCtx, `
-			UPDATE client_state SET counter = counter + 1, updated_at = NOW()
-			WHERE client_uid = $1
-			RETURNING counter, latitude, longitude`, queued.request.ClientUID).
-			Scan(&results[index], &latitudes[index], &longitudes[index])
-		if err != nil {
-			break
-		}
-		_, err = tx.ExecContext(queryCtx, `
-			INSERT INTO client_operation (client_uid, operation_id, operation_type, resulting_counter, latitude, longitude)
-			VALUES ($1, $2, $3, $4, $5, $6)`, queued.request.ClientUID, queued.request.OperationID,
-			queued.request.Kind, results[index], latitudes[index], longitudes[index])
-		if err != nil {
-			break
-		}
-		applied[index] = true
-	}
-	if err == nil {
-		err = tx.Commit()
-	}
-	s.finishDurableBatch(batch, results, latitudes, longitudes, applied, tick, err)
-}
-
-func (s *server) finishDurableBatch(batch []durableCommand, counters []uint64, latitudes, longitudes []float64, applied []bool, tick uint64, err error) {
-	for index, queued := range batch {
-		result := durableResult{tick: tick, err: err}
-		if err == nil {
-			result.counter = counters[index]
-			result.latitude = latitudes[index]
-			result.longitude = longitudes[index]
-			if applied[index] {
-				s.entityMu.Lock()
-				if entity := s.entities[queued.request.ClientUID]; entity != nil {
-					entity.counter = result.counter
-				}
-				s.entityMu.Unlock()
-			}
-		}
-		queued.result <- result
-	}
+	command.result <- result
 }
 
 func (s *server) applyTransientInputs(tick uint64) {
@@ -682,8 +608,15 @@ func schemaReady(ctx context.Context, db *sql.DB) (bool, error) {
 			AND to_regclass('client_state') IS NOT NULL
 			AND to_regclass('entity_state') IS NOT NULL
 			AND to_regclass('client_operation') IS NOT NULL
+			AND to_regprocedure('tcp_increment_client(text,text,text)') IS NOT NULL
 			AND to_regprocedure('tcp_create_location()') IS NOT NULL
-			AND to_regprocedure('tcp_retire_location()') IS NOT NULL`).Scan(&ready)
+			AND to_regprocedure('tcp_retire_location()') IS NOT NULL
+			AND NOT EXISTS (
+				SELECT 1 FROM information_schema.columns
+				WHERE (table_name = 'client_state' AND column_name IN ('latitude', 'longitude'))
+					OR (table_name = 'client_operation' AND column_name IN ('latitude', 'longitude'))
+					OR (table_name = 'tcp_server_state' AND column_name = 'counter')
+			)`).Scan(&ready)
 	return ready, err
 }
 
@@ -711,7 +644,6 @@ func createSchema(ctx context.Context, db *sql.DB) error {
 			latitude DOUBLE PRECISION NOT NULL DEFAULT 0,
 			longitude DOUBLE PRECISION NOT NULL DEFAULT 0,
 			enabled BOOLEAN NOT NULL DEFAULT TRUE,
-			counter BIGINT NOT NULL DEFAULT 0 CHECK (counter >= 0),
 			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		);
 		CREATE TABLE IF NOT EXISTS tcp_server_assignment (
@@ -723,8 +655,6 @@ func createSchema(ctx context.Context, db *sql.DB) error {
 		CREATE TABLE IF NOT EXISTS client_state (
 			client_uid TEXT PRIMARY KEY,
 			counter BIGINT NOT NULL DEFAULT 0 CHECK (counter >= 0),
-			latitude DOUBLE PRECISION NOT NULL DEFAULT 0,
-			longitude DOUBLE PRECISION NOT NULL DEFAULT 0,
 			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		);
 		CREATE TABLE IF NOT EXISTS entity_state (
@@ -742,35 +672,15 @@ func createSchema(ctx context.Context, db *sql.DB) error {
 			operation_id TEXT NOT NULL,
 			operation_type TEXT NOT NULL DEFAULT 'increment',
 			resulting_counter BIGINT NOT NULL CHECK (resulting_counter >= 0),
-			latitude DOUBLE PRECISION NOT NULL,
-			longitude DOUBLE PRECISION NOT NULL,
 			committed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 			PRIMARY KEY (client_uid, operation_id)
 		);
-		ALTER TABLE tcp_server_state ADD COLUMN IF NOT EXISTS location_id BIGINT;
-		WITH numbered AS (
-			SELECT server_id, ROW_NUMBER() OVER (ORDER BY server_id) AS location_id
-			FROM tcp_server_state WHERE location_id IS NULL
-		)
-		UPDATE tcp_server_state AS state SET location_id = numbered.location_id
-		FROM numbered WHERE state.server_id = numbered.server_id;
-		ALTER TABLE tcp_server_state ALTER COLUMN location_id SET NOT NULL;
-		CREATE UNIQUE INDEX IF NOT EXISTS tcp_server_state_location_id
-			ON tcp_server_state (location_id);
-		ALTER TABLE entity_state ADD COLUMN IF NOT EXISTS location_id BIGINT;
-		UPDATE entity_state AS entity SET location_id = state.location_id
-		FROM tcp_server_state AS state
-		WHERE entity.server_id = state.server_id AND entity.location_id IS NULL;
-		ALTER TABLE entity_state ALTER COLUMN location_id SET NOT NULL;
-		DROP INDEX IF EXISTS tcp_server_state_location;
-		ALTER TABLE entity_state DROP COLUMN IF EXISTS location;
-		ALTER TABLE tcp_server_state DROP COLUMN IF EXISTS location;
-		ALTER TABLE tcp_server_state ADD COLUMN IF NOT EXISTS latitude DOUBLE PRECISION NOT NULL DEFAULT 0;
-		ALTER TABLE tcp_server_state ADD COLUMN IF NOT EXISTS longitude DOUBLE PRECISION NOT NULL DEFAULT 0;
-		ALTER TABLE tcp_server_state ADD COLUMN IF NOT EXISTS enabled BOOLEAN NOT NULL DEFAULT TRUE;
-		CREATE SEQUENCE IF NOT EXISTS tcp_location_id_seq;
-		ALTER TABLE client_operation ADD COLUMN IF NOT EXISTS operation_type TEXT NOT NULL DEFAULT 'increment';
-		ALTER TABLE client_operation ALTER COLUMN operation_type SET DEFAULT 'increment'`
+		ALTER TABLE tcp_server_state DROP COLUMN IF EXISTS counter;
+		ALTER TABLE client_state DROP COLUMN IF EXISTS latitude;
+		ALTER TABLE client_state DROP COLUMN IF EXISTS longitude;
+		ALTER TABLE client_operation DROP COLUMN IF EXISTS latitude;
+		ALTER TABLE client_operation DROP COLUMN IF EXISTS longitude;
+		CREATE SEQUENCE IF NOT EXISTS tcp_location_id_seq;`
 	if _, err := db.ExecContext(ctx, schema); err != nil {
 		return fmt.Errorf("create schema: %w", err)
 	}
@@ -796,6 +706,50 @@ func createSchema(ctx context.Context, db *sql.DB) error {
 		SELECT setval('tcp_location_id_seq',
 			GREATEST((SELECT last_value FROM tcp_location_id_seq),
 				(SELECT COALESCE(MAX(location_id), 1) FROM tcp_server_state)), true);
+		CREATE OR REPLACE FUNCTION tcp_increment_client(
+			requested_client_uid TEXT,
+			requested_operation_id TEXT,
+			requested_operation_type TEXT
+		)
+		RETURNS TABLE(counter_value BIGINT, was_applied BOOLEAN)
+		LANGUAGE plpgsql
+		SET synchronous_commit = on
+		AS $$
+		DECLARE
+			current_counter BIGINT;
+		BEGIN
+			INSERT INTO client_state (client_uid)
+			VALUES (requested_client_uid)
+			ON CONFLICT (client_uid) DO NOTHING;
+
+			PERFORM 1 FROM client_state
+			WHERE client_uid = requested_client_uid
+			FOR UPDATE;
+
+			SELECT operation.resulting_counter
+			INTO current_counter
+			FROM client_operation AS operation
+			WHERE operation.client_uid = requested_client_uid
+				AND operation.operation_id = requested_operation_id;
+			IF FOUND THEN
+				RETURN QUERY SELECT current_counter, FALSE;
+				RETURN;
+			END IF;
+
+			UPDATE client_state
+			SET counter = counter + 1, updated_at = NOW()
+			WHERE client_uid = requested_client_uid
+			RETURNING counter INTO current_counter;
+
+			INSERT INTO client_operation (
+				client_uid, operation_id, operation_type, resulting_counter
+			) VALUES (
+				requested_client_uid, requested_operation_id,
+				requested_operation_type, current_counter
+			);
+			RETURN QUERY SELECT current_counter, TRUE;
+		END
+		$$;
 		CREATE OR REPLACE FUNCTION tcp_create_location()
 		RETURNS TABLE(location_id BIGINT, latitude DOUBLE PRECISION, longitude DOUBLE PRECISION)
 		LANGUAGE plpgsql AS $$
@@ -1171,7 +1125,7 @@ func (s *server) storeEntityClaim(ctx context.Context, current *assignment, enti
 }
 
 func (s *server) handleDurableCommand(ctx context.Context, writer *bufio.Writer, bound *assignment, request durableRequest, logger *slog.Logger) bool {
-	command := durableCommand{assignment: *bound, request: request, result: make(chan durableResult, 1)}
+	command := durableCommand{request: request, result: make(chan durableResult, 1)}
 	select {
 	case s.durable <- command:
 	case <-ctx.Done():
@@ -1267,14 +1221,12 @@ func validIdentifier(value string) bool {
 }
 
 func (s *server) writeDurableResponse(writer *bufio.Writer, current *assignment, command durableRequest, result durableResult) bool {
-	message := command.Kind
-	body, err := json.Marshal(response{
+	body, err := json.Marshal(durableResponse{
 		Server: current.ServerID, LocationID: current.LocationID,
 		Latitude: current.Latitude, Longitude: current.Longitude, Instance: s.podName,
-		Generation: current.Generation, Counter: result.counter, Message: message,
+		Generation: current.Generation, Counter: result.counter, Message: command.Kind,
 		Time: time.Now().UTC().Format(time.RFC3339Nano), Tick: result.tick,
 		ClientUID: command.ClientUID, OperationID: command.OperationID,
-		ClientLatitude: result.latitude, ClientLongitude: result.longitude,
 	})
 	if err != nil {
 		return false
@@ -1327,7 +1279,7 @@ func (s *server) writeResponse(writer *bufio.Writer, current *assignment, counte
 
 func (s *server) writeDatabaseError(writer *bufio.Writer, logger *slog.Logger, err error) {
 	logger.Error("database operation", "instance", s.podName, "error", err)
-	_, _ = fmt.Fprintln(writer, `{"error":"database unavailable or stale assignment"}`)
+	_, _ = fmt.Fprintln(writer, `{"error":"database operation failed"}`)
 	_ = writer.Flush()
 }
 

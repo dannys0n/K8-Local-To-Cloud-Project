@@ -51,6 +51,7 @@ type publicLocation struct {
 
 type backendResponse struct {
 	Error           string  `json:"error"`
+	Message         string  `json:"message"`
 	Reroute         int64   `json:"reroute"`
 	ClientUID       string  `json:"client_uid"`
 	InputSequence   uint64  `json:"input_sequence"`
@@ -359,7 +360,7 @@ func (g *gateway) handleClient(ctx context.Context, client net.Conn) {
 			writeJSONError(clientWriter, "backend request failed")
 			continue
 		}
-		if state.ClientUID != "" {
+		if state.hasAuthoritativePosition() {
 			clientLatitude = state.ClientLatitude
 			clientLongitude = state.ClientLongitude
 		}
@@ -687,7 +688,7 @@ func (g *gateway) setSessionStatus(id, status string) {
 }
 
 func (g *gateway) updateSessionFromResponse(id string, state backendResponse) {
-	if state.ClientUID == "" {
+	if !state.hasAuthoritativePosition() {
 		return
 	}
 	g.mu.Lock()
@@ -698,6 +699,10 @@ func (g *gateway) updateSessionFromResponse(id string, state backendResponse) {
 		g.sessions[id] = current
 	}
 	g.mu.Unlock()
+}
+
+func (state backendResponse) hasAuthoritativePosition() bool {
+	return state.ClientUID != "" && (state.Message == "state" || state.Message == "teleport")
 }
 
 func decodeBackendResponse(body []byte) (backendResponse, bool) {
