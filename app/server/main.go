@@ -26,19 +26,19 @@ import (
 )
 
 const (
-	defaultLeaseDuration  = 3 * time.Second
-	defaultRenewInterval  = 500 * time.Millisecond
-	defaultTickInterval   = 50 * time.Millisecond
+	defaultLeaseDuration    = 3 * time.Second
+	defaultRenewInterval    = 500 * time.Millisecond
+	defaultTickInterval     = 50 * time.Millisecond
 	movementPixelsPerSecond = 120.0
-	minimumViewZoom        = 2.0
-	maximumViewZoom        = 18.0
-	inputTimeoutTicks     = 8
-	visibilityActiveTicks = 20
-	visibilityInterval    = 100 * time.Millisecond
-	visibilityLease       = 5 * time.Second
-	visibilityRadiusPixels = 250.0
-	entityCleanupTicks    = 600
-	mercatorLatitudeLimit = 85.05112878
+	minimumViewZoom         = 2.0
+	maximumViewZoom         = 18.0
+	inputTimeoutTicks       = 8
+	visibilityActiveTicks   = 20
+	visibilityInterval      = 100 * time.Millisecond
+	visibilityLease         = 5 * time.Second
+	visibilityRadiusPixels  = 250.0
+	entityCleanupTicks      = 600
+	mercatorLatitudeLimit   = 85.05112878
 )
 
 type locationDefinition struct {
@@ -61,12 +61,14 @@ type assignment struct {
 type server struct {
 	instanceID       string
 	podName          string
+	routeAddress     string
 	db               *sql.DB
 	redis            *redis.Client
 	leaseDuration    time.Duration
 	renewInterval    time.Duration
 	tickInterval     time.Duration
 	tick             atomic.Uint64
+	nextRoute        atomic.Uint64
 	durable          chan durableCommand
 	inputs           chan inputCommand
 	entityMu         sync.Mutex
@@ -100,18 +102,18 @@ type response struct {
 }
 
 type durableResponse struct {
-	Server      string `json:"server"`
-	LocationID  int64  `json:"location_id"`
+	Server      string  `json:"server"`
+	LocationID  int64   `json:"location_id"`
 	Latitude    float64 `json:"latitude"`
 	Longitude   float64 `json:"longitude"`
-	Instance    string `json:"instance"`
-	Generation  int64  `json:"generation"`
-	Counter     uint64 `json:"counter"`
-	Message     string `json:"message"`
-	Time        string `json:"time"`
-	Tick        uint64 `json:"tick"`
-	ClientUID   string `json:"client_uid"`
-	OperationID string `json:"operation_id"`
+	Instance    string  `json:"instance"`
+	Generation  int64   `json:"generation"`
+	Counter     uint64  `json:"counter"`
+	Message     string  `json:"message"`
+	Time        string  `json:"time"`
+	Tick        uint64  `json:"tick"`
+	ClientUID   string  `json:"client_uid"`
+	OperationID string  `json:"operation_id"`
 }
 
 type visibleEntity struct {
@@ -238,7 +240,9 @@ func main() {
 	}
 
 	s := &server{
-		instanceID: instanceID, podName: podName, db: db, redis: cache,
+		instanceID: instanceID, podName: podName,
+		routeAddress: net.JoinHostPort(envOrDefault("POD_IP", hostname()), envOrDefault("SERVER_PORT", "7000")),
+		db:           db, redis: cache,
 		leaseDuration: leaseDuration, renewInterval: renewInterval, tickInterval: tickInterval,
 		durable: make(chan durableCommand, 4096),
 		inputs:  make(chan inputCommand, 8192), entities: make(map[string]*entityState),
@@ -824,6 +828,9 @@ func (s *server) manageAssignment(ctx context.Context, logger *slog.Logger) {
 				}
 			} else if claimed != nil {
 				s.setAssignment(claimed)
+				if err := s.publishRoute(ctx, claimed); err != nil && ctx.Err() == nil {
+					logger.Warn("publish route", "instance", s.podName, "error", err)
+				}
 				logger.Info("location claimed", "instance", s.podName, "server", claimed.ServerID, "location_id", claimed.LocationID, "generation", claimed.Generation)
 			}
 		} else if renewed, err := s.renew(operationCtx, current); err != nil {
@@ -834,6 +841,9 @@ func (s *server) manageAssignment(ctx context.Context, logger *slog.Logger) {
 			}
 		} else {
 			s.setAssignment(renewed)
+			if err := s.publishRoute(ctx, renewed); err != nil && ctx.Err() == nil {
+				logger.Warn("publish route", "instance", s.podName, "error", err)
+			}
 		}
 		cancel()
 
@@ -912,6 +922,7 @@ func (s *server) heartbeat(ctx context.Context, logger *slog.Logger) {
 			value["latitude"] = current.Latitude
 			value["longitude"] = current.Longitude
 			value["generation"] = current.Generation
+			value["address"] = s.routeAddress
 		}
 		body, _ := json.Marshal(value)
 		cacheCtx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
@@ -951,29 +962,38 @@ func (s *server) handleConnection(ctx context.Context, conn net.Conn, logger *sl
 		if message == "" {
 			continue
 		}
-		if message == "@discover" {
-			current := s.currentAssignment()
-			body := map[string]any{"status": "unassigned", "instance": s.podName}
-			if current != nil {
-				body["status"] = "active"
-				body["server"] = current.ServerID
-				body["location_id"] = current.LocationID
-				body["latitude"] = current.Latitude
-				body["longitude"] = current.Longitude
-				body["generation"] = current.Generation
+		if requested, found := strings.CutPrefix(message, "@route "); found {
+			route, err := s.resolveRoute(ctx, strings.TrimSpace(requested))
+			if err != nil {
+				_, _ = fmt.Fprintf(writer, `{"error":%q}`+"\n", err.Error())
+			} else {
+				_ = json.NewEncoder(writer).Encode(route)
 			}
-			encoded, _ := json.Marshal(body)
-			_, _ = writer.Write(append(encoded, '\n'))
 			_ = writer.Flush()
 			return
 		}
-		if requested, found := strings.CutPrefix(message, "@probe "); found {
-			current := s.currentAssignment()
-			status := "unassigned"
-			if current != nil && (requested == "any" || requested == strconv.FormatInt(current.LocationID, 10)) {
-				status = "ready"
+		if message == "@routes" {
+			routes, err := s.resolveRoutes(ctx)
+			if err != nil {
+				_, _ = fmt.Fprintf(writer, `{"error":%q}`+"\n", err.Error())
+			} else {
+				_ = json.NewEncoder(writer).Encode(map[string]any{"routes": routes})
 			}
-			_, _ = fmt.Fprintf(writer, `{"status":%q}`+"\n", status)
+			_ = writer.Flush()
+			return
+		}
+		if arguments, found := strings.CutPrefix(message, "@nearest "); found {
+			latitude, longitude, err := parseRouteCoordinates(arguments)
+			if err == nil {
+				var route routeRecord
+				route, err = s.nearestRoute(ctx, latitude, longitude)
+				if err == nil {
+					_ = json.NewEncoder(writer).Encode(route)
+				}
+			}
+			if err != nil {
+				_, _ = fmt.Fprintf(writer, `{"error":%q}`+"\n", err.Error())
+			}
 			_ = writer.Flush()
 			return
 		}

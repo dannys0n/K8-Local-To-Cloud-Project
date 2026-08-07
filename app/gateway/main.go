@@ -31,16 +31,6 @@ type backend struct {
 	Generation int64   `json:"generation"`
 }
 
-type discoveryResponse struct {
-	Status     string  `json:"status"`
-	Server     string  `json:"server"`
-	LocationID int64   `json:"location_id"`
-	Latitude   float64 `json:"latitude"`
-	Longitude  float64 `json:"longitude"`
-	Instance   string  `json:"instance"`
-	Generation int64   `json:"generation"`
-}
-
 type publicLocation struct {
 	Server     string  `json:"server"`
 	LocationID int64   `json:"location_id"`
@@ -76,23 +66,18 @@ type session struct {
 }
 
 type gateway struct {
-	instance         string
-	gatewayMetadata  []byte
-	serverHost       string
-	serverPort       string
-	discoveryEvery   time.Duration
-	discoveryTimeout time.Duration
-	routeTimeout     time.Duration
-	backendTimeout   time.Duration
-	logger           *slog.Logger
-	discoveryMu      sync.Mutex
-	lastDiscovery    time.Time
-	mu               sync.RWMutex
-	routes           map[string]backend
-	sessions         map[string]session
-	accepted         atomic.Uint64
-	nextSession      atomic.Uint64
-	nextAny          atomic.Uint64
+	instance        string
+	gatewayMetadata []byte
+	serverHost      string
+	serverPort      string
+	routeTimeout    time.Duration
+	backendTimeout  time.Duration
+	logger          *slog.Logger
+	mu              sync.RWMutex
+	routes          map[string]backend
+	sessions        map[string]session
+	accepted        atomic.Uint64
+	nextSession     atomic.Uint64
 }
 
 type backendConnection struct {
@@ -107,16 +92,6 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	discoveryEvery, err := durationFromEnv("DISCOVERY_INTERVAL", 500*time.Millisecond)
-	if err != nil {
-		logger.Error("invalid discovery interval", "error", err)
-		os.Exit(1)
-	}
-	discoveryTimeout, err := durationFromEnv("DISCOVERY_TIMEOUT", 500*time.Millisecond)
-	if err != nil {
-		logger.Error("invalid discovery timeout", "error", err)
-		os.Exit(1)
-	}
 	routeTimeout, err := durationFromEnv("ROUTE_TIMEOUT", 10*time.Second)
 	if err != nil {
 		logger.Error("invalid route timeout", "error", err)
@@ -133,13 +108,11 @@ func main() {
 	g := &gateway{
 		instance:        instance,
 		gatewayMetadata: append([]byte(`"gateway":`), encodedInstance...),
-		serverHost:      envOrDefault("SERVER_HOST", "tcp-server-headless.tcp-lab.svc.cluster.local"),
+		serverHost:      envOrDefault("SERVER_HOST", "tcp-server.tcp-lab.svc.cluster.local"),
 		serverPort:      envOrDefault("SERVER_PORT", "7000"),
-		discoveryEvery: discoveryEvery, discoveryTimeout: discoveryTimeout, routeTimeout: routeTimeout,
-		backendTimeout: backendTimeout, logger: logger,
+		routeTimeout:    routeTimeout, backendTimeout: backendTimeout, logger: logger,
 		routes: make(map[string]backend), sessions: make(map[string]session),
 	}
-	go g.discoverLoop(ctx)
 	go g.serveHTTP(ctx, envOrDefault("STATS_ADDR", ":8404"))
 
 	listener, err := net.Listen("tcp", envOrDefault("LISTEN_ADDR", ":9000"))
@@ -212,6 +185,10 @@ func (g *gateway) handleClient(ctx context.Context, client net.Conn) {
 		}
 		if location, found := strings.CutPrefix(message, "@location "); found {
 			location = strings.TrimSpace(location)
+			if location != "any" {
+				writeJSONError(clientWriter, "clients cannot select a server location")
+				continue
+			}
 			candidate, hello, err := g.openRoute(ctx, location, nil)
 			if err != nil {
 				writeJSONError(clientWriter, err.Error())
@@ -227,43 +204,6 @@ func (g *gateway) handleClient(ctx context.Context, client net.Conn) {
 			g.updateSession(id, client.RemoteAddr().String(), candidate.info, clientLatitude, clientLongitude)
 			hello = g.withGatewayMetadata(hello)
 			if _, err := clientWriter.Write(hello); err != nil || clientWriter.Flush() != nil {
-				return
-			}
-			continue
-		}
-		if latitude, longitude, found, err := parseTeleportRoute(message); found {
-			if err != nil {
-				writeJSONError(clientWriter, err.Error())
-				continue
-			}
-			location, err := g.locationFor(ctx, latitude, longitude)
-			if err != nil {
-				writeJSONError(clientWriter, err.Error())
-				continue
-			}
-			candidate, _, err := g.openRoute(ctx, location, nil)
-			if err != nil {
-				writeJSONError(clientWriter, err.Error())
-				continue
-			}
-			response, err := g.exchange(candidate, message)
-			state, valid := decodeBackendResponse(response)
-			if err != nil || !valid || state.Error != "" {
-				candidate.conn.Close()
-				writeJSONError(clientWriter, "teleport failed")
-				continue
-			}
-			if downstream != nil {
-				downstream.conn.Close()
-			}
-			downstream = candidate
-			requested = location
-			clientLatitude = latitude
-			clientLongitude = longitude
-			g.updateSession(id, client.RemoteAddr().String(), candidate.info, clientLatitude, clientLongitude)
-			response = g.withGatewayMetadata(response)
-			g.updateSessionFromResponse(id, state)
-			if _, err := clientWriter.Write(response); err != nil || clientWriter.Flush() != nil {
 				return
 			}
 			continue
@@ -298,7 +238,12 @@ func (g *gateway) handleClient(ctx context.Context, client net.Conn) {
 			continue
 		}
 		if message == "@locations" {
-			body, _ := json.Marshal(map[string]any{"gateway": g.instance, "locations": g.publicLocations()})
+			locations, err := g.publicLocations(ctx)
+			if err != nil {
+				writeJSONError(clientWriter, err.Error())
+				continue
+			}
+			body, _ := json.Marshal(map[string]any{"gateway": g.instance, "locations": locations})
 			if _, err := clientWriter.Write(append(body, '\n')); err != nil || clientWriter.Flush() != nil {
 				return
 			}
@@ -416,8 +361,20 @@ func (g *gateway) openRoute(ctx context.Context, requested string, previous *bac
 	}
 	deadline := time.Now().Add(g.routeTimeout)
 	for {
-		candidates := g.routeCandidates(requested, previous)
-		for _, candidate := range candidates {
+		candidate, found := g.cachedRoute(requested, previous)
+		if !found {
+			resolved, err := g.resolveRoute(ctx, requested)
+			if err == nil {
+				g.cacheRoute(resolved)
+				if requested == "any" {
+					candidate = resolved
+					found = previous == nil || resolved.Address != previous.Address || resolved.Generation > previous.Generation
+				} else {
+					candidate, found = g.cachedRoute(requested, previous)
+				}
+			}
+		}
+		if found {
 			connection, hello, err := g.connectBackend(candidate)
 			if err == nil {
 				return connection, hello, nil
@@ -427,7 +384,6 @@ func (g *gateway) openRoute(ctx context.Context, requested string, previous *bac
 		if time.Now().After(deadline) || ctx.Err() != nil {
 			return nil, nil, fmt.Errorf("location %q unavailable", requested)
 		}
-		g.discover(ctx)
 		time.Sleep(100 * time.Millisecond)
 	}
 }
@@ -463,106 +419,47 @@ func (g *gateway) connectBackend(info backend) (*backendConnection, []byte, erro
 	return connection, hello, nil
 }
 
-func (g *gateway) discoverLoop(ctx context.Context) {
-	ticker := time.NewTicker(g.discoveryEvery)
-	defer ticker.Stop()
-	for {
-		g.discover(ctx)
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-		}
+func (g *gateway) cachedRoute(requested string, previous *backend) (backend, bool) {
+	g.mu.RLock()
+	route, found := g.routes[requested]
+	g.mu.RUnlock()
+	if !found || previous != nil && route.Address == previous.Address && route.Generation <= previous.Generation {
+		return backend{}, false
 	}
+	return route, true
 }
 
-func (g *gateway) discover(ctx context.Context) {
-	g.discoveryMu.Lock()
-	if !g.lastDiscovery.IsZero() && time.Since(g.lastDiscovery) < g.discoveryEvery/2 {
-		g.discoveryMu.Unlock()
-		return
-	}
-	defer func() {
-		g.lastDiscovery = time.Now()
-		g.discoveryMu.Unlock()
-	}()
-	lookupCtx, cancel := context.WithTimeout(ctx, g.discoveryTimeout)
-	addresses, err := net.DefaultResolver.LookupHost(lookupCtx, g.serverHost)
-	cancel()
-	if err != nil {
-		return
-	}
-	type result struct {
-		info backend
-		ok   bool
-	}
-	results := make(chan result, len(addresses))
-	for _, address := range addresses {
-		endpoint := net.JoinHostPort(address, g.serverPort)
-		go func() {
-			conn, err := net.DialTimeout("tcp", endpoint, g.discoveryTimeout)
-			if err != nil {
-				results <- result{}
-				return
-			}
-			defer conn.Close()
-			_ = conn.SetDeadline(time.Now().Add(g.discoveryTimeout))
-			if _, err = fmt.Fprintln(conn, "@discover"); err != nil {
-				results <- result{}
-				return
-			}
-			var discovered discoveryResponse
-			err = json.NewDecoder(conn).Decode(&discovered)
-			if err != nil || discovered.Status != "active" {
-				results <- result{}
-				return
-			}
-			results <- result{info: backend{
-				Server: discovered.Server, LocationID: discovered.LocationID,
-				Latitude: discovered.Latitude, Longitude: discovered.Longitude,
-				Instance: discovered.Instance, Address: endpoint, Generation: discovered.Generation,
-			}, ok: true}
-		}()
-	}
-	found := make(map[string]backend)
-	for range addresses {
-		result := <-results
-		key := strconv.FormatInt(result.info.LocationID, 10)
-		if current, exists := found[key]; result.ok && (!exists || result.info.Generation > current.Generation) {
-			found[key] = result.info
-		}
-	}
+func (g *gateway) cacheRoute(route backend) {
 	g.mu.Lock()
-	g.routes = found
+	key := strconv.FormatInt(route.LocationID, 10)
+	if current, exists := g.routes[key]; !exists || route.Generation >= current.Generation {
+		g.routes[key] = route
+	}
 	g.mu.Unlock()
 }
 
-func (g *gateway) routeCandidates(requested string, previous *backend) []backend {
-	g.mu.RLock()
-	result := make([]backend, 0, len(g.routes))
-	if requested == "any" {
-		for _, route := range g.routes {
-			result = append(result, route)
-		}
-	} else if route, ok := g.routes[requested]; ok {
-		result = append(result, route)
+func (g *gateway) resolveRoute(ctx context.Context, requested string) (backend, error) {
+	var route backend
+	err := g.resolve(ctx, "@route "+requested, &route)
+	if err != nil || route.LocationID == 0 || route.Address == "" {
+		return backend{}, errors.New("route unavailable")
 	}
-	g.mu.RUnlock()
-	sort.Slice(result, func(i, j int) bool { return result[i].Server < result[j].Server })
-	if requested == "any" && len(result) > 1 {
-		offset := int(g.nextAny.Add(1)-1) % len(result)
-		result = append(result[offset:], result[:offset]...)
+	return route, nil
+}
+
+func (g *gateway) resolve(ctx context.Context, command string, response any) error {
+	endpoint := net.JoinHostPort(g.serverHost, g.serverPort)
+	dialer := net.Dialer{Timeout: g.backendTimeout}
+	conn, err := dialer.DialContext(ctx, "tcp", endpoint)
+	if err != nil {
+		return err
 	}
-	if previous != nil {
-		filtered := result[:0]
-		for _, route := range result {
-			if route.Address != previous.Address || route.Generation > previous.Generation {
-				filtered = append(filtered, route)
-			}
-		}
-		result = filtered
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(g.backendTimeout))
+	if _, err = fmt.Fprintln(conn, command); err != nil {
+		return err
 	}
-	return result
+	return json.NewDecoder(conn).Decode(response)
 }
 
 func (g *gateway) routesSnapshot() []backend {
@@ -576,51 +473,34 @@ func (g *gateway) routesSnapshot() []backend {
 	return routes
 }
 
-func (g *gateway) publicLocations() []publicLocation {
-	routes := g.routesSnapshot()
+func (g *gateway) publicLocations(ctx context.Context) ([]publicLocation, error) {
+	var response struct {
+		Routes []backend `json:"routes"`
+	}
+	if err := g.resolve(ctx, "@routes", &response); err != nil {
+		return nil, errors.New("locations unavailable")
+	}
+	routes := response.Routes
 	locations := make([]publicLocation, 0, len(routes))
 	for _, route := range routes {
+		g.cacheRoute(route)
 		locations = append(locations, publicLocation{
 			Server: route.Server, LocationID: route.LocationID,
 			Latitude: route.Latitude, Longitude: route.Longitude,
 			Generation: route.Generation,
 		})
 	}
-	return locations
-}
-
-func (g *gateway) nearestLocation(latitude, longitude float64) (string, error) {
-	routes := g.routesSnapshot()
-	if len(routes) == 0 {
-		return "", errors.New("no active locations available")
-	}
-	toRadians := func(value float64) float64 { return value * math.Pi / 180 }
-	lat1 := toRadians(latitude)
-	var bestLocation int64
-	bestDistance := math.Inf(1)
-	for _, route := range routes {
-		lat2 := toRadians(route.Latitude)
-		deltaLatitude := lat2 - lat1
-		deltaLongitude := toRadians(route.Longitude - longitude)
-		a := math.Sin(deltaLatitude/2)*math.Sin(deltaLatitude/2) +
-			math.Cos(lat1)*math.Cos(lat2)*math.Sin(deltaLongitude/2)*math.Sin(deltaLongitude/2)
-		a = math.Max(0, math.Min(1, a))
-		distance := 2 * math.Atan2(math.Sqrt(a), math.Sqrt(1-a))
-		if distance < bestDistance || (distance == bestDistance && (bestLocation == 0 || route.LocationID < bestLocation)) {
-			bestDistance = distance
-			bestLocation = route.LocationID
-		}
-	}
-	return strconv.FormatInt(bestLocation, 10), nil
+	return locations, nil
 }
 
 func (g *gateway) locationFor(ctx context.Context, latitude, longitude float64) (string, error) {
-	location, err := g.nearestLocation(latitude, longitude)
-	if err == nil {
-		return location, nil
+	var route backend
+	command := fmt.Sprintf("@nearest %.8f %.8f", latitude, longitude)
+	if err := g.resolve(ctx, command, &route); err != nil || route.LocationID == 0 {
+		return "", errors.New("no active locations available")
 	}
-	g.discover(ctx)
-	return g.nearestLocation(latitude, longitude)
+	g.cacheRoute(route)
+	return strconv.FormatInt(route.LocationID, 10), nil
 }
 
 func parsePosition(message string) (float64, float64, bool, error) {
@@ -637,24 +517,6 @@ func parsePosition(message string) (float64, float64, bool, error) {
 	if latitudeErr != nil || longitudeErr != nil || math.IsNaN(latitude) || math.IsNaN(longitude) ||
 		math.IsInf(latitude, 0) || math.IsInf(longitude, 0) || latitude < -90 || latitude > 90 || longitude < -180 || longitude > 180 {
 		return 0, 0, true, errors.New("position must be finite latitude [-90, 90] and longitude [-180, 180]")
-	}
-	return latitude, longitude, true, nil
-}
-
-func parseTeleportRoute(message string) (float64, float64, bool, error) {
-	arguments, found := strings.CutPrefix(message, "@teleport ")
-	if !found {
-		return 0, 0, false, nil
-	}
-	fields := strings.Fields(arguments)
-	if len(fields) != 4 {
-		return 0, 0, true, errors.New("teleport requires client UID, sequence, latitude, and longitude")
-	}
-	latitude, latitudeErr := strconv.ParseFloat(fields[2], 64)
-	longitude, longitudeErr := strconv.ParseFloat(fields[3], 64)
-	if latitudeErr != nil || longitudeErr != nil || math.IsNaN(latitude) || math.IsNaN(longitude) ||
-		math.IsInf(latitude, 0) || math.IsInf(longitude, 0) || latitude < -90 || latitude > 90 || longitude < -180 || longitude > 180 {
-		return 0, 0, true, errors.New("teleport coordinates are invalid")
 	}
 	return latitude, longitude, true, nil
 }

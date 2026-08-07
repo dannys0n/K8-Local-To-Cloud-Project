@@ -50,13 +50,9 @@ spec:
             - name: STATS_ADDR
               value: ":8404"
             - name: SERVER_HOST
-              value: tcp-server-headless.tcp-lab.svc.cluster.local
+              value: tcp-server.tcp-lab.svc.cluster.local
             - name: SERVER_PORT
               value: "7000"
-            - name: DISCOVERY_INTERVAL
-              value: "200ms"
-            - name: DISCOVERY_TIMEOUT
-              value: "500ms"
             - name: ROUTE_TIMEOUT
               value: "5s"
             - name: BACKEND_TIMEOUT

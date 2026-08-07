@@ -49,8 +49,14 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.uid
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
             - name: LISTEN_ADDR
               value: ":7000"
+            - name: SERVER_PORT
+              value: "7000"
             - name: ASSIGNMENT_LEASE_DURATION
               value: "3s"
             - name: ASSIGNMENT_RENEW_INTERVAL
