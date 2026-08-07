@@ -74,7 +74,7 @@ type gateway struct {
 	backendTimeout  time.Duration
 	logger          *slog.Logger
 	mu              sync.RWMutex
-	routes          map[string]backend
+	catalog         map[string]backend
 	sessions        map[string]session
 	accepted        atomic.Uint64
 	nextSession     atomic.Uint64
@@ -111,7 +111,7 @@ func main() {
 		serverHost:      envOrDefault("SERVER_HOST", "tcp-server.tcp-lab.svc.cluster.local"),
 		serverPort:      envOrDefault("SERVER_PORT", "7000"),
 		routeTimeout:    routeTimeout, backendTimeout: backendTimeout, logger: logger,
-		routes: make(map[string]backend), sessions: make(map[string]session),
+		catalog: make(map[string]backend), sessions: make(map[string]session),
 	}
 	go g.serveHTTP(ctx, envOrDefault("STATS_ADDR", ":8404"))
 
@@ -276,7 +276,6 @@ func (g *gateway) handleClient(ctx context.Context, client net.Conn) {
 			downstream.conn.Close()
 			downstream = nil
 			g.setSessionStatus(id, "gateway")
-			g.removeRoute(failed)
 			candidate, _, routeErr := g.openRoute(ctx, requested, &failed)
 			if routeErr != nil {
 				location, nearestErr := g.locationFor(ctx, clientLatitude, clientLongitude)
@@ -361,25 +360,12 @@ func (g *gateway) openRoute(ctx context.Context, requested string, previous *bac
 	}
 	deadline := time.Now().Add(g.routeTimeout)
 	for {
-		candidate, found := g.cachedRoute(requested, previous)
-		if !found {
-			resolved, err := g.resolveRoute(ctx, requested)
-			if err == nil {
-				g.cacheRoute(resolved)
-				if requested == "any" {
-					candidate = resolved
-					found = previous == nil || resolved.Address != previous.Address || resolved.Generation > previous.Generation
-				} else {
-					candidate, found = g.cachedRoute(requested, previous)
-				}
-			}
-		}
-		if found {
+		candidate, err := g.resolveRoute(ctx, requested)
+		if err == nil && (previous == nil || candidate.Address != previous.Address || candidate.Generation > previous.Generation) {
 			connection, hello, err := g.connectBackend(candidate)
 			if err == nil {
 				return connection, hello, nil
 			}
-			g.removeRoute(candidate)
 		}
 		if time.Now().After(deadline) || ctx.Err() != nil {
 			return nil, nil, fmt.Errorf("location %q unavailable", requested)
@@ -419,25 +405,6 @@ func (g *gateway) connectBackend(info backend) (*backendConnection, []byte, erro
 	return connection, hello, nil
 }
 
-func (g *gateway) cachedRoute(requested string, previous *backend) (backend, bool) {
-	g.mu.RLock()
-	route, found := g.routes[requested]
-	g.mu.RUnlock()
-	if !found || previous != nil && route.Address == previous.Address && route.Generation <= previous.Generation {
-		return backend{}, false
-	}
-	return route, true
-}
-
-func (g *gateway) cacheRoute(route backend) {
-	g.mu.Lock()
-	key := strconv.FormatInt(route.LocationID, 10)
-	if current, exists := g.routes[key]; !exists || route.Generation >= current.Generation {
-		g.routes[key] = route
-	}
-	g.mu.Unlock()
-}
-
 func (g *gateway) resolveRoute(ctx context.Context, requested string) (backend, error) {
 	var route backend
 	err := g.resolve(ctx, "@route "+requested, &route)
@@ -464,8 +431,8 @@ func (g *gateway) resolve(ctx context.Context, command string, response any) err
 
 func (g *gateway) routesSnapshot() []backend {
 	g.mu.RLock()
-	routes := make([]backend, 0, len(g.routes))
-	for _, route := range g.routes {
+	routes := make([]backend, 0, len(g.catalog))
+	for _, route := range g.catalog {
 		routes = append(routes, route)
 	}
 	g.mu.RUnlock()
@@ -482,14 +449,18 @@ func (g *gateway) publicLocations(ctx context.Context) ([]publicLocation, error)
 	}
 	routes := response.Routes
 	locations := make([]publicLocation, 0, len(routes))
+	refreshed := make(map[string]backend, len(routes))
 	for _, route := range routes {
-		g.cacheRoute(route)
+		refreshed[strconv.FormatInt(route.LocationID, 10)] = route
 		locations = append(locations, publicLocation{
 			Server: route.Server, LocationID: route.LocationID,
 			Latitude: route.Latitude, Longitude: route.Longitude,
 			Generation: route.Generation,
 		})
 	}
+	g.mu.Lock()
+	g.catalog = refreshed
+	g.mu.Unlock()
 	return locations, nil
 }
 
@@ -499,7 +470,6 @@ func (g *gateway) locationFor(ctx context.Context, latitude, longitude float64) 
 	if err := g.resolve(ctx, command, &route); err != nil || route.LocationID == 0 {
 		return "", errors.New("no active locations available")
 	}
-	g.cacheRoute(route)
 	return strconv.FormatInt(route.LocationID, 10), nil
 }
 
@@ -519,15 +489,6 @@ func parsePosition(message string) (float64, float64, bool, error) {
 		return 0, 0, true, errors.New("position must be finite latitude [-90, 90] and longitude [-180, 180]")
 	}
 	return latitude, longitude, true, nil
-}
-
-func (g *gateway) removeRoute(failed backend) {
-	g.mu.Lock()
-	key := strconv.FormatInt(failed.LocationID, 10)
-	if current, ok := g.routes[key]; ok && current.Address == failed.Address && current.Generation == failed.Generation {
-		delete(g.routes, key)
-	}
-	g.mu.Unlock()
 }
 
 func (g *gateway) updateSession(id, client string, route backend, latitude, longitude float64) {
