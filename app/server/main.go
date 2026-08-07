@@ -76,6 +76,9 @@ type server struct {
 	visibilityMu     sync.RWMutex
 	visible          []visibleEntity
 	visibilityReadAt time.Time
+	publishedMu      sync.Mutex
+	publishedField   string
+	publishedCells   map[string]struct{}
 	topologyMu       sync.RWMutex
 	topology         []locationDefinition
 	mu               sync.RWMutex
