@@ -9,7 +9,7 @@ spec:
     kind: Deployment
     name: gateway
   minReplicas: 1
-  maxReplicas: 20
+  maxReplicas: 500
   metrics:
     - type: Resource
       resource:
