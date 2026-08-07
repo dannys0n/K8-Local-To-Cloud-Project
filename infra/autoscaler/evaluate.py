@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Scale server replicas from independent per-pod CPU pressure."""
+"""Scale server replicas from aggregate CPU pressure."""
 
 import json
 import math
@@ -41,19 +41,16 @@ def main() -> None:
     pending_location = SCALE_MARKER.exists()
     down_evaluations = max(1, int(os.getenv("SCALE_DOWN_STABILIZATION_EVALUATIONS", "20")))
     complete_metrics = len(utilizations) == current
-    all_low = complete_metrics and all(value <= SCALE_DOWN_CPU_THRESHOLD for value in utilizations)
-    low_count = low_cpu_count() + 1 if not pending_location and all_low else 0
+    average = sum(utilizations) / len(utilizations)
+    low_average = complete_metrics and average <= SCALE_DOWN_CPU_THRESHOLD
+    low_count = low_cpu_count() + 1 if not pending_location and low_average else 0
     LOW_CPU_COUNTER.write_text(str(low_count), encoding="utf-8")
-    requested_additions = sum(
-        max(0, math.ceil(value / SCALE_UP_CPU_THRESHOLD) - 1)
-        for value in utilizations
-    )
-    scale_up = not pending_location and current < MAX_REPLICAS and requested_additions > 0
+    required = max(MIN_REPLICAS, math.ceil(sum(utilizations) / SCALE_UP_CPU_THRESHOLD))
+    scale_up = not pending_location and complete_metrics and current < MAX_REPLICAS and required > current
     scale_down = not pending_location and not scale_up and current > MIN_REPLICAS and low_count >= down_evaluations
     if scale_up:
-        target = min(MAX_REPLICAS, current + maximum_change(current), current + requested_additions)
+        target = min(MAX_REPLICAS, current + maximum_change(current), required)
     elif scale_down:
-        required = max(MIN_REPLICAS, math.ceil(sum(utilizations) / SCALE_UP_CPU_THRESHOLD))
         target = max(MIN_REPLICAS, current - maximum_change(current), required)
     else:
         target = current
