@@ -63,7 +63,6 @@ PAGE = r"""<!doctype html>
     <div class="card">Total clients<div class="value" id="clients">–</div></div>
     <div class="card">Connected clients<div class="value" id="connectedClients">–</div></div>
     <div class="card">Dummy processes<div class="value" id="dummyProcesses">–</div></div>
-    <div class="card">Backend sessions<div class="value" id="backends">–</div></div>
     <div class="card">Server replicas<div class="value" id="pool">–</div></div>
   </div>
   <div class="panel"><h2>Per gateway</h2><table><thead><tr><th>Gateway</th><th>Pod IP</th><th>Node</th><th>Clients</th><th>Backend</th><th>Total accepted</th><th>Status</th></tr></thead><tbody id="gatewayRows"></tbody></table></div>
@@ -83,7 +82,6 @@ async function refresh(){
     document.getElementById('clients').textContent=data.total_clients;
     document.getElementById('connectedClients').textContent=data.connected_clients;
     document.getElementById('dummyProcesses').textContent=data.dummy_processes;
-    document.getElementById('backends').textContent=data.total_backends;
     document.getElementById('pool').textContent=data.server_pods;
     document.getElementById('notReady').textContent=data.not_ready_pods;
     document.getElementById('unknown').textContent=data.unknown_pods;
@@ -355,7 +353,6 @@ def snapshot() -> dict:
         "total_clients": sum(p["clients"] for p in gateways),
         "connected_clients": sum(p["backend_sessions"] for p in gateways),
         "dummy_processes": bot_state["total"],
-        "total_backends": sum(p["backend_sessions"] for p in gateways),
         "server_pods": sum(instance["status"] == "ready" for instance in server_instances),
         "not_ready_pods": sum(instance["status"] == "not_ready" for instance in application_instances),
         "unknown_pods": sum(instance["status"] == "unknown" for instance in application_instances),
