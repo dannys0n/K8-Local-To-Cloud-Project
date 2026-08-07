@@ -5,6 +5,7 @@ CLUSTER="tcp-lab"
 SERVER_IMAGE="simple-tcp-server:dev"
 GATEWAY_IMAGE="tcp-gateway:dev"
 AUTOSCALER_IMAGE="tcp-server-autoscaler:dev"
+LOADGEN_IMAGE="tcp-loadgen:dev"
 
 for command in docker kind kubectl; do
   command -v "$command" >/dev/null 2>&1 || { echo "Required command not found: $command" >&2; exit 1; }
@@ -30,10 +31,11 @@ echo "Labeling and tainting kind database node '$DATABASE_NODE'..."
 kubectl label node "$DATABASE_NODE" tcp-lab.io/database=true --overwrite
 kubectl taint node "$DATABASE_NODE" tcp-lab.io/database=true:NoSchedule --overwrite
 
-echo "Building $SERVER_IMAGE, $GATEWAY_IMAGE, and $AUTOSCALER_IMAGE..."
+echo "Building application and load-generator images..."
 docker build -t "$SERVER_IMAGE" app/server
 docker build -t "$GATEWAY_IMAGE" app/gateway
 docker build -t "$AUTOSCALER_IMAGE" infra/autoscaler
+docker build -t "$LOADGEN_IMAGE" tools/loadgen
 
 echo "Loading image into kind..."
 kind load docker-image "$SERVER_IMAGE" "$GATEWAY_IMAGE" "$AUTOSCALER_IMAGE" --name "$CLUSTER"

@@ -1,95 +1,119 @@
-"""Lifecycle manager for dashboard-created headless clients."""
+"""Lifecycle manager for containerized Go headless-client batches."""
 
-import multiprocessing
+import json
+import os
+import subprocess
 import threading
-import time
-
-try:
-    from headless_client import run_headless
-except ModuleNotFoundError:
-    from tools.headless_client import run_headless
 
 
-CONNECTION_NAMES = {0: "disconnected", 1: "gateway", 2: "ready"}
+IMAGE = "tcp-loadgen:dev"
 
 
-class HeadlessProcess:
-    def __init__(self, context, host: str, port: int):
-        self.stopped = context.Event()
-        self.status = context.Value("b", 0)
-        self.process = context.Process(
-            target=run_headless,
-            args=(host, port, self.stopped, self.status),
-            daemon=True,
+class HeadlessBatch:
+    def __init__(self, batch_id: int, count: int, host: str, port: int):
+        self.id = batch_id
+        self.count = count
+        self.name = f"tcp-loadgen-{os.getpid()}-{batch_id}"
+        self.states = {"ready": 0, "gateway": 0, "disconnected": count}
+        self.lock = threading.Lock()
+        target = "host.docker.internal" if host in {"127.0.0.1", "localhost"} else host
+        command = [
+            "docker", "run", "--rm", "--name", self.name,
+            "--add-host", "host.docker.internal:host-gateway", IMAGE,
+            "--host", target, "--port", str(port), "--clients", str(count),
+        ]
+        flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+        self.process = subprocess.Popen(
+            command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, bufsize=1, creationflags=flags,
         )
+        threading.Thread(target=self._read_status, daemon=True).start()
 
-    def start(self) -> None:
-        self.process.start()
+    def _read_status(self) -> None:
+        for line in self.process.stdout or ():
+            try:
+                report = json.loads(line)
+                states = report.get("states", {})
+                if all(name in states for name in self.states):
+                    with self.lock:
+                        self.states = {name: int(states[name]) for name in self.states}
+            except (ValueError, TypeError):
+                continue
+        with self.lock:
+            self.states = {"ready": 0, "gateway": 0, "disconnected": self.count}
 
-    def request_stop(self) -> None:
-        self.stopped.set()
+    def stop(self) -> None:
+        flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+        subprocess.run(
+            ["docker", "stop", "--timeout", "2", self.name],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            creationflags=flags, timeout=5, check=False,
+        )
+        try:
+            self.process.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            self.process.terminate()
 
-    def connection_state(self) -> str:
-        if not self.process.is_alive():
-            return "disconnected"
-        return CONNECTION_NAMES.get(self.status.value, "disconnected")
+    def snapshot(self) -> dict:
+        with self.lock:
+            states = dict(self.states)
+        if self.process.poll() is not None:
+            states = {"ready": 0, "gateway": 0, "disconnected": self.count}
+        return {"id": self.id, "count": self.count, "states": states}
 
 
 class BotManager:
     def __init__(self, host: str, port: int):
         self.host = host
         self.port = port
-        self.context = multiprocessing.get_context("spawn")
         self.lock = threading.Lock()
         self.next_batch = 1
-        self.batches: dict[int, list[HeadlessProcess]] = {}
+        self.batches: dict[int, HeadlessBatch] = {}
 
     def spawn(self, count: int) -> dict:
         if count < 1 or count > 500:
             raise ValueError("batch size must be between 1 and 500")
-        bots = [HeadlessProcess(self.context, self.host, self.port) for _ in range(count)]
+        if subprocess.run(
+            ["docker", "image", "inspect", IMAGE],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
+        ).returncode:
+            raise ValueError(f"{IMAGE} is missing; run the cluster up script first")
         with self.lock:
             batch_id = self.next_batch
             self.next_batch += 1
-            self.batches[batch_id] = bots
-        for bot in bots:
-            bot.start()
+        try:
+            batch = HeadlessBatch(batch_id, count, self.host, self.port)
+        except OSError as error:
+            raise ValueError(f"could not start load generator: {error}") from error
+        with self.lock:
+            self.batches[batch_id] = batch
         return self.snapshot()
 
     def despawn(self, batch_id: int) -> dict:
         with self.lock:
-            bots = self.batches.pop(batch_id, None)
-        if bots is None:
+            batch = self.batches.pop(batch_id, None)
+        if batch is None:
             raise ValueError("batch not found")
-        self.stop_all(bots)
+        batch.stop()
         return self.snapshot()
 
     def despawn_all(self) -> dict:
         with self.lock:
             batches = list(self.batches.values())
             self.batches.clear()
-        self.stop_all([bot for bots in batches for bot in bots])
+        for batch in batches:
+            batch.stop()
         return self.snapshot()
-
-    @staticmethod
-    def stop_all(bots: list[HeadlessProcess]) -> None:
-        for bot in bots:
-            bot.request_stop()
-        deadline = time.monotonic() + 1
-        for bot in bots:
-            bot.process.join(timeout=max(0, deadline - time.monotonic()))
-        for bot in bots:
-            if bot.process.is_alive():
-                bot.process.terminate()
-        for bot in bots:
-            bot.process.join(timeout=0.2)
 
     def snapshot(self) -> dict:
         with self.lock:
-            batches = [{"id": batch_id, "count": len(bots)} for batch_id, bots in self.batches.items()]
-            bots = [bot for batch in self.batches.values() for bot in batch]
+            batches = [batch.snapshot() for batch in self.batches.values()]
         states = {"ready": 0, "gateway": 0, "disconnected": 0}
-        for bot in bots:
-            connection = bot.connection_state()
-            states[connection if connection in states else "disconnected"] += 1
-        return {"total": len(bots), "states": states, "batches": batches}
+        for batch in batches:
+            for name in states:
+                states[name] += batch["states"][name]
+        return {
+            "total": sum(batch["count"] for batch in batches),
+            "states": states,
+            "batches": [{"id": batch["id"], "count": batch["count"]} for batch in batches],
+        }
