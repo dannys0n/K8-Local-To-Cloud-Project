@@ -19,7 +19,7 @@ deploy/base/          Kubernetes resources shared by every environment
 deploy/overlays/kind/ Local workload patches and in-cluster data services
 deploy/overlays/eks/  AWS-specific workload patches
 infra/kind/           Definition of the local kind cluster and its nodes
-infra/autoscaler/     Server CPU policy and pinned autoscaler image
+infra/autoscaler/     Prometheus CPU collection and autoscaling policy
 scripts/              Cluster lifecycle commands
 tools/                Local client, dashboard, bots, and smoke utilities
 tests/                Manifest and scheduling checks
@@ -31,7 +31,7 @@ through AWS tooling and then uses the EKS overlay to deploy the same base.
 
 ## What runs
 
-- **Gateway:** generic Go replicas, starting from an HPA minimum of one, that preserve the client connection
+- **Gateway:** generic Go replicas, starting from an autoscaler minimum of one, that preserve the client connection
   while switching downstream location servers at runtime.
 - **TCP server:** interchangeable Deployment replicas with an autoscaler minimum
   of one. A fresh database seeds one logical location owned by that initial
@@ -41,8 +41,8 @@ through AWS tooling and then uses the EKS overlay to deploy the same base.
   ownership generations; one PVC on the dedicated kind database worker.
 - **Redis:** ephemeral server presence for infrastructure visibility. It is not
   part of authoritative client state.
-- **Server autoscaler:** Metrics Server plus Custom Pod Autoscaler Framework.
-  The maximum server-pod CPU utilization is evaluated every 15 seconds.
+- **CPU autoscaling:** a minimal Prometheus plus Custom Pod Autoscaler Framework.
+  Prometheus supplies per-pod CPU directly to independent server and gateway scalers.
 - **Client entry:** `127.0.0.1:9000`; the browser map keeps one TCP connection
   through its local bridge. The EKS overlay uses an AWS NLB.
 - **Manifest management:** a shared Kustomize base plus kind and EKS overlays.
@@ -64,8 +64,8 @@ Install and make available on `PATH`:
 
 - Python 3 for the local browser client and optional dashboard
 - Internet access for Leaflet and OpenStreetMap tiles in the browser
-- Internet access during cluster setup for pinned Metrics Server and Custom
-  Pod Autoscaler Operator manifests
+- Internet access during cluster setup for the pinned Prometheus image and
+  Custom Pod Autoscaler Operator manifest
 
 ## Run on Windows PowerShell
 
@@ -99,16 +99,20 @@ adds a server replica. The second disables the highest active location and fence
 its owner after a replica is removed; referenced entity rows are retained. The
 dashboard has no location mutation or Deployment scaling permissions.
 
-Metrics Server reports server CPU relative to
-the server container's 250 millicore request. The server has no CPU limit, so it
+Prometheus scrapes kubelet cAdvisor CPU counters and retains only the server and
+gateway container CPU series in this namespace. Each scaler converts the CPU
+rate to utilization relative to the container's 250 millicore request. The workloads have no CPU limit, so they
 can still burst when node capacity is available. The evaluator examines every
 ready pod independently and sums the additional capacity implied by pods above
-80%. After Kubernetes accepts the scale, a post-scale hook creates the same
-number of locations. New generic server pods claim them through the normal
+80%. After Kubernetes accepts a server scale, a post-scale hook creates the same
+number of locations; gateway scaling has no database hook. New generic server pods claim locations through the normal
 PostgreSQL lease path. Evaluations run
-every 10 seconds in the kind overlay and every 15 seconds in the EKS/base
-configuration, stopping at 50 replicas. Ten seconds is Metrics Server's minimum
-supported resolution, so kind sampling and evaluation remain aligned. Missing metrics stop an evaluation;
+every second in the kind overlay and every 15 seconds in the EKS/base
+configuration, stopping at 500 replicas. The kind cluster also lowers kubelet's
+cAdvisor housekeeping interval to one second, allowing Prometheus's one-second
+scrapes to calculate CPU over a four-second rate window. The base uses a
+30-second window for nodes retaining kubelet's normal ten-second housekeeping.
+Missing metrics stop an evaluation;
 they never trigger speculative scaling or scale-down. Scale-down begins only
 after every replica has a sample at or below 20% for 20 evaluations, calculates
 aggregate required capacity, and retires the same number of locations as removed
@@ -119,9 +123,10 @@ transient database outage cannot repeatedly change replicas. The Deployment mani
 omits `spec.replicas`; the autoscaler owns that field and enforces a minimum of
 one, preventing later Kustomize applies from resetting a scaled Deployment.
 
-The kind startup scripts install Metrics Server v0.8.1, apply the local-only
-`--kubelet-insecure-tls` patch, and install Custom Pod Autoscaler Operator
-v1.4.2. The evaluator image pins Custom Pod Autoscaler Framework v2.12.2.
+The kind startup scripts install the minimal Prometheus deployment and Custom
+Pod Autoscaler Operator v1.4.2. The evaluator image pins Custom Pod Autoscaler
+Framework v2.12.2. No metrics adapter or aggregated metrics API is installed;
+the scaler queries Prometheus directly.
 
 `tools/client.py` asks the operating system for a free local port, prints the
 resulting URL, and opens it in the default browser. It keeps a stable client UID

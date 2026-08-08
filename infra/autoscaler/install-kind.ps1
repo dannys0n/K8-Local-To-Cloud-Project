@@ -9,8 +9,9 @@ function Invoke-Kubectl {
     }
 }
 
-Invoke-Kubectl apply -k "$Root/infra/autoscaler/metrics-server-kind"
-Invoke-Kubectl rollout status deployment/metrics-server -n kube-system --timeout=180s
+Invoke-Kubectl apply -f "$Root/deploy/base/namespace.yaml"
+Invoke-Kubectl apply -k "$Root/infra/autoscaler/prometheus"
+Invoke-Kubectl rollout status deployment/prometheus -n tcp-lab --timeout=180s
 
 Invoke-Kubectl apply --server-side --force-conflicts -f $Operator
 Invoke-Kubectl wait --for=condition=Established customresourcedefinition/custompodautoscalers.custompodautoscaler.com --timeout=180s

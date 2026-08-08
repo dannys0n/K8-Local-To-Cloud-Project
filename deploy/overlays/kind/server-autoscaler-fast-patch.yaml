@@ -1,9 +1,3 @@
-apiVersion: custompodautoscaler.com/v1
-kind: CustomPodAutoscaler
-metadata:
-  name: tcp-server-cpu
-  namespace: tcp-lab
-spec:
-  config:
-    - name: interval
-      value: "10000"
+- op: replace
+  path: /spec/config/0/value
+  value: "1000"
