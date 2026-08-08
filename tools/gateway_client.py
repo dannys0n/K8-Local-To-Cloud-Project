@@ -125,11 +125,6 @@ class GatewayClient:
             self.route = body
         return body
 
-    def increment(self, client_uid: str, operation_id: str):
-        self._validate_uid(client_uid)
-        self._validate_identifier(operation_id, "operation identifier")
-        return self.exchange(f"@increment {client_uid} {operation_id}")
-
     def reconnect(self):
         with self.lock:
             try:

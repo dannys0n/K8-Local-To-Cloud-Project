@@ -51,8 +51,7 @@ PAGE = r"""<!doctype html>
   <main><div id="map"><svg id="proxyEdge"></svg><div id="proxyRow" class="proxy-row"></div></div><aside>
     <div class="card"><div class="label">Selected coordinate</div><div id="coordinate" class="value">Click the map</div></div>
     <div class="card"><div class="label">Client UID</div><div id="clientUid" class="value">—</div></div>
-    <div class="card"><div class="label">Durable counter</div><div id="counter" class="value route">0</div><button id="increment">Increase counter</button></div>
-    <div class="card"><div class="label">Nearest active location ID</div><div id="location" class="value route">—</div></div>
+    <div class="card"><div class="label">Entities in server</div><div id="entityCount" class="value route">0</div></div>
     <div class="card"><div class="label">Connected gateway pod</div><div id="gateway" class="value">—</div></div>
     <div class="card"><div class="label">Logical server</div><div id="server" class="value">—</div></div>
     <div class="card"><div class="label">Server pod</div><div id="instance" class="value">—</div></div>
@@ -64,19 +63,17 @@ PAGE = r"""<!doctype html>
   <script>
     const map=L.map('map',{worldCopyJump:true,minZoom:2}).setView([25,0],2);
     L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:18,attribution:'&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'}).addTo(map);
-    let selectedMarker=null,teleportTargetMarker=null,connectionLine=null,serverLayers=new Map(),otherMarkers=new Map(),locations=[],currentRoute=null,selectedPosition=null,connectionState='disconnected',lastInputAt=0,draining=false,inputInFlight=false,inputDirty=true,teleporting=false,reconnecting=false;
+    let selectedMarker=null,teleportTargetMarker=null,connectionLine=null,serverLayers=new Map(),otherMarkers=new Map(),locations=[],currentRoute=null,selectedPosition=null,connectionState='disconnected',lastInputAt=0,inputInFlight=false,inputDirty=true,teleporting=false,reconnecting=false;
     const keys=new Set();
     const el=id=>document.getElementById(id);
     const clientUid=localStorage.getItem('tcp-lab-client-uid')||crypto.randomUUID();localStorage.setItem('tcp-lab-client-uid',clientUid);el('clientUid').textContent=clientUid;
     const observedGateways=new Set();
     const inputSequenceKey=`tcp-lab-input-sequence-${clientUid}`;let inputSequence=Number(localStorage.getItem(inputSequenceKey)||0);
-    const pendingKey=`tcp-lab-pending-${clientUid}`;let pendingCommands=JSON.parse(localStorage.getItem(pendingKey)||'[]').filter(command=>command.kind==='increment');localStorage.setItem(pendingKey,JSON.stringify(pendingCommands));
     function showRoute(body){
       currentRoute=body;
       if(body.gateway)observedGateways.add(body.gateway);
-      el('location').textContent=body.location_id??'—'; el('server').textContent=body.server||'—';
+      if(Number.isInteger(body.entity_count))el('entityCount').textContent=body.entity_count;el('server').textContent=body.server||'—';
       el('gateway').textContent=body.gateway||'—';el('instance').textContent=body.instance||'—';el('generation').textContent=body.generation??'—';
-      if(body.client_uid===clientUid&&body.counter!==undefined)el('counter').textContent=body.counter;
       renderServers();renderProxy();
     }
     function connection(state){connectionState=state;const dot=el('dot');dot.classList.toggle('ok',state==='ready');dot.classList.toggle('waiting',state==='gateway');el('connection').textContent=state==='ready'?'Connected':state==='gateway'?'Gateway connected; waiting for server':'Disconnected';}
@@ -104,11 +101,6 @@ PAGE = r"""<!doctype html>
     async function loadLocations(){
       const body=await request('/api/locations');locations=body.locations;renderServers();
     }
-    async function drainCommands(){
-      if(draining)return;draining=true;
-      try{while(pendingCommands.length){const command=pendingCommands[0];const body=await request('/api/increment',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({client_uid:clientUid,operation_id:command.operation_id})});showRoute(body);connection('ready');pendingCommands.shift();localStorage.setItem(pendingKey,JSON.stringify(pendingCommands));el('error').textContent=''}}
-      catch(error){el('error').textContent=error.message;refresh()}finally{draining=false}
-    }
     map.on('click',async event=>{
       if(teleporting)return;
       const {lat,lng}=event.latlng.wrap();el('coordinate').textContent=`Target: ${lat.toFixed(5)}, ${lng.toFixed(5)}`;el('error').textContent='';
@@ -117,11 +109,10 @@ PAGE = r"""<!doctype html>
       try{const body=await request('/api/location',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({client_uid:clientUid,sequence:inputSequence,latitude:lat,longitude:lng})});applyAuthoritativePosition(body);showRoute(body);renderEntities(body.entities||[]);connection('ready')}
       catch(error){el('error').textContent=error.message;refresh()}finally{if(teleportTargetMarker){teleportTargetMarker.remove();teleportTargetMarker=null}teleporting=false;inputDirty=true}
     });
-    el('increment').addEventListener('click',()=>{pendingCommands.push({kind:'increment',operation_id:crypto.randomUUID()});localStorage.setItem(pendingKey,JSON.stringify(pendingCommands));drainCommands()});
     function setKey(event,pressed){const key=event.key.toLowerCase();if(!'wasd'.includes(key))return;event.preventDefault();if(pressed)keys.add(key);else keys.delete(key);inputDirty=true}
     addEventListener('keydown',event=>setKey(event,true));addEventListener('keyup',event=>setKey(event,false));addEventListener('blur',()=>{keys.clear();inputDirty=true});
     async function sendInput(){
-      if(inputInFlight||teleporting||pendingCommands.length||!currentRoute?.server)return;
+      if(inputInFlight||teleporting||!currentRoute?.server)return;
       const x=(keys.has('d')?1:0)-(keys.has('a')?1:0),y=(keys.has('w')?1:0)-(keys.has('s')?1:0);
       const now=performance.now();if(x===0&&y===0&&!inputDirty&&now-lastInputAt<50)return;inputDirty=false;inputInFlight=true;lastInputAt=now;
       try{inputSequence++;localStorage.setItem(inputSequenceKey,inputSequence);const body=await request('/api/input',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({client_uid:clientUid,sequence:inputSequence,x,y,zoom:map.getZoom()})});applyAuthoritativePosition(body);showRoute(body);renderEntities(body.entities||[])}
@@ -131,8 +122,8 @@ PAGE = r"""<!doctype html>
     map.on('move zoom resize',drawProxyEdge);
     async function reconnect(silent=false){if(reconnecting)return;reconnecting=true;try{const body=await request('/api/reconnect',{method:'POST'});showRoute(body||{});connection(body?'ready':'gateway');inputDirty=true;el('error').textContent=''}catch(error){if(!silent)el('error').textContent=error.message;refresh()}finally{reconnecting=false}}
     el('reconnect').addEventListener('click',()=>reconnect(false));
-    async function refresh(){try{const state=await request('/api/state');connection(state.connection);if(state.latitude!==null&&!pendingCommands.length&&!teleporting)applyAuthoritativePosition({client_latitude:state.latitude,client_longitude:state.longitude});showRoute(state.route||{gateway:state.gateway})}catch(error){connection('disconnected')}}
-    loadLocations().then(()=>{refresh();drainCommands()}).catch(error=>{el('error').textContent=error.message;refresh()});setInterval(sendInput,1000/30);setInterval(expireEntityMarkers,250);setInterval(refresh,1000);setInterval(()=>{if(connectionState!=='ready')reconnect(true)},1000);setInterval(drainCommands,1000);setInterval(()=>loadLocations().catch(()=>{}),5000);
+    async function refresh(){try{const state=await request('/api/state');connection(state.connection);if(state.latitude!==null&&!teleporting)applyAuthoritativePosition({client_latitude:state.latitude,client_longitude:state.longitude});showRoute(state.route||{gateway:state.gateway})}catch(error){connection('disconnected')}}
+    loadLocations().then(refresh).catch(error=>{el('error').textContent=error.message;refresh()});setInterval(sendInput,1000/30);setInterval(expireEntityMarkers,250);setInterval(refresh,1000);setInterval(()=>{if(connectionState!=='ready')reconnect(true)},1000);setInterval(()=>loadLocations().catch(()=>{}),5000);
   </script>
 </body>
 </html>"""
@@ -179,10 +170,6 @@ def make_handler(client: GatewayClient):
                     self.send_json(client.move(str(payload["client_uid"]), int(payload["sequence"]), latitude, longitude))
                 elif path == "/api/reconnect":
                     self.send_json(client.reconnect())
-                elif path == "/api/increment":
-                    length = int(self.headers.get("Content-Length", "0"))
-                    payload = json.loads(self.rfile.read(length) or b"{}")
-                    self.send_json(client.increment(str(payload["client_uid"]), str(payload["operation_id"])))
                 elif path == "/api/input":
                     length = int(self.headers.get("Content-Length", "0"))
                     payload = json.loads(self.rfile.read(length) or b"{}")

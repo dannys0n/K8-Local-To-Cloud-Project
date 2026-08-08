@@ -37,8 +37,8 @@ through AWS tooling and then uses the EKS overlay to deploy the same base.
   of one. A fresh database seeds one logical location owned by that initial
   replica. Each active process runs a 20 Hz
   authoritative simulation clock and includes its current tick in responses.
-- **PostgreSQL:** authoritative location identity, counters, leases, and ownership
-  generations; one PVC on the dedicated kind database worker.
+- **PostgreSQL:** authoritative location identity, entity claims, leases, and
+  ownership generations; one PVC on the dedicated kind database worker.
 - **Redis:** ephemeral server presence for infrastructure visibility. It is not
   part of authoritative client state.
 - **Server autoscaler:** Metrics Server plus Custom Pod Autoscaler Framework.
@@ -48,7 +48,7 @@ through AWS tooling and then uses the EKS overlay to deploy the same base.
 - **Manifest management:** a shared Kustomize base plus kind and EKS overlays.
 
 The Go workloads remain single packages with narrow source boundaries. Server
-startup, protocol, ownership, simulation, and durable transactions stay in
+startup, protocol, ownership, simulation, and entity claims stay in
 `app/server/main.go`; same-server spatial relevance is isolated in
 `app/server/visibility.go`. Gateway routing and client sessions stay in
 `app/gateway/main.go`; its private health and statistics HTTP surface is isolated
@@ -96,7 +96,7 @@ SELECT * FROM tcp_retire_location();
 
 The first assigns a random coordinate and permanent atomic ID after the autoscaler
 adds a server replica. The second disables the highest active location and fences
-its owner after a replica is removed; referenced durable rows are retained. The
+its owner after a replica is removed; referenced entity rows are retained. The
 dashboard has no location mutation or Deployment scaling permissions.
 
 Metrics Server reports server CPU relative to
@@ -125,10 +125,8 @@ v1.4.2. The evaluator image pins Custom Pod Autoscaler Framework v2.12.2.
 
 `tools/client.py` asks the operating system for a free local port, prints the
 resulting URL, and opens it in the default browser. It keeps a stable client UID
-and unacknowledged counter operations in browser local storage. Map clicks are
-sequenced transient teleport intents applied by the authoritative server tick.
-The separate counter button durably increments the per-client counter;
-PostgreSQL records its idempotency key and committed result. The gateway routes
+in browser local storage. Map clicks are sequenced transient teleport intents
+applied by the authoritative server tick. The gateway routes
 teleports to the nearest active server without replacing the client
 connection. Run the command again for each
 additional independent client; every process receives its own available port.
@@ -137,11 +135,10 @@ Use `--listen-port 8082` only when a fixed port is useful.
 The infrastructure dashboard map can spawn dummy clients in batches of up to
 500; the client window cannot create or remove test load. The dashboard only
 manages their lifecycle and reports status. Each autonomous headless client owns
-its reconnect, movement, and durable-input behavior. Every headless client
+its reconnect and movement behavior. Every headless client
 uses its own gateway TCP connection, chooses a random normalized movement
-direction every three seconds, sends movement intents at the same maximum 40 Hz
-cadence as a moving browser client, and performs
-one idempotent durable counter increment per second. Batches can be despawned
+direction every three seconds, and sends movement intents at the same maximum
+40 Hz cadence as a moving browser client. Batches can be despawned
 individually or together. Their cyan pins become stale after one second without
 an observation and disappear after five seconds; abandoned in-memory server
 entities are removed after 30 seconds.
@@ -157,12 +154,8 @@ and refreshed every two seconds so fast map updates do not repeatedly collect
 slow-moving infrastructure data.
 
 The internal `@location` handshake remains available to smoke checks. Browser
-clients use `@teleport CLIENT_UID SEQUENCE LATITUDE LONGITUDE` and
-`@increment CLIENT_UID OPERATION_ID`; `@locations`
-returns sanitized active-server markers. Servers batch pending counter commands
-on their 20 Hz tick and acknowledge them only after a synchronous PostgreSQL
-commit. Retrying an operation ID returns its recorded counter without applying
-it twice.
+clients use `@teleport CLIENT_UID SEQUENCE LATITUDE LONGITUDE`; `@locations`
+returns sanitized active-server markers.
 
 WASD sends transient `@input CLIENT_UID SEQUENCE X Y` intents at up to 40 Hz.
 The browser never sends a position for movement: the current logical server
@@ -171,8 +164,7 @@ projected degrees per second on its authoritative tick. Longitude wraps at the
 date line. Latitude moves in Leaflet's Web Mercator space and wraps between its
 north and south limits, keeping apparent map speed consistent. Input stops automatically if no
 refresh arrives for eight ticks (400 ms). Movement is not written on each tick.
-PostgreSQL records the last server-claim coordinate as a recovery point and
-stores the durable counter independently.
+PostgreSQL records the last server-claim coordinate as a recovery point.
 
 Input responses include nearby entities currently authoritative on the same
 server. The server applies the existing map-radius filter directly to its local
@@ -186,15 +178,12 @@ before switching its downstream socket. The browser-to-gateway connection does
 not change. A completed handoff records one entity claim in PostgreSQL.
 
 After a gateway disconnect, the local bridge uses its last coordinate as a
-routing hint. The destination server restores the durable counter from
-PostgreSQL, while the browser retries any unacknowledged counter operation with
-the same operation ID.
-The logical server identity, durable counter, and last entity claim remain in
+routing hint. The logical server identity and last entity claim remain in
 PostgreSQL when a pod is replaced. Movement after that claim remains transient.
 An expired 1.5-second lease is claimed by a cold replacement pod;
 the generation increases to fence the old owner. Redis presence keys expire and
 repopulate automatically. Generic test messages remain at-least-once, while
-counter increments have exactly-once database effects. Without a location handshake, port 9000 remains the
+Without a location handshake, port 9000 remains the
 original round-robin endpoint.
 
 Use the map's reconnect button to replace the gateway connection while retaining
@@ -262,7 +251,7 @@ drives mounted into WSL, where executable permission metadata may be disabled.
 Send a line such as `hello` and receive one JSON line:
 
 ```json
-{"gateway":"gateway-abc","server":"tcp-server-0","location_id":1,"latitude":34.0522,"longitude":-118.2437,"client_uid":"a-client-uuid","operation_id":"an-operation-uuid","client_latitude":34.1,"client_longitude":-118.2,"instance":"tcp-server-abc","generation":3,"counter":1,"message":"increment","tick":42,"time":"2026-07-31T00:00:00Z"}
+{"gateway":"gateway-abc","server":"tcp-server-0","location_id":1,"latitude":34.0522,"longitude":-118.2437,"client_uid":"a-client-uuid","client_latitude":34.1,"client_longitude":-118.2,"instance":"tcp-server-abc","generation":3,"message":"state","tick":42,"time":"2026-07-31T00:00:00Z"}
 ```
 
 A single browser-client process keeps one persistent TCP connection on one

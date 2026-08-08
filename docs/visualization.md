@@ -9,7 +9,7 @@ python tools/dashboard.py
 ```
 
 Open `http://127.0.0.1:8080`. The page discovers all gateway pods, combines
-their current counters, routes, and active sessions from each gateway's
+their current session totals, routes, and active sessions from each gateway's
 read-only statistics endpoint. Backend rows are one per logical location and show the
 currently assigned physical server pod and worker node. `Logical server` is the durable location identity such as
 `tcp-server-1`; `Active instance` is the replaceable Kubernetes pod currently

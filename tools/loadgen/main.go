@@ -126,10 +126,8 @@ func (c *client) run(ctx context.Context, rng *mathrand.Rand) {
 	zoom := 2 + rng.Intn(17)
 	now := time.Now()
 	nextDirection := now.Add(time.Duration(rng.Float64() * float64(3*time.Second)))
-	nextCounter := now.Add(time.Duration(rng.Float64() * float64(time.Second)))
 	nextReconnect := now
 	sequence := 0
-	pendingOperation := ""
 	timer := time.NewTimer(time.Duration(rng.Float64() * float64(inputInterval)))
 	select {
 	case <-ctx.Done():
@@ -150,15 +148,6 @@ func (c *client) run(ctx context.Context, rng *mathrand.Rand) {
 				angle = rng.Float64() * 2 * math.Pi
 				x, y = math.Cos(angle), math.Sin(angle)
 				nextDirection = started.Add(3 * time.Second)
-			}
-			if !started.Before(nextCounter) {
-				if pendingOperation == "" {
-					pendingOperation = "bot-op:" + randomID()
-				}
-				if _, err := c.request(fmt.Sprintf("@increment %s %s", c.uid, pendingOperation)); err == nil {
-					pendingOperation = ""
-				}
-				nextCounter = time.Now().Add(time.Second)
 			}
 			if c.state == 2 {
 				sequence++

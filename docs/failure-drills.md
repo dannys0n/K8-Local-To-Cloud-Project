@@ -28,7 +28,7 @@ endpoints through the headless Service DNS.
 ## Server persistence
 
 1. Start `tools/client.ps1`, then click near New York on the browser map.
-2. Press the durable counter button several times and note the numeric location ID, logical server, and client counter.
+2. Note the numeric location ID, logical server, and client coordinate.
 3. Find the physical owner and generation in PostgreSQL:
 
    ```bash
@@ -37,16 +37,14 @@ endpoints through the headless Service DNS.
 
 4. Delete the owner pod while leaving the client open.
 5. Move again. The gateway retains the client connection, discovers the
-   replacement, and the new server restores the durable counter and last claim
-   coordinate from PostgreSQL.
-   Any unacknowledged counter operation retries with the same operation ID.
-6. Confirm a cold replacement owns `tcp-server-1`, the generation increased, and
-   the PostgreSQL `client_state` counter continues from its previous value.
+   replacement, and the new server restores the last claimed coordinate from
+   PostgreSQL.
+6. Confirm a cold replacement owns the same logical server and its generation
+   increased.
 
 The server-side TCP socket cannot survive a pod failure, but the client-to-gateway
-socket remains open. Counter commands have operation IDs. Movement since the
-last server claim is transient and is intentionally not recovered after a
-server failure.
+socket remains open. Movement since the last server claim is transient and is
+intentionally not recovered after a server failure.
 
 The default ownership lease is 1.5 seconds and renews every 250ms. Gateways
 discover eligible backends every 200ms, with a separate 500ms discovery timeout,
@@ -107,7 +105,8 @@ kubectl delete pod -n tcp-lab -l app=redis
 kubectl exec -n tcp-lab deployment/redis -- redis-cli --scan --pattern 'tcp-lab:*'
 ```
 
-Restart PostgreSQL and confirm counters remain on its single kind PVC:
+Restart PostgreSQL and confirm location ownership and entity claims remain on
+its single kind PVC:
 
 ```bash
 kubectl delete pod -n tcp-lab postgres-0
