@@ -34,8 +34,6 @@ const (
 	maximumViewZoom         = 18.0
 	inputTimeoutTicks       = 8
 	visibilityActiveTicks   = 20
-	visibilityInterval      = 100 * time.Millisecond
-	visibilityLease         = 5 * time.Second
 	visibilityRadiusPixels  = 250.0
 	entityCleanupTicks      = 600
 	mercatorLatitudeLimit   = 85.05112878
@@ -73,12 +71,6 @@ type server struct {
 	inputs           chan inputCommand
 	entityMu         sync.Mutex
 	entities         map[string]*entityState
-	visibilityMu     sync.RWMutex
-	visible          []visibleEntity
-	visibilityReadAt time.Time
-	publishedMu      sync.Mutex
-	publishedField   string
-	publishedCells   map[string]struct{}
 	topologyMu       sync.RWMutex
 	topology         []locationDefinition
 	mu               sync.RWMutex
@@ -124,12 +116,6 @@ type visibleEntity struct {
 	Latitude  float64 `json:"latitude"`
 	Longitude float64 `json:"longitude"`
 	Sequence  uint64  `json:"sequence"`
-}
-
-type visibilitySnapshot struct {
-	Generation int64           `json:"generation"`
-	UpdatedAt  int64           `json:"updated_at"`
-	Entities   []visibleEntity `json:"entities"`
 }
 
 type durableRequest struct {
@@ -259,7 +245,6 @@ func main() {
 	go s.heartbeat(ctx, logger)
 	go s.runTicks(ctx)
 	go s.runDurableCommands(ctx)
-	go s.runVisibility(ctx)
 
 	listenAddr := envOrDefault("LISTEN_ADDR", ":7000")
 	listener, err := net.Listen("tcp", listenAddr)
@@ -497,7 +482,6 @@ func (s *server) refreshTopology(ctx context.Context) error {
 			}
 		}
 		if !enabled {
-			s.deleteVisibility(ctx, current)
 			s.clearAssignment(current.Generation)
 		}
 	}
@@ -838,7 +822,6 @@ func (s *server) manageAssignment(ctx context.Context, logger *slog.Logger) {
 			}
 		} else if renewed, err := s.renew(operationCtx, current); err != nil {
 			if time.Now().After(current.LeaseUntil) {
-				s.deleteVisibility(operationCtx, current)
 				s.clearAssignment(current.Generation)
 				logger.Warn("location lease lost", "instance", s.podName, "server", current.ServerID, "generation", current.Generation)
 			}
@@ -910,7 +893,6 @@ func (s *server) release(ctx context.Context) {
 		WHERE server_id = $1 AND owner_instance_id = $2 AND generation = $3`,
 		current.ServerID, s.instanceID, current.Generation,
 	)
-	s.deleteVisibility(ctx, current)
 }
 
 func (s *server) heartbeat(ctx context.Context, logger *slog.Logger) {
