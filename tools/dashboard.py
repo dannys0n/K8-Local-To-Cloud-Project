@@ -5,7 +5,6 @@ import argparse
 import json
 import subprocess
 import threading
-import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -23,9 +22,10 @@ DATA_SERVICES = {
     "postgres": ("PostgreSQL", "postgres:5432"),
     "redis": ("Redis", "redis:6379"),
 }
-INFRASTRUCTURE_REFRESH_SECONDS = 2
 INFRASTRUCTURE_CACHE = {"data": None, "error": ""}
+INFRASTRUCTURE_REFRESH = {"seconds": 2.0}
 INFRASTRUCTURE_LOCK = threading.Lock()
+INFRASTRUCTURE_WAKE = threading.Event()
 
 
 PAGE = r"""<!doctype html>
@@ -108,6 +108,7 @@ MAP_PAGE = r"""<!doctype html>
 <aside>
 <div class="card"><div class="label">Map layers</div><label class="toggle"><input id="showClients" type="checkbox" checked>Show clients</label><label class="toggle"><input id="showServers" type="checkbox" checked>Show active locations</label><label class="toggle"><input id="showGateways" type="checkbox" checked>Show gateways</label></div>
 <div class="card"><div class="label">Map update rate</div><div id="refreshRateValue" class="value route">4 Hz</div><input id="refreshRate" type="range" min="1" max="20" step="1" value="4"><div class="muted">Target rate; slow Kubernetes snapshots never overlap.</div></div>
+<div class="card"><div class="label">Gateway/server polling</div><div id="infrastructureRateValue" class="value route">2 seconds</div><input id="infrastructureRate" type="range" min="0.5" max="5" step="0.5" value="2"><div class="muted">Refreshes Kubernetes pod and node state independently of map updates.</div></div>
 <div class="card"><div class="label">Dummy clients</div><input id="botCount" type="number" min="1" max="500" value="10"><button id="spawn">Spawn batch</button><div id="botState" class="bot-summary">0 active</div><div id="botBatches"></div><button id="despawn">Despawn all</button></div>
 <div id="error" class="error"></div>
 </aside></main>
@@ -126,7 +127,7 @@ async function refreshLoop(){const started=performance.now();await refresh();set
 function renderBots(bots){document.getElementById('botState').textContent=`${bots.states.ready} ready · ${bots.states.gateway} gateway · ${bots.states.disconnected} disconnected`;const list=document.getElementById('botBatches');list.replaceChildren();for(const batch of bots.batches){const row=document.createElement('div');row.className='batch-row';const label=document.createElement('span');label.textContent=`Batch ${batch.id}: ${batch.count}`;const remove=document.createElement('button');remove.textContent='Despawn';remove.onclick=async()=>{try{renderBots(await post('/api/bots/despawn',{batch_id:batch.id}))}catch(error){document.getElementById('error').textContent=error.message}};row.append(label,remove);list.appendChild(row)}}
 async function refreshBots(){try{renderBots(await request('/api/bots'))}catch(error){document.getElementById('error').textContent=error.message}}
 document.getElementById('spawn').onclick=async()=>{try{await post('/api/bots/spawn',{count:Number(document.getElementById('botCount').value)});refreshBots()}catch(error){document.getElementById('error').textContent=error.message}};document.getElementById('despawn').onclick=async()=>{try{await post('/api/bots/despawn-all');refreshBots()}catch(error){document.getElementById('error').textContent=error.message}};
-for(const id of ['showClients','showServers','showGateways'])document.getElementById(id).onchange=()=>lastData&&render(lastData);const refreshRate=document.getElementById('refreshRate');refreshHz=Math.max(1,Math.min(20,Number(localStorage.getItem('tcp-lab-dashboard-refresh-hz')||4)));refreshRate.value=refreshHz;document.getElementById('refreshRateValue').textContent=`${refreshHz} Hz`;refreshRate.oninput=event=>{refreshHz=Number(event.target.value);localStorage.setItem('tcp-lab-dashboard-refresh-hz',refreshHz);document.getElementById('refreshRateValue').textContent=`${refreshHz} Hz`};refreshLoop();refreshBots();setInterval(refreshBots,2000);
+for(const id of ['showClients','showServers','showGateways'])document.getElementById(id).onchange=()=>lastData&&render(lastData);const refreshRate=document.getElementById('refreshRate');refreshHz=Math.max(1,Math.min(20,Number(localStorage.getItem('tcp-lab-dashboard-refresh-hz')||4)));refreshRate.value=refreshHz;document.getElementById('refreshRateValue').textContent=`${refreshHz} Hz`;refreshRate.oninput=event=>{refreshHz=Number(event.target.value);localStorage.setItem('tcp-lab-dashboard-refresh-hz',refreshHz);document.getElementById('refreshRateValue').textContent=`${refreshHz} Hz`};const infrastructureRate=document.getElementById('infrastructureRate');let infrastructureSeconds=Math.max(.5,Math.min(5,Number(localStorage.getItem('tcp-lab-infrastructure-refresh-seconds')||2)));function showInfrastructureRate(){document.getElementById('infrastructureRateValue').textContent=`${infrastructureSeconds} second${infrastructureSeconds===1?'':'s'}`}async function setInfrastructureRate(){try{await post('/api/infrastructure-rate',{seconds:infrastructureSeconds})}catch(error){document.getElementById('error').textContent=error.message}}infrastructureRate.value=infrastructureSeconds;showInfrastructureRate();infrastructureRate.oninput=event=>{infrastructureSeconds=Number(event.target.value);localStorage.setItem('tcp-lab-infrastructure-refresh-seconds',infrastructureSeconds);showInfrastructureRate();setInfrastructureRate()};setInfrastructureRate();refreshLoop();refreshBots();setInterval(refreshBots,2000);
 </script></body></html>"""
 
 
@@ -292,7 +293,19 @@ def refresh_infrastructure() -> None:
         except Exception as error:
             with INFRASTRUCTURE_LOCK:
                 INFRASTRUCTURE_CACHE["error"] = str(error)
-        time.sleep(INFRASTRUCTURE_REFRESH_SECONDS)
+        with INFRASTRUCTURE_LOCK:
+            interval = INFRASTRUCTURE_REFRESH["seconds"]
+        INFRASTRUCTURE_WAKE.wait(interval)
+        INFRASTRUCTURE_WAKE.clear()
+
+
+def set_infrastructure_refresh(seconds: float) -> float:
+    if not 0.5 <= seconds <= 5:
+        raise ValueError("infrastructure polling must be between 0.5 and 5 seconds")
+    with INFRASTRUCTURE_LOCK:
+        INFRASTRUCTURE_REFRESH["seconds"] = seconds
+    INFRASTRUCTURE_WAKE.set()
+    return seconds
 
 
 def cached_infrastructure() -> tuple[dict, str]:
@@ -403,6 +416,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(BOT_MANAGER.despawn(int(payload["batch_id"])))
             elif path == "/api/bots/despawn-all":
                 self.send_json(BOT_MANAGER.despawn_all())
+            elif path == "/api/infrastructure-rate":
+                self.send_json({"seconds": set_infrastructure_refresh(float(payload["seconds"]))})
             else:
                 self.send_json({"error": "not found"}, 404)
         except (KeyError, TypeError, ValueError, RuntimeError, json.JSONDecodeError) as error:
