@@ -70,7 +70,6 @@ type gateway struct {
 	gatewayMetadata []byte
 	serverHost      string
 	serverPort      string
-	routeTimeout    time.Duration
 	backendTimeout  time.Duration
 	logger          *slog.Logger
 	mu              sync.RWMutex
@@ -78,6 +77,7 @@ type gateway struct {
 	sessions        map[string]session
 	accepted        atomic.Uint64
 	nextSession     atomic.Uint64
+	nextResolver    atomic.Uint64
 }
 
 type backendConnection struct {
@@ -92,12 +92,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	routeTimeout, err := durationFromEnv("ROUTE_TIMEOUT", 10*time.Second)
-	if err != nil {
-		logger.Error("invalid route timeout", "error", err)
-		os.Exit(1)
-	}
-	backendTimeout, err := durationFromEnv("BACKEND_TIMEOUT", 3*time.Second)
+	backendTimeout, err := durationFromEnv("BACKEND_TIMEOUT", 750*time.Millisecond)
 	if err != nil {
 		logger.Error("invalid backend timeout", "error", err)
 		os.Exit(1)
@@ -108,9 +103,9 @@ func main() {
 	g := &gateway{
 		instance:        instance,
 		gatewayMetadata: append([]byte(`"gateway":`), encodedInstance...),
-		serverHost:      envOrDefault("SERVER_HOST", "tcp-server.tcp-lab.svc.cluster.local"),
+		serverHost:      envOrDefault("SERVER_HOST", "tcp-server-discovery.tcp-lab.svc.cluster.local"),
 		serverPort:      envOrDefault("SERVER_PORT", "7000"),
-		routeTimeout:    routeTimeout, backendTimeout: backendTimeout, logger: logger,
+		backendTimeout:  backendTimeout, logger: logger,
 		catalog: make(map[string]backend), sessions: make(map[string]session),
 	}
 	go g.serveHTTP(ctx, envOrDefault("STATS_ADDR", ":8404"))
@@ -189,7 +184,7 @@ func (g *gateway) handleClient(ctx context.Context, client net.Conn) {
 				writeJSONError(clientWriter, "clients cannot select a server location")
 				continue
 			}
-			candidate, hello, err := g.openRoute(ctx, location, nil)
+			candidate, hello, err := g.openRoute(ctx, location)
 			if err != nil {
 				writeJSONError(clientWriter, err.Error())
 				continue
@@ -218,7 +213,7 @@ func (g *gateway) handleClient(ctx context.Context, client net.Conn) {
 				writeJSONError(clientWriter, err.Error())
 				continue
 			}
-			candidate, hello, err := g.openRoute(ctx, location, nil)
+			candidate, hello, err := g.openRoute(ctx, location)
 			if err != nil {
 				writeJSONError(clientWriter, err.Error())
 				continue
@@ -259,7 +254,7 @@ func (g *gateway) handleClient(ctx context.Context, client net.Conn) {
 				writeJSONError(clientWriter, routeErr.Error())
 				continue
 			}
-			candidate, _, routeErr := g.openRoute(ctx, location, nil)
+			candidate, _, routeErr := g.openRoute(ctx, location)
 			if routeErr != nil {
 				writeJSONError(clientWriter, routeErr.Error())
 				continue
@@ -272,23 +267,13 @@ func (g *gateway) handleClient(ctx context.Context, client net.Conn) {
 		response, err := g.exchange(downstream, message)
 		state, valid := decodeBackendResponse(response)
 		if err != nil || !valid || state.Error != "" {
-			failed := downstream.info
 			downstream.conn.Close()
 			downstream = nil
 			g.setSessionStatus(id, "gateway")
-			candidate, _, routeErr := g.openRoute(ctx, requested, &failed)
+			candidate, _, routeErr := g.openRoute(ctx, requested)
 			if routeErr != nil {
-				location, nearestErr := g.locationFor(ctx, clientLatitude, clientLongitude)
-				if nearestErr != nil {
-					writeJSONError(clientWriter, nearestErr.Error())
-					continue
-				}
-				candidate, _, routeErr = g.openRoute(ctx, location, nil)
-				if routeErr != nil {
-					writeJSONError(clientWriter, routeErr.Error())
-					continue
-				}
-				requested = location
+				writeJSONError(clientWriter, "server temporarily unavailable")
+				continue
 			}
 			downstream = candidate
 			g.updateSession(id, client.RemoteAddr().String(), candidate.info, clientLatitude, clientLongitude)
@@ -310,7 +295,7 @@ func (g *gateway) handleClient(ctx context.Context, client net.Conn) {
 		}
 		if state.Reroute != 0 {
 			nextLocation := strconv.FormatInt(state.Reroute, 10)
-			candidate, _, routeErr := g.openRoute(ctx, nextLocation, nil)
+			candidate, _, routeErr := g.openRoute(ctx, nextLocation)
 			if routeErr != nil {
 				writeJSONError(clientWriter, routeErr.Error())
 				continue
@@ -354,24 +339,19 @@ func (g *gateway) withGatewayMetadata(body []byte) []byte {
 	return append(result, '}', '\n')
 }
 
-func (g *gateway) openRoute(ctx context.Context, requested string, previous *backend) (*backendConnection, []byte, error) {
+func (g *gateway) openRoute(ctx context.Context, requested string) (*backendConnection, []byte, error) {
 	if requested == "" {
 		return nil, nil, errors.New("location is required")
 	}
-	deadline := time.Now().Add(g.routeTimeout)
-	for {
-		candidate, err := g.resolveRoute(ctx, requested)
-		if err == nil && (previous == nil || candidate.Address != previous.Address || candidate.Generation > previous.Generation) {
-			connection, hello, err := g.connectBackend(candidate)
-			if err == nil {
-				return connection, hello, nil
-			}
-		}
-		if time.Now().After(deadline) || ctx.Err() != nil {
-			return nil, nil, fmt.Errorf("location %q unavailable", requested)
-		}
-		time.Sleep(100 * time.Millisecond)
+	candidate, err := g.resolveRoute(ctx, requested)
+	if err != nil {
+		return nil, nil, fmt.Errorf("location %q unavailable", requested)
 	}
+	connection, hello, err := g.connectBackend(candidate)
+	if err != nil {
+		return nil, nil, fmt.Errorf("location %q unavailable", requested)
+	}
+	return connection, hello, nil
 }
 
 func (g *gateway) exchange(connection *backendConnection, message string) ([]byte, error) {
@@ -415,18 +395,34 @@ func (g *gateway) resolveRoute(ctx context.Context, requested string) (backend, 
 }
 
 func (g *gateway) resolve(ctx context.Context, command string, response any) error {
-	endpoint := net.JoinHostPort(g.serverHost, g.serverPort)
-	dialer := net.Dialer{Timeout: g.backendTimeout}
-	conn, err := dialer.DialContext(ctx, "tcp", endpoint)
-	if err != nil {
-		return err
+	resolveCtx, cancel := context.WithTimeout(ctx, g.backendTimeout)
+	defer cancel()
+	addresses, err := net.DefaultResolver.LookupHost(resolveCtx, g.serverHost)
+	if err != nil || len(addresses) == 0 {
+		return errors.New("no ready route resolvers")
 	}
-	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(g.backendTimeout))
-	if _, err = fmt.Fprintln(conn, command); err != nil {
-		return err
+	start := int(g.nextResolver.Add(1)-1) % len(addresses)
+	var lastErr error
+	for offset := range addresses {
+		address := net.JoinHostPort(addresses[(start+offset)%len(addresses)], g.serverPort)
+		dialer := net.Dialer{Timeout: g.backendTimeout}
+		conn, dialErr := dialer.DialContext(resolveCtx, "tcp", address)
+		if dialErr != nil {
+			lastErr = dialErr
+			continue
+		}
+		_ = conn.SetDeadline(time.Now().Add(g.backendTimeout))
+		_, writeErr := fmt.Fprintln(conn, command)
+		if writeErr == nil {
+			writeErr = json.NewDecoder(conn).Decode(response)
+		}
+		_ = conn.Close()
+		if writeErr == nil {
+			return nil
+		}
+		lastErr = writeErr
 	}
-	return json.NewDecoder(conn).Decode(response)
+	return lastErr
 }
 
 func (g *gateway) routesSnapshot() []backend {

@@ -5,6 +5,9 @@ import socket
 import threading
 
 
+IO_TIMEOUT_SECONDS = 1.0
+
+
 class GatewayResponseError(Exception):
     pass
 
@@ -44,8 +47,8 @@ class GatewayClient:
     def _connect(self):
         self._close()
         try:
-            self.sock = socket.create_connection((self.host, self.port), timeout=10)
-            self.sock.settimeout(10)
+            self.sock = socket.create_connection((self.host, self.port), timeout=IO_TIMEOUT_SECONDS)
+            self.sock.settimeout(IO_TIMEOUT_SECONDS)
             self.stream = self.sock.makefile("rwb", buffering=0)
             with self.state_lock:
                 self.connection = "gateway"
@@ -59,7 +62,6 @@ class GatewayClient:
         except (OSError, ValueError, ConnectionError):
             self._close()
             raise
-        self.sock.settimeout(None)
         with self.state_lock:
             self.route = route
             if route:

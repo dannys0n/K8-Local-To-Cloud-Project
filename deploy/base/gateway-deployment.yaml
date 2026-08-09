@@ -50,13 +50,11 @@ spec:
             - name: STATS_ADDR
               value: ":8404"
             - name: SERVER_HOST
-              value: tcp-server.tcp-lab.svc.cluster.local
+              value: tcp-server-discovery.tcp-lab.svc.cluster.local
             - name: SERVER_PORT
               value: "7000"
-            - name: ROUTE_TIMEOUT
-              value: "5s"
             - name: BACKEND_TIMEOUT
-              value: "3s"
+              value: "750ms"
           ports:
             - name: tcp
               containerPort: 9000
