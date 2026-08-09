@@ -63,6 +63,9 @@ PAGE = r"""<!doctype html>
     <div class="card">Connected clients<div class="value" id="connectedClients">–</div></div>
     <div class="card">Dummy processes<div class="value" id="dummyProcesses">–</div></div>
     <div class="card">Server replicas<div class="value" id="pool">–</div></div>
+    <div class="card">Valkey primaries<div class="value" id="valkeyPrimaries">–</div></div>
+    <div class="card">Valkey replicas<div class="value" id="valkeyReplicas">–</div></div>
+    <div class="card">Unjoined Valkey pods<div class="value bad" id="valkeyUnjoined">–</div></div>
   </div>
   <div class="panel"><h2>Per gateway</h2><table><thead><tr><th>Gateway</th><th>Pod IP</th><th>Node</th><th>Clients</th><th>Backend</th><th>Total accepted</th><th>Status</th></tr></thead><tbody id="gatewayRows"></tbody></table></div>
   <div class="panel"><h2>Client sessions</h2><table><thead><tr><th>Gateway</th><th>Client address</th><th>Status</th><th>Location ID</th><th>Logical server</th><th>Instance</th><th>Generation</th><th>Age</th><th>Protocol</th></tr></thead><tbody id="sessionRows"></tbody></table></div>
@@ -82,6 +85,9 @@ async function refresh(){
     document.getElementById('connectedClients').textContent=data.connected_clients;
     document.getElementById('dummyProcesses').textContent=data.dummy_processes;
     document.getElementById('pool').textContent=data.server_pods;
+    document.getElementById('valkeyPrimaries').textContent=data.valkey.primaries??'–';
+    document.getElementById('valkeyReplicas').textContent=data.valkey.replicas??'–';
+    document.getElementById('valkeyUnjoined').textContent=data.valkey.unjoined??'–';
     document.getElementById('notReady').textContent=data.not_ready_pods;
     document.getElementById('unknown').textContent=data.unknown_pods;
     fill('gatewayRows', data.gateways, ['name','ip','node','clients','backend_sessions','total_accepted',p=>p.error?'ERROR':'OK']);
@@ -194,7 +200,7 @@ def list_server_pods(node_statuses: dict[str, str]) -> list[dict[str, str]]:
     return [application_pod(item, node_statuses) for item in json.loads(raw).get("items", [])]
 
 
-def list_data_services() -> list[dict]:
+def list_data_services(node_statuses: dict[str, str]) -> list[dict]:
     raw = run(
         "kubectl", "get", "pods", "-n", NAMESPACE,
         "-l", "app=valkey", "-o", "json",
@@ -208,6 +214,7 @@ def list_data_services() -> list[dict]:
         app = labels.get("app", "")
         if app not in DATA_SERVICES:
             continue
+        pod_status = application_pod(item, node_statuses)["status"]
         ready = any(
             condition.get("type") == "Ready" and condition.get("status") == "True"
             for condition in status.get("conditions", [])
@@ -233,8 +240,49 @@ def list_data_services() -> list[dict]:
                 for container in status.get("containerStatuses", [])
             ),
             "status": health,
+            "pod_status": pod_status,
         })
     return sorted(result, key=lambda item: (item["service"], item["instance"]))
+
+
+def inspect_valkey_cluster(data_services: list[dict]) -> dict:
+    summary = {"primaries": None, "replicas": None, "unjoined": None, "error": ""}
+    valkey_pods = [item for item in data_services if item["service"] == "Valkey Cluster"]
+    if not valkey_pods:
+        return {"primaries": 0, "replicas": 0, "unjoined": 0, "error": ""}
+    ready = next((item for item in valkey_pods if item["status"] == "UP"), None)
+    if ready is None:
+        summary["error"] = "no ready pod is available for cluster inspection"
+        return summary
+    try:
+        output = run(
+            "kubectl", "exec", "-n", NAMESPACE, ready["instance"], "--",
+            "valkey-cli", "cluster", "nodes",
+        )
+        known_ips = set()
+        primaries = replicas = 0
+        for line in output.splitlines():
+            fields = line.split()
+            if len(fields) < 3:
+                continue
+            known_ips.add(fields[1].split("@", 1)[0].rsplit(":", 1)[0])
+            flags = set(fields[2].split(","))
+            if flags.intersection({"fail", "fail?", "handshake", "noaddr"}):
+                continue
+            if "master" in flags:
+                primaries += 1
+            elif "slave" in flags:
+                replicas += 1
+        pod_ips = {item["ip"] for item in valkey_pods if item["ip"]}
+        return {
+            "primaries": primaries,
+            "replicas": replicas,
+            "unjoined": len(pod_ips - known_ips),
+            "error": "",
+        }
+    except Exception as error:
+        summary["error"] = str(error)
+        return summary
 
 
 def inspect_pod(pod: dict, include_clients: bool = True) -> dict:
@@ -280,10 +328,12 @@ def inspect_pod(pod: dict, include_clients: bool = True) -> dict:
 
 def collect_infrastructure() -> dict:
     node_statuses = list_node_statuses()
+    data_services = list_data_services(node_statuses)
     return {
         "gateway_instances": list_pods(node_statuses),
         "server_pods": list_server_pods(node_statuses),
-        "data_services": list_data_services(),
+        "data_services": data_services,
+        "valkey": inspect_valkey_cluster(data_services),
     }
 
 
@@ -330,6 +380,7 @@ def snapshot(include_clients: bool = True) -> dict:
     server_pods = infrastructure["server_pods"]
     server_pods_by_ip = {pod["ip"]: pod for pod in server_pods if pod["ip"]}
     data_services = infrastructure["data_services"]
+    valkey = infrastructure["valkey"]
     with ThreadPoolExecutor(max_workers=max(1, len(pods))) as pool:
         gateways = list(pool.map(lambda pod: inspect_pod(pod, include_clients), pods))
     unique_backends = {}
@@ -360,7 +411,9 @@ def snapshot(include_clients: bool = True) -> dict:
 
     server_instances = sorted(server_pods, key=lambda pod: pod["name"])
 
-    application_instances = gateway_instances + server_instances
+    application_instances = gateway_instances + server_instances + [
+        {"status": service["pod_status"]} for service in data_services
+    ]
     bot_state = BOT_MANAGER.snapshot() if BOT_MANAGER is not None else {"total": 0}
 
     return {
@@ -374,10 +427,12 @@ def snapshot(include_clients: bool = True) -> dict:
         "unknown_pods": sum(instance["status"] == "unknown" for instance in application_instances),
         "server_instances": server_instances,
         "data_services": data_services,
+        "valkey": valkey,
         "sessions": [session for p in gateways for session in p["sessions"]],
         "backends": backends,
         "errors": (
             ([f"Kubernetes: {infrastructure_error}"] if infrastructure_error else [])
+            + ([f'Valkey: {valkey["error"]}'] if valkey["error"] else [])
             + [f'{p["name"]}: {p["error"]}' for p in gateways if p["error"]]
         ),
     }

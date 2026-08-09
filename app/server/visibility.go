@@ -5,7 +5,7 @@ import "math"
 // visibleEntities applies the existing spatial relevance radius only to
 // entities currently authoritative on this server. Cross-server visibility is
 // intentionally outside this infrastructure lab's application path.
-func (s *server) visibleEntities(excludeUID string, latitude, longitude, zoom float64, spatialRelevance bool) ([]visibleEntity, int) {
+func (s *server) visibleEntities(excludeUID string, latitude, longitude, zoom float64, serverRelevance, spatialRelevance bool) ([]visibleEntity, int) {
 	currentTick := s.tick.Load()
 	worldPixels, x, y := 0.0, 0.0, 0.0
 	if spatialRelevance {
@@ -14,8 +14,12 @@ func (s *server) visibleEntities(excludeUID string, latitude, longitude, zoom fl
 	}
 
 	s.entityMu.Lock()
-	entities := make([]visibleEntity, 0, len(s.entities))
 	entityCount := len(s.entities)
+	if !serverRelevance {
+		s.entityMu.Unlock()
+		return nil, entityCount
+	}
+	entities := make([]visibleEntity, 0, entityCount)
 	for uid, entity := range s.entities {
 		if uid == excludeUID || currentTick-entity.lastInputTick >= visibilityActiveTicks {
 			continue

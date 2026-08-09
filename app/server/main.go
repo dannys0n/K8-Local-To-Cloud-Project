@@ -755,13 +755,10 @@ func (s *server) writeInputResponse(writer *bufio.Writer, current *assignment, i
 	if intent.Teleport {
 		message = "teleport"
 	}
-	var entities []visibleEntity
-	entityCount := 0
-	if intent.ServerRelevance {
-		entities, entityCount = s.visibleEntities(
-			intent.ClientUID, result.latitude, result.longitude, result.zoom, intent.SpatialRelevance,
-		)
-	}
+	entities, entityCount := s.visibleEntities(
+		intent.ClientUID, result.latitude, result.longitude, result.zoom,
+		intent.ServerRelevance, intent.SpatialRelevance,
+	)
 	body, err := json.Marshal(response{
 		Server: current.ServerID, LocationID: current.LocationID,
 		Latitude: current.Latitude, Longitude: current.Longitude, Instance: s.podName,
@@ -781,12 +778,16 @@ func (s *server) writeInputResponse(writer *bufio.Writer, current *assignment, i
 }
 
 func (s *server) writeResponse(writer *bufio.Writer, current *assignment, message string) bool {
+	s.entityMu.Lock()
+	entityCount := len(s.entities)
+	s.entityMu.Unlock()
 	body, err := json.Marshal(response{
 		Server: current.ServerID, LocationID: current.LocationID,
 		Latitude: current.Latitude, Longitude: current.Longitude,
 		Instance:   s.podName,
 		Generation: current.Generation, Message: message,
 		Time: time.Now().UTC().Format(time.RFC3339Nano), Tick: s.tick.Load(),
+		EntityCount: entityCount,
 	})
 	if err != nil {
 		return false
