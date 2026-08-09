@@ -10,9 +10,14 @@ IMAGE = "tcp-loadgen:dev"
 
 
 class HeadlessBatch:
-    def __init__(self, batch_id: int, count: int, host: str, port: int):
+    def __init__(
+        self, batch_id: int, count: int, host: str, port: int,
+        server_relevance: bool, spatial_relevance: bool,
+    ):
         self.id = batch_id
         self.count = count
+        self.server_relevance = server_relevance
+        self.spatial_relevance = server_relevance and spatial_relevance
         self.name = f"tcp-loadgen-{os.getpid()}-{batch_id}"
         self.states = {"ready": 0, "gateway": 0, "disconnected": count}
         self.lock = threading.Lock()
@@ -21,6 +26,8 @@ class HeadlessBatch:
             "docker", "run", "--rm", "--name", self.name,
             "--add-host", "host.docker.internal:host-gateway", IMAGE,
             "--host", target, "--port", str(port), "--clients", str(count),
+            f"--server-relevance={str(self.server_relevance).lower()}",
+            f"--spatial-relevance={str(self.spatial_relevance).lower()}",
         ]
         flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
         self.process = subprocess.Popen(
@@ -59,7 +66,11 @@ class HeadlessBatch:
             states = dict(self.states)
         if self.process.poll() is not None:
             states = {"ready": 0, "gateway": 0, "disconnected": self.count}
-        return {"id": self.id, "count": self.count, "states": states}
+        return {
+            "id": self.id, "count": self.count, "states": states,
+            "server_relevance": self.server_relevance,
+            "spatial_relevance": self.spatial_relevance,
+        }
 
 
 class BotManager:
@@ -70,7 +81,7 @@ class BotManager:
         self.next_batch = 1
         self.batches: dict[int, HeadlessBatch] = {}
 
-    def spawn(self, count: int) -> dict:
+    def spawn(self, count: int, server_relevance: bool = True, spatial_relevance: bool = True) -> dict:
         if count < 1 or count > 500:
             raise ValueError("batch size must be between 1 and 500")
         if subprocess.run(
@@ -82,7 +93,10 @@ class BotManager:
             batch_id = self.next_batch
             self.next_batch += 1
         try:
-            batch = HeadlessBatch(batch_id, count, self.host, self.port)
+            batch = HeadlessBatch(
+                batch_id, count, self.host, self.port,
+                bool(server_relevance), bool(spatial_relevance),
+            )
         except OSError as error:
             raise ValueError(f"could not start load generator: {error}") from error
         with self.lock:
@@ -115,5 +129,9 @@ class BotManager:
         return {
             "total": sum(batch["count"] for batch in batches),
             "states": states,
-            "batches": [{"id": batch["id"], "count": batch["count"]} for batch in batches],
+            "batches": [{
+                "id": batch["id"], "count": batch["count"],
+                "server_relevance": batch["server_relevance"],
+                "spatial_relevance": batch["spatial_relevance"],
+            } for batch in batches],
         }

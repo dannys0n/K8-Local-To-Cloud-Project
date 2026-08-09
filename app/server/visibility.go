@@ -5,10 +5,13 @@ import "math"
 // visibleEntities applies the existing spatial relevance radius only to
 // entities currently authoritative on this server. Cross-server visibility is
 // intentionally outside this infrastructure lab's application path.
-func (s *server) visibleEntities(excludeUID string, latitude, longitude, zoom float64) ([]visibleEntity, int) {
+func (s *server) visibleEntities(excludeUID string, latitude, longitude, zoom float64, spatialRelevance bool) ([]visibleEntity, int) {
 	currentTick := s.tick.Load()
-	worldPixels := 256 * math.Exp2(zoom)
-	x, y := normalizedPosition(latitude, longitude)
+	worldPixels, x, y := 0.0, 0.0, 0.0
+	if spatialRelevance {
+		worldPixels = 256 * math.Exp2(zoom)
+		x, y = normalizedPosition(latitude, longitude)
+	}
 
 	s.entityMu.Lock()
 	entities := make([]visibleEntity, 0, len(s.entities))
@@ -17,12 +20,15 @@ func (s *server) visibleEntities(excludeUID string, latitude, longitude, zoom fl
 		if uid == excludeUID || currentTick-entity.lastInputTick >= visibilityActiveTicks {
 			continue
 		}
-		entityX, entityY := normalizedPosition(entity.latitude, entity.longitude)
-		if math.Hypot(wrappedDistance(x, entityX), wrappedDistance(y, entityY))*worldPixels <= visibilityRadiusPixels {
-			entities = append(entities, visibleEntity{
-				UID: uid, Latitude: entity.latitude, Longitude: entity.longitude, Sequence: entity.sequence,
-			})
+		if spatialRelevance {
+			entityX, entityY := normalizedPosition(entity.latitude, entity.longitude)
+			if math.Hypot(wrappedDistance(x, entityX), wrappedDistance(y, entityY))*worldPixels > visibilityRadiusPixels {
+				continue
+			}
 		}
+		entities = append(entities, visibleEntity{
+			UID: uid, Latitude: entity.latitude, Longitude: entity.longitude, Sequence: entity.sequence,
+		})
 	}
 	s.entityMu.Unlock()
 	return entities, entityCount

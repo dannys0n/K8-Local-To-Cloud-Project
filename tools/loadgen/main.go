@@ -36,6 +36,8 @@ type client struct {
 	reader              *bufio.Reader
 	latitude, longitude float64
 	hasPosition         bool
+	serverRelevance     bool
+	spatialRelevance    bool
 }
 
 func (c *client) setState(next int) {
@@ -153,7 +155,10 @@ func (c *client) run(ctx context.Context, rng *mathrand.Rand) {
 			}
 			if c.state == 2 {
 				sequence++
-				body, err := c.request(fmt.Sprintf("@input %s %d %.3f %.3f %.2f", c.uid, sequence, x, y, float64(zoom)))
+				body, err := c.request(fmt.Sprintf(
+					"@input %s %d %.3f %.3f %.2f %t %t",
+					c.uid, sequence, x, y, float64(zoom), c.serverRelevance, c.serverRelevance && c.spatialRelevance,
+				))
 				if err == nil {
 					lat, latOK := body["client_latitude"].(float64)
 					lon, lonOK := body["client_longitude"].(float64)
@@ -195,6 +200,8 @@ func main() {
 	host := flag.String("host", "host.docker.internal", "gateway host")
 	port := flag.Int("port", 9000, "gateway port")
 	count := flag.Int("clients", 1, "number of clients")
+	serverRelevance := flag.Bool("server-relevance", true, "request entities authoritative on the same server")
+	spatialRelevance := flag.Bool("spatial-relevance", true, "spatially filter requested server entities")
 	flag.Parse()
 	if *count < 1 || *count > 500 {
 		fmt.Fprintln(os.Stderr, "clients must be between 1 and 500")
@@ -208,7 +215,10 @@ func main() {
 	var wait sync.WaitGroup
 	for index := 0; index < *count; index++ {
 		uid := "bot:" + randomID()
-		item := &client{host: net.JoinHostPort(*host, fmt.Sprint(*port)), uid: uid, counts: &counts}
+		item := &client{
+			host: net.JoinHostPort(*host, fmt.Sprint(*port)), uid: uid, counts: &counts,
+			serverRelevance: *serverRelevance, spatialRelevance: *serverRelevance && *spatialRelevance,
+		}
 		clients = append(clients, item)
 		wait.Add(1)
 		go func() { defer wait.Done(); item.run(ctx, seeded(uid)) }()

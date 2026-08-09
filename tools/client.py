@@ -33,7 +33,7 @@ PAGE = r"""<!doctype html>
     .label{color:#8b949e;font-size:11px;text-transform:uppercase;letter-spacing:.08em;margin-bottom:5px}
     .value{font-family:ui-monospace,monospace;overflow-wrap:anywhere}.route{font-size:18px;color:#58a6ff}
     input{width:100%;margin-bottom:8px;border:1px solid #30363d;border-radius:6px;background:#161b22;color:#e6edf3;padding:9px}
-    .toggle{display:flex;align-items:center;gap:8px;color:#8b949e;cursor:pointer}.toggle+.toggle{margin-top:9px}.toggle input{width:auto;margin:0}
+    .toggle{display:flex;align-items:center;gap:8px;color:#8b949e;cursor:pointer}.toggle+.toggle{margin-top:9px}.toggle input{width:auto;margin:0}.toggle.disabled{opacity:.45;cursor:not-allowed}
     button{width:100%;border:1px solid #30363d;border-radius:6px;background:#21262d;color:#e6edf3;padding:9px;cursor:pointer}
     button:hover{border-color:#58a6ff}.error-log{min-height:20px;margin:10px 0 0;padding:0;list-style:none;color:#f85149;font:12px ui-monospace,monospace}.error-log li{padding:4px 0;border-top:1px solid #30363d;overflow-wrap:anywhere}.error-log li:first-child{border-top:0}
     .server-label{background:#161b22;color:#e6edf3;border:1px solid #58a6ff;border-radius:4px;box-shadow:none;padding:2px 5px}
@@ -56,6 +56,7 @@ PAGE = r"""<!doctype html>
     <div class="card"><div class="label">Logical server</div><div id="server" class="value">—</div></div>
     <div class="card"><div class="label">Server pod</div><div id="instance" class="value">—</div></div>
     <div class="card"><div class="label">Ownership generation</div><div id="generation" class="value">—</div></div>
+    <div class="card"><div class="label">Entity relevance</div><label class="toggle"><input id="serverRelevance" type="checkbox" checked>Server relevance</label><label id="spatialRelevanceLabel" class="toggle"><input id="spatialRelevance" type="checkbox" checked>Spatial relevance</label></div>
     <div class="card"><label class="toggle"><input id="showAllServers" type="checkbox">Show all active servers</label></div>
     <button id="reconnect">Reconnect gateway client</button><ul id="errors" class="error-log" aria-live="polite"></ul>
   </aside></main>
@@ -100,6 +101,8 @@ PAGE = r"""<!doctype html>
       for(const [server,layer] of serverLayers)if(!visible.has(server)){layer.remove();serverLayers.delete(server)}
     }
     function renderEntities(entities){const now=performance.now();for(const entity of entities){let item=otherMarkers.get(entity.uid);if(!item){const icon=L.divIcon({className:'other-client-pin-wrap',html:'<span class="other-client-pin"></span>',iconSize:[18,25],iconAnchor:[9,25]});const marker=L.marker([entity.latitude,entity.longitude],{icon}).addTo(map);marker.bindTooltip(entity.uid,{className:'entity-label'});item={marker,lastSeen:now};otherMarkers.set(entity.uid,item)}else{item.marker.setLatLng([entity.latitude,entity.longitude]);item.lastSeen=now}item.marker.getElement()?.querySelector('.other-client-pin')?.classList.remove('stale')}}
+    function clearEntityMarkers(){for(const item of otherMarkers.values())item.marker.remove();otherMarkers.clear()}
+    function applyEntities(body){if(el('serverRelevance').checked)renderEntities(body.entities||[]);else clearEntityMarkers()}
     function expireEntityMarkers(){const now=performance.now();for(const [uid,item] of otherMarkers){const age=now-item.lastSeen;if(age>=5000){item.marker.remove();otherMarkers.delete(uid)}else if(age>=1000)item.marker.getElement()?.querySelector('.other-client-pin')?.classList.add('stale')}}
     async function loadLocations(){
       const body=await request('/api/locations');locations=body.locations;renderServers();
@@ -109,7 +112,7 @@ PAGE = r"""<!doctype html>
       const {lat,lng}=event.latlng.wrap();el('coordinate').textContent=`Target: ${lat.toFixed(5)}, ${lng.toFixed(5)}`;
       if(teleportTargetMarker)teleportTargetMarker.setLatLng([lat,lng]);else teleportTargetMarker=L.circleMarker([lat,lng],{radius:9,color:'#d29922',weight:2,dashArray:'4 4',fillColor:'#d29922',fillOpacity:.15}).addTo(map);
       teleporting=true;inputSequence++;localStorage.setItem(inputSequenceKey,inputSequence);
-      try{const body=await request('/api/location',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({client_uid:clientUid,sequence:inputSequence,latitude:lat,longitude:lng})});applyAuthoritativePosition(body);showRoute(body);renderEntities(body.entities||[]);connection('ready')}
+      try{const body=await request('/api/location',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({client_uid:clientUid,sequence:inputSequence,latitude:lat,longitude:lng})});applyAuthoritativePosition(body);showRoute(body);applyEntities(body);connection('ready')}
       catch(error){reportError(error.message);refresh()}finally{if(teleportTargetMarker){teleportTargetMarker.remove();teleportTargetMarker=null}teleporting=false;inputDirty=true}
     });
     function setKey(event,pressed){const key=event.key.toLowerCase();if(!'wasd'.includes(key))return;event.preventDefault();if(pressed)keys.add(key);else keys.delete(key);inputDirty=true}
@@ -118,10 +121,12 @@ PAGE = r"""<!doctype html>
       if(inputInFlight||teleporting||!currentRoute?.server)return;
       const x=(keys.has('d')?1:0)-(keys.has('a')?1:0),y=(keys.has('w')?1:0)-(keys.has('s')?1:0);
       const now=performance.now();if(x===0&&y===0&&!inputDirty&&now-lastInputAt<50)return;inputDirty=false;inputInFlight=true;lastInputAt=now;
-      try{inputSequence++;localStorage.setItem(inputSequenceKey,inputSequence);const body=await request('/api/input',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({client_uid:clientUid,sequence:inputSequence,x,y,zoom:map.getZoom()})});applyAuthoritativePosition(body);showRoute(body);renderEntities(body.entities||[])}
+      try{inputSequence++;localStorage.setItem(inputSequenceKey,inputSequence);const body=await request('/api/input',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({client_uid:clientUid,sequence:inputSequence,x,y,zoom:map.getZoom(),server_relevance:el('serverRelevance').checked,spatial_relevance:el('spatialRelevance').checked})});applyAuthoritativePosition(body);showRoute(body);applyEntities(body)}
       catch(error){reportError(error.message);inputDirty=true}finally{inputInFlight=false}
     }
     el('showAllServers').addEventListener('change',renderServers);
+    function updateRelevance(){const server=el('serverRelevance'),spatial=el('spatialRelevance');spatial.disabled=!server.checked;el('spatialRelevanceLabel').classList.toggle('disabled',!server.checked);sessionStorage.setItem('tcp-lab-client-server-relevance',String(server.checked));sessionStorage.setItem('tcp-lab-client-spatial-relevance',String(spatial.checked));if(!server.checked){clearEntityMarkers();el('entityCount').textContent='0'}inputDirty=true}
+    for(const [id,key] of [['serverRelevance','server-relevance'],['spatialRelevance','spatial-relevance']]){const input=el(id),stored=sessionStorage.getItem(`tcp-lab-client-${key}`);input.checked=stored===null||stored==='true';input.addEventListener('change',updateRelevance)}updateRelevance();
     map.on('move zoom resize',drawProxyEdge);
     async function reconnect(silent=false){if(reconnecting)return;reconnecting=true;try{const body=await request('/api/reconnect',{method:'POST'});showRoute(body||{});connection(body?'ready':'gateway');inputDirty=true}catch(error){if(!silent)reportError(error.message);refresh()}finally{reconnecting=false}}
     el('reconnect').addEventListener('click',()=>reconnect(false));
@@ -176,7 +181,12 @@ def make_handler(client: GatewayClient):
                 elif path == "/api/input":
                     length = int(self.headers.get("Content-Length", "0"))
                     payload = json.loads(self.rfile.read(length) or b"{}")
-                    self.send_json(client.send_input(str(payload["client_uid"]), int(payload["sequence"]), float(payload["x"]), float(payload["y"]), float(payload["zoom"])))
+                    self.send_json(client.send_input(
+                        str(payload["client_uid"]), int(payload["sequence"]),
+                        float(payload["x"]), float(payload["y"]), float(payload["zoom"]),
+                        bool(payload.get("server_relevance", True)),
+                        bool(payload.get("spatial_relevance", True)),
+                    ))
                 else:
                     self.send_json({"error": "not found"}, 404)
             except (GatewayResponseError, KeyError, OSError, TypeError, ValueError, ConnectionError) as error:

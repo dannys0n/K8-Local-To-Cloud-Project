@@ -102,15 +102,17 @@ type visibleEntity struct {
 }
 
 type inputIntent struct {
-	ClientUID string
-	Sequence  uint64
-	X         float64
-	Y         float64
-	Zoom      float64
-	Teleport  bool
-	Resume    bool
-	Latitude  float64
-	Longitude float64
+	ClientUID        string
+	Sequence         uint64
+	X                float64
+	Y                float64
+	Zoom             float64
+	ServerRelevance  bool
+	SpatialRelevance bool
+	Teleport         bool
+	Resume           bool
+	Latitude         float64
+	Longitude        float64
 }
 
 type inputCommand struct {
@@ -708,8 +710,8 @@ func parseInput(message string) (inputIntent, bool, error) {
 		return inputIntent{}, false, nil
 	}
 	fields := strings.Fields(arguments)
-	if len(fields) != 5 || !validIdentifier(fields[0]) {
-		return inputIntent{}, true, errors.New("input requires client UID, sequence, x axis, y axis, and zoom")
+	if (len(fields) != 5 && len(fields) != 7) || !validIdentifier(fields[0]) {
+		return inputIntent{}, true, errors.New("input requires client UID, sequence, x axis, y axis, zoom, and optional relevance flags")
 	}
 	sequence, sequenceErr := strconv.ParseUint(fields[1], 10, 64)
 	x, xErr := strconv.ParseFloat(fields[2], 64)
@@ -720,7 +722,19 @@ func parseInput(message string) (inputIntent, bool, error) {
 		x < -1 || x > 1 || y < -1 || y > 1 || zoom < minimumViewZoom || zoom > maximumViewZoom {
 		return inputIntent{}, true, errors.New("input axes or zoom are outside their allowed ranges")
 	}
-	return inputIntent{ClientUID: fields[0], Sequence: sequence, X: x, Y: y, Zoom: zoom}, true, nil
+	serverRelevance, spatialRelevance := true, true
+	if len(fields) == 7 {
+		var serverErr, spatialErr error
+		serverRelevance, serverErr = strconv.ParseBool(fields[5])
+		spatialRelevance, spatialErr = strconv.ParseBool(fields[6])
+		if serverErr != nil || spatialErr != nil {
+			return inputIntent{}, true, errors.New("input relevance flags must be true or false")
+		}
+	}
+	return inputIntent{
+		ClientUID: fields[0], Sequence: sequence, X: x, Y: y, Zoom: zoom,
+		ServerRelevance: serverRelevance, SpatialRelevance: serverRelevance && spatialRelevance,
+	}, true, nil
 }
 
 func validIdentifier(value string) bool {
@@ -741,7 +755,13 @@ func (s *server) writeInputResponse(writer *bufio.Writer, current *assignment, i
 	if intent.Teleport {
 		message = "teleport"
 	}
-	entities, entityCount := s.visibleEntities(intent.ClientUID, result.latitude, result.longitude, result.zoom)
+	var entities []visibleEntity
+	entityCount := 0
+	if intent.ServerRelevance {
+		entities, entityCount = s.visibleEntities(
+			intent.ClientUID, result.latitude, result.longitude, result.zoom, intent.SpatialRelevance,
+		)
+	}
 	body, err := json.Marshal(response{
 		Server: current.ServerID, LocationID: current.LocationID,
 		Latitude: current.Latitude, Longitude: current.Longitude, Instance: s.podName,

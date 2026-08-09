@@ -118,11 +118,19 @@ class GatewayClient:
             self.connection = "ready"
         return body
 
-    def send_input(self, client_uid: str, sequence: int, x: float, y: float, zoom: float):
+    def send_input(
+        self, client_uid: str, sequence: int, x: float, y: float, zoom: float,
+        server_relevance: bool = True, spatial_relevance: bool = True,
+    ):
         self._validate_uid(client_uid)
         if sequence < 0 or not (-1 <= x <= 1 and -1 <= y <= 1 and 2 <= zoom <= 18):
             raise ValueError("input intent is invalid")
-        body = self.exchange(f"@input {client_uid} {sequence} {x:.3f} {y:.3f} {zoom:.2f}")
+        server_relevance = bool(server_relevance)
+        spatial_relevance = server_relevance and bool(spatial_relevance)
+        body = self.exchange(
+            f"@input {client_uid} {sequence} {x:.3f} {y:.3f} {zoom:.2f} "
+            f"{str(server_relevance).lower()} {str(spatial_relevance).lower()}"
+        )
         with self.state_lock:
             self.latitude = body["client_latitude"]
             self.longitude = body["client_longitude"]
