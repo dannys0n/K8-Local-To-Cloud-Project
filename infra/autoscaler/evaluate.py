@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Scale server replicas from aggregate CPU pressure."""
+"""Scale workload replicas from aggregate CPU pressure."""
 
 import json
 import math
@@ -12,8 +12,8 @@ SCALE_UP_CPU_THRESHOLD = 80
 SCALE_DOWN_CPU_THRESHOLD = float(os.getenv("SCALE_DOWN_CPU_THRESHOLD", "20"))
 MIN_REPLICAS = 1
 MAX_REPLICAS = 500
-SCALE_MARKER = Path("/tmp/tcp-server-scale")
-LOW_CPU_COUNTER = Path("/tmp/tcp-server-low-cpu-count")
+SCALE_MARKER = Path("/tmp/cpu-scale")
+LOW_CPU_COUNTER = Path("/tmp/low-cpu-count")
 
 
 def low_cpu_count() -> int:

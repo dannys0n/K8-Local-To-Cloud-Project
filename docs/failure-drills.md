@@ -18,12 +18,12 @@ replacement.
 ## Autoscaler status
 
 ```bash
-kubectl get hpa/gateway -n tcp-lab -w
-kubectl get custompodautoscaler/tcp-server-cpu -n tcp-lab
+kubectl get custompodautoscaler -n tcp-lab
+kubectl get deployment/gateway deployment/tcp-server -n tcp-lab -w
 ```
 
-The gateway HPA owns gateway replica count. Every gateway discovers server
-endpoints through the headless Service DNS.
+Independent Prometheus-backed autoscalers own the gateway and server replica
+counts. Every gateway discovers server endpoints through the headless Service DNS.
 
 ## Server persistence
 

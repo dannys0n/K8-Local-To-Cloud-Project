@@ -6,7 +6,7 @@ The local lab is fully runnable. The EKS overlay assumes an existing EKS cluster
 - Worker capacity across multiple Availability Zones.
 - The server and gateway images pushed to ECR.
 - Managed PostgreSQL and Redis-compatible endpoints available to the cluster.
-- Metrics Server installed, for example through the EKS community add-on.
+- The repository's minimal Prometheus deployment installed.
 - Custom Pod Autoscaler Operator v1.4.2 installed.
 - A `tcp-server-databases` Secret containing `postgres-dsn` and `redis-addr`.
 
@@ -24,15 +24,23 @@ Before applying:
 Install the pinned autoscaling prerequisites before applying the overlay:
 
 ```bash
-aws eks create-addon --cluster-name CLUSTER --addon-name metrics-server
+kubectl apply -f deploy/base/namespace.yaml
+kubectl apply -k infra/autoscaler/prometheus
+kubectl rollout status deployment/prometheus -n tcp-lab --timeout=180s
 kubectl apply --server-side --force-conflicts -f https://github.com/jthomperoo/custom-pod-autoscaler-operator/releases/download/v1.4.2/cluster.yaml
 kubectl wait --for=condition=Established customresourcedefinition/custompodautoscalers.custompodautoscaler.com --timeout=180s
 kubectl rollout status deployment/custom-pod-autoscaler-operator -n default --timeout=180s
 ```
 
-If Metrics Server is already managed by another workflow, do not create a
-second installation. The EKS overlay maps `tcp-server-autoscaler` to its own ECR
+Prometheus reads kubelet cAdvisor CPU through the Kubernetes node proxy and is
+not exposed outside the cluster. The EKS overlay maps `tcp-server-autoscaler` to its own ECR
 repository alongside the server and gateway images.
+
+The base CPU query uses a 30-second rate window because the normal kubelet
+cAdvisor housekeeping interval is ten seconds. Faster CPU decisions require the
+EKS worker bootstrap configuration to set kubelet
+`--housekeeping-interval=1s`; lowering only the Prometheus scrape or autoscaler
+interval cannot produce fresher CPU counters.
 
 The stats Service remains internal on EKS. Access it temporarily with:
 

@@ -16,13 +16,6 @@ postScale:
   shell:
     entrypoint: python
     command: ["/post_scale.py"]
-kubernetesMetricSpecs:
-  - type: Resource
-    resource:
-      name: cpu
-      target:
-        type: Utilization
-requireKubernetesMetrics: true
 runMode: per-resource
 minReplicas: 1
 maxReplicas: 500

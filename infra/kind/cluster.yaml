@@ -5,12 +5,16 @@ nodes:
   - role: control-plane
     kubeadmConfigPatches:
       - |
+        kind: InitConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            housekeeping-interval: "1s"
+      - |
         kind: ClusterConfiguration
         controllerManager:
           extraArgs:
             node-monitor-grace-period: "5s"
             node-monitor-period: "1s"
-            horizontal-pod-autoscaler-sync-period: "10s"
             node-eviction-rate: "10"
             secondary-node-eviction-rate: "10"
             large-cluster-size-threshold: "1"
@@ -35,7 +39,17 @@ nodes:
           kubeletExtraArgs:
             node-labels: "tcp-lab.io/database=true"
             register-with-taints: "tcp-lab.io/database=true:NoSchedule"
+            housekeeping-interval: "1s"
   - role: worker
+    kubeadmConfigPatches: &fastKubelet
+      - |
+        kind: JoinConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            housekeeping-interval: "1s"
   - role: worker
+    kubeadmConfigPatches: *fastKubelet
   - role: worker
+    kubeadmConfigPatches: *fastKubelet
   - role: worker
+    kubeadmConfigPatches: *fastKubelet

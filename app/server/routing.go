@@ -33,7 +33,7 @@ func (s *server) publishRoute(ctx context.Context, current *assignment) error {
 	}
 	cacheCtx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
 	defer cancel()
-	return s.redis.Set(cacheCtx, routeKey(current.LocationID), body, s.leaseDuration).Err()
+	return s.redis.Set(cacheCtx, routeKey(current.LocationID), body, 2*s.renewInterval).Err()
 }
 
 func (s *server) resolveRoute(ctx context.Context, requested string) (routeRecord, error) {
@@ -90,15 +90,36 @@ func (s *server) resolveRoutes(ctx context.Context) ([]routeRecord, error) {
 	return routes, nil
 }
 
-func (s *server) nearestRoute(ctx context.Context, latitude, longitude float64) (routeRecord, error) {
+func (s *server) refreshRoutableTopology(ctx context.Context) error {
+	routes, err := s.resolveRoutes(ctx)
+	if err != nil {
+		return err
+	}
+	routable := make([]locationDefinition, 0, len(routes))
+	for _, route := range routes {
+		routable = append(routable, locationDefinition{
+			serverID: route.Server, locationID: route.LocationID,
+			latitude: route.Latitude, longitude: route.Longitude, generation: route.Generation,
+		})
+	}
+	s.topologyMu.Lock()
+	s.routable = routable
+	s.topologyMu.Unlock()
+	return nil
+}
+
+func (s *server) nearestRoute(ctx context.Context, latitude, longitude float64, excludedLocation int64) (routeRecord, error) {
 	routes, err := s.resolveRoutes(ctx)
 	if err != nil || len(routes) == 0 {
 		return routeRecord{}, errors.New("no active locations available")
 	}
 	latitudeRadians := latitude * math.Pi / 180
-	best := routes[0]
+	best := routeRecord{}
 	bestDistance := math.Inf(1)
 	for _, route := range routes {
+		if route.LocationID == excludedLocation {
+			continue
+		}
 		locationLatitude := route.Latitude * math.Pi / 180
 		deltaLatitude := locationLatitude - latitudeRadians
 		deltaLongitude := (route.Longitude - longitude) * math.Pi / 180
@@ -111,21 +132,29 @@ func (s *server) nearestRoute(ctx context.Context, latitude, longitude float64) 
 			best = route
 		}
 	}
+	if best.LocationID == 0 {
+		return routeRecord{}, errors.New("no active locations available")
+	}
 	return best, nil
 }
 
-func parseRouteCoordinates(arguments string) (float64, float64, error) {
+func parseRouteCoordinates(arguments string) (float64, float64, int64, error) {
 	fields := strings.Fields(arguments)
-	if len(fields) != 2 {
-		return 0, 0, errors.New("coordinates require latitude and longitude")
+	if len(fields) < 2 || len(fields) > 3 {
+		return 0, 0, 0, errors.New("coordinates require latitude, longitude, and optional excluded location")
 	}
 	latitude, latitudeErr := strconv.ParseFloat(fields[0], 64)
 	longitude, longitudeErr := strconv.ParseFloat(fields[1], 64)
-	if latitudeErr != nil || longitudeErr != nil || math.IsNaN(latitude) || math.IsNaN(longitude) ||
-		math.IsInf(latitude, 0) || math.IsInf(longitude, 0) || latitude < -90 || latitude > 90 || longitude < -180 || longitude > 180 {
-		return 0, 0, errors.New("coordinates are invalid")
+	excludedLocation := int64(0)
+	var excludedErr error
+	if len(fields) == 3 {
+		excludedLocation, excludedErr = strconv.ParseInt(fields[2], 10, 64)
 	}
-	return latitude, longitude, nil
+	if latitudeErr != nil || longitudeErr != nil || math.IsNaN(latitude) || math.IsNaN(longitude) ||
+		math.IsInf(latitude, 0) || math.IsInf(longitude, 0) || latitude < -90 || latitude > 90 || longitude < -180 || longitude > 180 || excludedErr != nil || excludedLocation < 0 {
+		return 0, 0, 0, errors.New("coordinates are invalid")
+	}
+	return latitude, longitude, excludedLocation, nil
 }
 
 func decodeRoute(body []byte, expectedLocation int64) (routeRecord, error) {

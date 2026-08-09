@@ -1,6 +1,11 @@
 - op: add
   path: /spec/template/spec/containers/0/env/-
   value:
+    name: CPU_RATE_WINDOW
+    value: "4s"
+- op: add
+  path: /spec/template/spec/containers/0/env/-
+  value:
     name: SCALE_DOWN_STABILIZATION_EVALUATIONS
     value: "1"
 - op: add

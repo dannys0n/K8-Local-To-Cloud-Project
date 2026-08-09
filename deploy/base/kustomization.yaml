@@ -3,11 +3,12 @@ kind: Kustomization
 resources:
   - namespace.yaml
   - server-service.yaml
+  - server-discovery-service.yaml
   - server-schema-job.yaml
   - server-deployment.yaml
   - server-autoscaler.yaml
   - gateway-deployment.yaml
-  - gateway-hpa.yaml
+  - gateway-autoscaler.yaml
   - gateway-service.yaml
   - gateway-stats-service.yaml
   - pod-disruption-budgets.yaml

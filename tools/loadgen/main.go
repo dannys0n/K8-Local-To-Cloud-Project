@@ -20,7 +20,10 @@ import (
 	"time"
 )
 
-const inputInterval = time.Second / 30
+const (
+	inputInterval = time.Second / 30
+	ioTimeout     = time.Second
+)
 
 type counters struct{ disconnected, gateway, ready atomic.Int64 }
 
@@ -67,6 +70,7 @@ func (c *client) exchange(command string) (map[string]any, error) {
 	if c.conn == nil {
 		return nil, fmt.Errorf("not connected")
 	}
+	_ = c.conn.SetDeadline(time.Now().Add(ioTimeout))
 	if _, err := fmt.Fprintf(c.conn, "%s\n", command); err != nil {
 		c.close()
 		return nil, err
@@ -91,19 +95,17 @@ func (c *client) exchange(command string) (map[string]any, error) {
 
 func (c *client) connect() error {
 	c.close()
-	conn, err := net.DialTimeout("tcp", c.host, 10*time.Second)
+	conn, err := net.DialTimeout("tcp", c.host, ioTimeout)
 	if err != nil {
 		return err
 	}
 	c.conn, c.reader = conn, bufio.NewReader(conn)
 	c.setState(1)
-	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
 	command := "@location any"
 	if c.hasPosition {
 		command = fmt.Sprintf("@position %.8f %.8f", c.latitude, c.longitude)
 	}
 	_, err = c.exchange(command)
-	_ = conn.SetDeadline(time.Time{})
 	return err
 }
 
@@ -141,7 +143,7 @@ func (c *client) run(ctx context.Context, rng *mathrand.Rand) {
 		if c.state != 2 {
 			if !started.Before(nextReconnect) {
 				_ = c.connect()
-				nextReconnect = time.Now().Add(750*time.Millisecond + time.Duration(rng.Float64()*float64(500*time.Millisecond)))
+				nextReconnect = time.Now().Add(100 * time.Millisecond)
 			}
 		} else {
 			if !started.Before(nextDirection) {

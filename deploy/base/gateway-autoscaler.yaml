@@ -1,13 +1,14 @@
 apiVersion: custompodautoscaler.com/v1
 kind: CustomPodAutoscaler
 metadata:
-  name: tcp-server-cpu
+  name: gateway-cpu
   namespace: tcp-lab
 spec:
   template:
     metadata:
       labels:
         app: tcp-server-autoscaler
+        autoscaling-target: gateway
     spec:
       containers:
         - name: autoscaler
@@ -19,16 +20,9 @@ spec:
             - name: PROMETHEUS_URL
               value: http://prometheus.tcp-lab.svc.cluster.local:9090
             - name: TARGET_POD_PATTERN
-              value: tcp-server-.*
+              value: gateway-.*
             - name: TARGET_CONTAINER
-              value: server
-            - name: MANAGE_LOCATIONS
-              value: "true"
-            - name: POSTGRES_DSN
-              valueFrom:
-                secretKeyRef:
-                  name: tcp-server-databases
-                  key: postgres-dsn
+              value: gateway
           resources:
             requests:
               cpu: 10m
@@ -39,7 +33,7 @@ spec:
   scaleTargetRef:
     apiVersion: apps/v1
     kind: Deployment
-    name: tcp-server
+    name: gateway
   config:
     - name: interval
       value: "15000"

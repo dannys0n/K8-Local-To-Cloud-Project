@@ -52,6 +52,7 @@ kubectl rollout restart deployment/tcp-server -n tcp-lab
 kubectl rollout restart deployment/gateway -n tcp-lab
 kubectl rollout status deployment/tcp-server -n tcp-lab --timeout=180s
 kubectl rollout status deployment/gateway -n tcp-lab --timeout=180s
+kubectl rollout status deployment/prometheus -n tcp-lab --timeout=180s
 kubectl wait --for=condition=Ready pod -n tcp-lab -l app=tcp-server-autoscaler --timeout=180s
 
 echo

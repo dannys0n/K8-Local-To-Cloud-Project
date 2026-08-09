@@ -7,7 +7,7 @@ from pathlib import Path
 import subprocess
 import sys
 
-SCALE_MARKER = Path("/tmp/tcp-server-scale")
+SCALE_MARKER = Path("/tmp/cpu-scale")
 
 
 def main() -> None:
@@ -15,6 +15,9 @@ def main() -> None:
     if not SCALE_MARKER.exists():
         return
     operation = json.loads(SCALE_MARKER.read_text(encoding="utf-8"))
+    if os.getenv("MANAGE_LOCATIONS") != "true":
+        SCALE_MARKER.unlink()
+        return
     functions = {"up": "tcp_create_location", "down": "tcp_retire_location"}
     function = functions[operation["direction"]]
     count = int(operation["count"])
