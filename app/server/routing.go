@@ -40,16 +40,31 @@ func (s *server) publishRoute(ctx context.Context, current *assignment) error {
 
 func (s *server) resolveRoute(ctx context.Context, requested string) (routeRecord, error) {
 	if requested == "any" {
-		routes, err := s.resolveRoutes(ctx)
-		if err != nil || len(routes) == 0 {
+		s.topologyMu.RLock()
+		locationIDs := make([]int64, 0, len(s.topology))
+		for _, location := range s.topology {
+			locationIDs = append(locationIDs, location.locationID)
+		}
+		s.topologyMu.RUnlock()
+		if len(locationIDs) == 0 {
 			return routeRecord{}, errors.New("route unavailable")
 		}
-		return routes[int(s.nextRoute.Add(1)-1)%len(routes)], nil
+		start := int(s.nextRoute.Add(1)-1) % len(locationIDs)
+		for offset := range locationIDs {
+			if route, err := s.resolveLocationRoute(ctx, locationIDs[(start+offset)%len(locationIDs)]); err == nil {
+				return route, nil
+			}
+		}
+		return routeRecord{}, errors.New("route unavailable")
 	}
 	locationID, err := strconv.ParseInt(requested, 10, 64)
 	if err != nil || locationID <= 0 {
 		return routeRecord{}, errors.New("invalid location")
 	}
+	return s.resolveLocationRoute(ctx, locationID)
+}
+
+func (s *server) resolveLocationRoute(ctx context.Context, locationID int64) (routeRecord, error) {
 	cacheCtx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
 	defer cancel()
 	body, err := s.valkey.Get(cacheCtx, routeKey(locationID)).Bytes()
@@ -99,6 +114,16 @@ func (s *server) resolveRoutes(ctx context.Context) ([]routeRecord, error) {
 }
 
 func (s *server) nearestRoute(ctx context.Context, latitude, longitude float64, excludedLocation int64) (routeRecord, error) {
+	s.topologyMu.RLock()
+	locationID := s.locationIndex.nearest(latitude, longitude, excludedLocation)
+	s.topologyMu.RUnlock()
+	if locationID != 0 {
+		if route, err := s.resolveLocationRoute(ctx, locationID); err == nil {
+			return route, nil
+		}
+	}
+	// A location can temporarily have no owner during replacement. Keep the
+	// exhaustive path as failure recovery rather than paying for it normally.
 	routes, err := s.resolveRoutes(ctx)
 	if err != nil || len(routes) == 0 {
 		return routeRecord{}, errors.New("no active locations available")

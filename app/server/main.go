@@ -69,6 +69,7 @@ type server struct {
 	entities         map[string]*entityState
 	topologyMu       sync.RWMutex
 	topology         []locationDefinition
+	locationIndex    *locationNode
 	topologyRevision atomic.Int64
 	mu               sync.RWMutex
 	assignment       *assignment
@@ -342,25 +343,9 @@ drained:
 }
 
 func (s *server) nearestLocation(latitude, longitude float64) int64 {
-	var best int64
-	bestDistance := math.Inf(1)
-	latitudeRadians := latitude * math.Pi / 180
 	s.topologyMu.RLock()
 	defer s.topologyMu.RUnlock()
-	for _, location := range s.topology {
-		locationLatitude := location.latitude * math.Pi / 180
-		deltaLatitude := locationLatitude - latitudeRadians
-		deltaLongitude := (location.longitude - longitude) * math.Pi / 180
-		a := math.Sin(deltaLatitude/2)*math.Sin(deltaLatitude/2) +
-			math.Cos(latitudeRadians)*math.Cos(locationLatitude)*math.Sin(deltaLongitude/2)*math.Sin(deltaLongitude/2)
-		a = math.Max(0, math.Min(1, a))
-		distance := 2 * math.Atan2(math.Sqrt(a), math.Sqrt(1-a))
-		if distance < bestDistance || (distance == bestDistance && (best == 0 || location.locationID < best)) {
-			bestDistance = distance
-			best = location.locationID
-		}
-	}
-	return best
+	return s.locationIndex.nearest(latitude, longitude, 0)
 }
 
 func (s *server) refreshTopology(ctx context.Context) error {
@@ -382,6 +367,7 @@ func (s *server) refreshTopology(ctx context.Context) error {
 	}
 	s.topologyMu.Lock()
 	s.topology = loaded
+	s.locationIndex = buildLocationIndex(loaded)
 	s.topologyMu.Unlock()
 	s.topologyRevision.Store(revision)
 	return nil

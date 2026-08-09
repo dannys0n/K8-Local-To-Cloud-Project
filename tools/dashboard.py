@@ -8,7 +8,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 try:
     from bots import BotManager
@@ -121,7 +121,7 @@ function render(data){lastData=data;document.getElementById('summary').textConte
  if(document.getElementById('showClients').checked)for(const client of data.sessions){if(client.latitude==null||client.longitude==null)continue;const key=`${client.gateway}:${client.id||client.src}`;visibleClients.add(key);let marker=clientMarkers.get(key);if(!marker){const icon=L.divIcon({className:'client-pin-wrap',html:'<div class="client-pin"></div>',iconSize:[18,25],iconAnchor:[9,25]});marker=L.marker([client.latitude,client.longitude],{icon}).addTo(clientLayer);marker.bindTooltip('');marker.bindPopup('');clientMarkers.set(key,marker)}marker.setLatLng([client.latitude,client.longitude]);marker.getTooltip().setContent(client.client_uid||client.src);marker.getPopup().setContent(`<b>${client.client_uid||'Client'}</b><br>Status: ${client.status}<br>Gateway: ${client.gateway}<br>Location: ${client.location_id}<br>Server: ${client.server}`)}for(const [key,marker] of clientMarkers)if(!visibleClients.has(key)){marker.remove();clientMarkers.delete(key)}
  const gateways=document.getElementById('gateways');gateways.replaceChildren();if(document.getElementById('showGateways').checked)for(const item of data.gateway_instances){const node=document.createElement('div');node.className=`node gateway ${item.status}`;node.textContent=item.name;node.title=`${item.status.replace('_',' ')} · ${item.node}`;gateways.appendChild(node)}
 }
-async function refresh(){try{render(await request('/api/connections'));document.getElementById('error').textContent=''}catch(error){document.getElementById('error').textContent=error.message}}
+async function refresh(){try{const includeClients=document.getElementById('showClients').checked;render(await request(`/api/connections?include_clients=${includeClients}`));document.getElementById('error').textContent=''}catch(error){document.getElementById('error').textContent=error.message}}
 async function refreshLoop(){const started=performance.now();await refresh();setTimeout(refreshLoop,Math.max(0,1000/refreshHz-(performance.now()-started)))}
 function renderBots(bots){document.getElementById('botState').textContent=`${bots.states.ready} ready · ${bots.states.gateway} gateway · ${bots.states.disconnected} disconnected`;const list=document.getElementById('botBatches');list.replaceChildren();for(const batch of bots.batches){const row=document.createElement('div');row.className='batch-row';const label=document.createElement('span');label.textContent=`Batch ${batch.id}: ${batch.count}`;const remove=document.createElement('button');remove.textContent='Despawn';remove.onclick=async()=>{try{renderBots(await post('/api/bots/despawn',{batch_id:batch.id}))}catch(error){document.getElementById('error').textContent=error.message}};row.append(label,remove);list.appendChild(row)}}
 async function refreshBots(){try{renderBots(await request('/api/bots'))}catch(error){document.getElementById('error').textContent=error.message}}
@@ -236,13 +236,14 @@ def list_data_services() -> list[dict]:
     return sorted(result, key=lambda item: (item["service"], item["instance"]))
 
 
-def inspect_pod(pod: dict) -> dict:
+def inspect_pod(pod: dict, include_clients: bool = True) -> dict:
     pod = dict(pod)
     pod.update(clients=0, backend_sessions=0, total_accepted=0, backends=[], sessions=[], error="")
     try:
         raw = run(
             "kubectl", "get", "--raw",
-            f'/api/v1/namespaces/{NAMESPACE}/pods/{pod["name"]}:8404/proxy/stats',
+            f'/api/v1/namespaces/{NAMESPACE}/pods/{pod["name"]}:8404/proxy/stats'
+            f'?include_sessions={str(include_clients).lower()}',
         )
         stats = json.loads(raw)
         pod["total_accepted"] = int(stats.get("accepted", 0))
@@ -259,8 +260,10 @@ def inspect_pod(pod: dict) -> dict:
                 "generation": item.get("generation", 0), "age": f"{age}s",
                 "proto": item.get("protocol", "TCP"), "status": item.get("status", "gateway"),
             })
-        pod["clients"] = len(pod["sessions"])
-        pod["backend_sessions"] = sum(item["status"] == "ready" for item in pod["sessions"])
+        pod["clients"] = int(stats.get("session_count", len(pod["sessions"])))
+        pod["backend_sessions"] = int(stats.get(
+            "ready_session_count", sum(item["status"] == "ready" for item in pod["sessions"])
+        ))
         for item in stats.get("routes", []):
             pod["backends"].append({
                 "gateway": pod["name"], "server": item.get("server", ""),
@@ -319,7 +322,7 @@ def cached_infrastructure() -> tuple[dict, str]:
     return data, error
 
 
-def snapshot() -> dict:
+def snapshot(include_clients: bool = True) -> dict:
     infrastructure, infrastructure_error = cached_infrastructure()
     gateway_instances = infrastructure["gateway_instances"]
     pods = [pod for pod in gateway_instances if pod["status"] == "ready"]
@@ -327,7 +330,7 @@ def snapshot() -> dict:
     server_pods_by_ip = {pod["ip"]: pod for pod in server_pods if pod["ip"]}
     data_services = infrastructure["data_services"]
     with ThreadPoolExecutor(max_workers=max(1, len(pods))) as pool:
-        gateways = list(pool.map(inspect_pod, pods))
+        gateways = list(pool.map(lambda pod: inspect_pod(pod, include_clients), pods))
     unique_backends = {}
     for backend in (item for gateway in gateways for item in gateway["backends"]):
         current = unique_backends.setdefault(backend["server"], {
@@ -393,7 +396,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/api/connections":
             try:
-                body = json.dumps(snapshot()).encode()
+                query = parse_qs(urlparse(self.path).query)
+                include_clients = query.get("include_clients", ["true"])[0].lower() != "false"
+                body = json.dumps(snapshot(include_clients)).encode()
                 self.send(200, "application/json", body)
             except Exception as error:
                 body = json.dumps({"error": str(error)}).encode()

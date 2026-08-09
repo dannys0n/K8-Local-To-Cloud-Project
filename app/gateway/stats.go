@@ -17,17 +17,24 @@ func (g *gateway) serveHTTP(ctx context.Context, address string) {
 		writer.WriteHeader(http.StatusOK)
 		_, _ = writer.Write([]byte("ok\n"))
 	})
-	mux.HandleFunc("/stats", func(writer http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/stats", func(writer http.ResponseWriter, request *http.Request) {
 		writer.Header().Set("Content-Type", "application/json")
-		g.mu.RLock()
-		sessions := make([]session, 0, len(g.sessions))
-		for _, item := range g.sessions {
-			sessions = append(sessions, item)
+		sessions := []session{}
+		includeSessions := request.URL.Query().Get("include_sessions") != "false"
+		if includeSessions {
+			g.mu.RLock()
+			sessions = make([]session, 0, len(g.sessions))
+			for _, item := range g.sessions {
+				sessions = append(sessions, item)
+			}
+			g.mu.RUnlock()
+			sort.Slice(sessions, func(i, j int) bool { return sessions[i].ID < sessions[j].ID })
 		}
+		g.mu.RLock()
+		sessionCount := len(g.sessions)
 		g.mu.RUnlock()
-		sort.Slice(sessions, func(i, j int) bool { return sessions[i].ID < sessions[j].ID })
 		routes := g.routesSnapshot()
-		_ = json.NewEncoder(writer).Encode(map[string]any{"instance": g.instance, "accepted": g.accepted.Load(), "sessions": sessions, "routes": routes})
+		_ = json.NewEncoder(writer).Encode(map[string]any{"instance": g.instance, "accepted": g.accepted.Load(), "session_count": sessionCount, "ready_session_count": g.readySessions.Load(), "sessions": sessions, "sessions_included": includeSessions, "routes": routes})
 	})
 	mux.HandleFunc("/", func(writer http.ResponseWriter, _ *http.Request) {
 		writer.Header().Set("Content-Type", "text/html; charset=utf-8")

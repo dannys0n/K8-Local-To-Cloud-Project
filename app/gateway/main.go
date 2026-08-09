@@ -77,8 +77,13 @@ type gateway struct {
 	logger          *slog.Logger
 	mu              sync.RWMutex
 	catalog         map[string]backend
+	catalogUpdated  time.Time
 	sessions        map[string]session
+	resolverMu      sync.Mutex
+	resolverHosts   []string
+	resolverUntil   time.Time
 	accepted        atomic.Uint64
+	readySessions   atomic.Int64
 	nextSession     atomic.Uint64
 	nextResolver    atomic.Uint64
 }
@@ -165,6 +170,9 @@ func (g *gateway) handleClient(ctx context.Context, client net.Conn) {
 			downstream.conn.Close()
 		}
 		g.mu.Lock()
+		if current, ok := g.sessions[id]; ok && current.Status == "ready" {
+			g.readySessions.Add(-1)
+		}
 		delete(g.sessions, id)
 		g.mu.Unlock()
 	}()
@@ -448,7 +456,7 @@ func (g *gateway) resolveRoute(ctx context.Context, requested string) (backend, 
 func (g *gateway) resolve(ctx context.Context, command string, response any) error {
 	resolveCtx, cancel := context.WithTimeout(ctx, g.backendTimeout)
 	defer cancel()
-	addresses, err := net.DefaultResolver.LookupHost(resolveCtx, g.serverHost)
+	addresses, err := g.resolveHosts(resolveCtx)
 	if err != nil || len(addresses) == 0 {
 		return errors.New("no ready route resolvers")
 	}
@@ -480,6 +488,21 @@ func (g *gateway) resolve(ctx context.Context, command string, response any) err
 	return lastErr
 }
 
+func (g *gateway) resolveHosts(ctx context.Context) ([]string, error) {
+	g.resolverMu.Lock()
+	defer g.resolverMu.Unlock()
+	if time.Now().Before(g.resolverUntil) && len(g.resolverHosts) > 0 {
+		return append([]string(nil), g.resolverHosts...), nil
+	}
+	addresses, err := net.DefaultResolver.LookupHost(ctx, g.serverHost)
+	if err != nil {
+		return nil, err
+	}
+	g.resolverHosts = append(g.resolverHosts[:0], addresses...)
+	g.resolverUntil = time.Now().Add(time.Second)
+	return append([]string(nil), addresses...), nil
+}
+
 func (g *gateway) routesSnapshot() []backend {
 	g.mu.RLock()
 	routes := make([]backend, 0, len(g.catalog))
@@ -492,6 +515,16 @@ func (g *gateway) routesSnapshot() []backend {
 }
 
 func (g *gateway) publicLocations(ctx context.Context) ([]publicLocation, error) {
+	g.mu.RLock()
+	if time.Since(g.catalogUpdated) < time.Second && len(g.catalog) > 0 {
+		routes := make([]backend, 0, len(g.catalog))
+		for _, route := range g.catalog {
+			routes = append(routes, route)
+		}
+		g.mu.RUnlock()
+		return publicLocationsFromRoutes(routes), nil
+	}
+	g.mu.RUnlock()
 	var response struct {
 		Routes []backend `json:"routes"`
 	}
@@ -499,20 +532,28 @@ func (g *gateway) publicLocations(ctx context.Context) ([]publicLocation, error)
 		return nil, errors.New("locations unavailable")
 	}
 	routes := response.Routes
-	locations := make([]publicLocation, 0, len(routes))
 	refreshed := make(map[string]backend, len(routes))
 	for _, route := range routes {
 		refreshed[strconv.FormatInt(route.LocationID, 10)] = route
+	}
+	g.mu.Lock()
+	g.catalog = refreshed
+	g.catalogUpdated = time.Now()
+	g.mu.Unlock()
+	return publicLocationsFromRoutes(routes), nil
+}
+
+func publicLocationsFromRoutes(routes []backend) []publicLocation {
+	sort.Slice(routes, func(i, j int) bool { return routes[i].LocationID < routes[j].LocationID })
+	locations := make([]publicLocation, 0, len(routes))
+	for _, route := range routes {
 		locations = append(locations, publicLocation{
 			Server: route.Server, LocationID: route.LocationID,
 			Latitude: route.Latitude, Longitude: route.Longitude,
 			Generation: route.Generation,
 		})
 	}
-	g.mu.Lock()
-	g.catalog = refreshed
-	g.mu.Unlock()
-	return locations, nil
+	return locations
 }
 
 func (g *gateway) locationFor(ctx context.Context, latitude, longitude float64) (string, error) {
@@ -553,8 +594,12 @@ func parsePosition(message string) (float64, float64, bool, error) {
 func (g *gateway) updateSession(id, client string, route backend, latitude, longitude float64) {
 	g.mu.Lock()
 	connectedAt := time.Now().UTC()
-	if current, ok := g.sessions[id]; ok {
+	current, exists := g.sessions[id]
+	if exists {
 		connectedAt = current.ConnectedAt
+	}
+	if !exists || current.Status != "ready" {
+		g.readySessions.Add(1)
 	}
 	g.sessions[id] = session{ID: id, Client: client, LocationID: route.LocationID, Latitude: latitude, Longitude: longitude, Server: route.Server, Instance: route.Instance, Address: route.Address, Generation: route.Generation, ConnectedAt: connectedAt, Protocol: "TCP", Status: "ready"}
 	g.mu.Unlock()
@@ -563,6 +608,13 @@ func (g *gateway) updateSession(id, client string, route backend, latitude, long
 func (g *gateway) setSessionStatus(id, status string) {
 	g.mu.Lock()
 	if current, ok := g.sessions[id]; ok {
+		if current.Status != status {
+			if current.Status == "ready" {
+				g.readySessions.Add(-1)
+			} else if status == "ready" {
+				g.readySessions.Add(1)
+			}
+		}
 		current.Status = status
 		g.sessions[id] = current
 	}
