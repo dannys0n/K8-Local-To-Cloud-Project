@@ -21,6 +21,8 @@ import (
 	"time"
 )
 
+const resolverAttemptTimeout = 150 * time.Millisecond
+
 type backend struct {
 	Server     string  `json:"server"`
 	LocationID int64   `json:"location_id"`
@@ -451,18 +453,22 @@ func (g *gateway) resolve(ctx context.Context, command string, response any) err
 	var lastErr error
 	for offset := range addresses {
 		address := net.JoinHostPort(addresses[(start+offset)%len(addresses)], g.serverPort)
-		dialer := net.Dialer{Timeout: g.backendTimeout}
-		conn, dialErr := dialer.DialContext(resolveCtx, "tcp", address)
+		attemptCtx, cancelAttempt := context.WithTimeout(resolveCtx, resolverAttemptTimeout)
+		dialer := net.Dialer{}
+		conn, dialErr := dialer.DialContext(attemptCtx, "tcp", address)
 		if dialErr != nil {
+			cancelAttempt()
 			lastErr = dialErr
 			continue
 		}
-		_ = conn.SetDeadline(time.Now().Add(g.backendTimeout))
+		attemptDeadline, _ := attemptCtx.Deadline()
+		_ = conn.SetDeadline(attemptDeadline)
 		_, writeErr := fmt.Fprintln(conn, command)
 		if writeErr == nil {
 			writeErr = json.NewDecoder(conn).Decode(response)
 		}
 		_ = conn.Close()
+		cancelAttempt()
 		if writeErr == nil {
 			return nil
 		}
