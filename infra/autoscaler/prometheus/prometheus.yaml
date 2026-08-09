@@ -75,6 +75,17 @@ spec:
         app: prometheus
     spec:
       serviceAccountName: prometheus
+      priorityClassName: system-cluster-critical
+      terminationGracePeriodSeconds: 1
+      tolerations:
+        - key: node.kubernetes.io/not-ready
+          operator: Exists
+          effect: NoExecute
+          tolerationSeconds: 0
+        - key: node.kubernetes.io/unreachable
+          operator: Exists
+          effect: NoExecute
+          tolerationSeconds: 0
       containers:
         - name: prometheus
           image: prom/prometheus:v3.13.1

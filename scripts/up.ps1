@@ -41,11 +41,12 @@ try {
     Write-Host "Building application and load-generator images..."
     docker build -t $ServerImage app/server
     docker build -t $GatewayImage app/gateway
-    docker build -t $AutoscalerImage infra/autoscaler
+    docker build --provenance=false -t $AutoscalerImage infra/autoscaler
     docker build -t $LoadgenImage tools/loadgen
+    docker build --provenance=false -t prom/prometheus:v3.13.1 infra/autoscaler/prometheus
 
     Write-Host "Loading image into kind..."
-    kind load docker-image $ServerImage $GatewayImage $AutoscalerImage --name $Cluster
+    kind load docker-image $ServerImage $GatewayImage $AutoscalerImage prom/prometheus:v3.13.1 --name $Cluster
 
     Write-Host "Installing autoscaling dependencies..."
     & "$Root/infra/autoscaler/install-kind.ps1"
@@ -61,7 +62,8 @@ try {
     kubectl rollout status deployment/tcp-server -n tcp-lab --timeout=180s
     kubectl rollout status deployment/gateway -n tcp-lab --timeout=180s
     kubectl rollout status deployment/prometheus -n tcp-lab --timeout=180s
-    kubectl wait --for=condition=Ready pod -n tcp-lab -l app=tcp-server-autoscaler --timeout=180s
+    kubectl rollout status deployment/gateway-autoscaler -n tcp-lab --timeout=180s
+    kubectl rollout status deployment/tcp-server-autoscaler -n tcp-lab --timeout=180s
 
     Write-Host ""
     Write-Host "Ready."

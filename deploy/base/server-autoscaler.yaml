@@ -1,19 +1,48 @@
-apiVersion: custompodautoscaler.com/v1
-kind: CustomPodAutoscaler
+apiVersion: apps/v1
+kind: Deployment
 metadata:
-  name: tcp-server-cpu
+  name: tcp-server-autoscaler
   namespace: tcp-lab
+  labels:
+    app: tcp-server-autoscaler
+    autoscaling-target: tcp-server
 spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: tcp-server-autoscaler
+      autoscaling-target: tcp-server
   template:
     metadata:
       labels:
         app: tcp-server-autoscaler
+        autoscaling-target: tcp-server
     spec:
+      serviceAccountName: workload-autoscaler
+      priorityClassName: system-cluster-critical
+      terminationGracePeriodSeconds: 1
+      tolerations:
+        - key: node.kubernetes.io/not-ready
+          operator: Exists
+          effect: NoExecute
+          tolerationSeconds: 0
+        - key: node.kubernetes.io/unreachable
+          operator: Exists
+          effect: NoExecute
+          tolerationSeconds: 0
       containers:
         - name: autoscaler
           image: tcp-server-autoscaler:dev
           imagePullPolicy: IfNotPresent
           env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: SCALE_TARGET
+              value: tcp-server
             - name: CPU_REQUEST_MILLICORES
               value: "250"
             - name: PROMETHEUS_URL
@@ -36,10 +65,3 @@ spec:
             limits:
               cpu: 100m
               memory: 128Mi
-  scaleTargetRef:
-    apiVersion: apps/v1
-    kind: Deployment
-    name: tcp-server
-  config:
-    - name: interval
-      value: "15000"

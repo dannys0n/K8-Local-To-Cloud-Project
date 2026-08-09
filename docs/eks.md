@@ -7,7 +7,6 @@ The local lab is fully runnable. The EKS overlay assumes an existing EKS cluster
 - The server and gateway images pushed to ECR.
 - Managed PostgreSQL and Redis-compatible endpoints available to the cluster.
 - The repository's minimal Prometheus deployment installed.
-- Custom Pod Autoscaler Operator v1.4.2 installed.
 - A `tcp-server-databases` Secret containing `postgres-dsn` and `redis-addr`.
 
 Before applying:
@@ -27,14 +26,13 @@ Install the pinned autoscaling prerequisites before applying the overlay:
 kubectl apply -f deploy/base/namespace.yaml
 kubectl apply -k infra/autoscaler/prometheus
 kubectl rollout status deployment/prometheus -n tcp-lab --timeout=180s
-kubectl apply --server-side --force-conflicts -f https://github.com/jthomperoo/custom-pod-autoscaler-operator/releases/download/v1.4.2/cluster.yaml
-kubectl wait --for=condition=Established customresourcedefinition/custompodautoscalers.custompodautoscaler.com --timeout=180s
-kubectl rollout status deployment/custom-pod-autoscaler-operator -n default --timeout=180s
 ```
 
 Prometheus reads kubelet cAdvisor CPU through the Kubernetes node proxy and is
 not exposed outside the cluster. The EKS overlay maps `tcp-server-autoscaler` to its own ECR
 repository alongside the server and gateway images.
+The two scaler processes are ordinary one-replica Deployments, so a ReplicaSet
+can replace them on another worker after node loss without fixed pod-name conflicts.
 
 The base CPU query uses a 30-second rate window because the normal kubelet
 cAdvisor housekeeping interval is ten seconds. Faster CPU decisions require the

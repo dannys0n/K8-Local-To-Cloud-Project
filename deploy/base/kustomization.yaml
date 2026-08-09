@@ -6,6 +6,7 @@ resources:
   - server-discovery-service.yaml
   - server-schema-job.yaml
   - server-deployment.yaml
+  - autoscaler-rbac.yaml
   - server-autoscaler.yaml
   - gateway-deployment.yaml
   - gateway-autoscaler.yaml

@@ -34,11 +34,12 @@ kubectl taint node "$DATABASE_NODE" tcp-lab.io/database=true:NoSchedule --overwr
 echo "Building application and load-generator images..."
 docker build -t "$SERVER_IMAGE" app/server
 docker build -t "$GATEWAY_IMAGE" app/gateway
-docker build -t "$AUTOSCALER_IMAGE" infra/autoscaler
+docker build --provenance=false -t "$AUTOSCALER_IMAGE" infra/autoscaler
 docker build -t "$LOADGEN_IMAGE" tools/loadgen
+docker build --provenance=false -t prom/prometheus:v3.13.1 infra/autoscaler/prometheus
 
 echo "Loading image into kind..."
-kind load docker-image "$SERVER_IMAGE" "$GATEWAY_IMAGE" "$AUTOSCALER_IMAGE" --name "$CLUSTER"
+kind load docker-image "$SERVER_IMAGE" "$GATEWAY_IMAGE" "$AUTOSCALER_IMAGE" prom/prometheus:v3.13.1 --name "$CLUSTER"
 
 echo "Installing autoscaling dependencies..."
 bash "$ROOT/infra/autoscaler/install-kind.sh"
@@ -53,7 +54,8 @@ kubectl rollout restart deployment/gateway -n tcp-lab
 kubectl rollout status deployment/tcp-server -n tcp-lab --timeout=180s
 kubectl rollout status deployment/gateway -n tcp-lab --timeout=180s
 kubectl rollout status deployment/prometheus -n tcp-lab --timeout=180s
-kubectl wait --for=condition=Ready pod -n tcp-lab -l app=tcp-server-autoscaler --timeout=180s
+kubectl rollout status deployment/gateway-autoscaler -n tcp-lab --timeout=180s
+kubectl rollout status deployment/tcp-server-autoscaler -n tcp-lab --timeout=180s
 
 echo
 echo "Ready."

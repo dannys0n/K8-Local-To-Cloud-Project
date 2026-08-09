@@ -10,15 +10,17 @@ resources:
 patches:
   - path: gateway-nodeport-patch.yaml
   - path: stats-nodeport-patch.yaml
-  - path: server-autoscaler-fast-patch.yaml
+  - path: autoscaler-fast-patch.yaml
     target:
-      group: custompodautoscaler.com
+      group: apps
       version: v1
-      kind: CustomPodAutoscaler
+      kind: Deployment
       namespace: tcp-lab
-  - path: server-autoscaler-fast-env-patch.yaml
+      labelSelector: app=tcp-server-autoscaler
+  - path: autoscaler-fast-env-patch.yaml
     target:
-      group: custompodautoscaler.com
+      group: apps
       version: v1
-      kind: CustomPodAutoscaler
+      kind: Deployment
       namespace: tcp-lab
+      labelSelector: app=tcp-server-autoscaler

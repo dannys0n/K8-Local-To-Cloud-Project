@@ -18,7 +18,7 @@ replacement.
 ## Autoscaler status
 
 ```bash
-kubectl get custompodautoscaler -n tcp-lab
+kubectl get deployment/gateway-autoscaler deployment/tcp-server-autoscaler -n tcp-lab
 kubectl get deployment/gateway deployment/tcp-server -n tcp-lab -w
 ```
 
