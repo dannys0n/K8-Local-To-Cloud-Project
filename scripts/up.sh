@@ -45,7 +45,7 @@ bash "$ROOT/infra/autoscaler/install-kind.sh"
 
 echo "Applying Kubernetes resources..."
 kubectl apply -f deploy/base/namespace.yaml
-if kubectl get statefulset/valkey -n tcp-lab >/dev/null 2>&1; then
+if [[ -n "$(kubectl get statefulset/valkey -n tcp-lab --ignore-not-found -o name)" ]]; then
   VALKEY_EXISTS=true
 else
   VALKEY_EXISTS=false

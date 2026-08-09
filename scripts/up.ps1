@@ -50,8 +50,8 @@ try {
 
     Write-Host "Applying Kubernetes resources..."
     kubectl apply -f deploy/base/namespace.yaml
-    kubectl get statefulset/valkey -n tcp-lab *> $null
-    $ValkeyExists = $LASTEXITCODE -eq 0
+    $ValkeyResource = kubectl get statefulset/valkey -n tcp-lab --ignore-not-found -o name
+    $ValkeyExists = -not [string]::IsNullOrWhiteSpace($ValkeyResource)
     kubectl delete job/valkey-cluster-init -n tcp-lab --ignore-not-found
     kubectl apply -k deploy/overlays/kind
     if (-not $ValkeyExists) {
