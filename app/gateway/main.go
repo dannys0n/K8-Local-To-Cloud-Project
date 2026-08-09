@@ -22,6 +22,7 @@ import (
 )
 
 const resolverAttemptTimeout = 150 * time.Millisecond
+const debugSessionUpdateInterval = 250 * time.Millisecond
 
 type backend struct {
 	Server     string  `json:"server"`
@@ -173,6 +174,7 @@ func (g *gateway) handleClient(ctx context.Context, client net.Conn) {
 	inputSequence := uint64(0)
 	clientLatitude := 0.0
 	clientLongitude := 0.0
+	nextDebugSessionUpdate := time.Time{}
 	for {
 		line, err := clientReader.ReadString('\n')
 		if err != nil {
@@ -271,7 +273,6 @@ func (g *gateway) handleClient(ctx context.Context, client net.Conn) {
 		response, err := g.exchange(downstream, message)
 		state, valid := decodeBackendResponse(response)
 		if valid && state.Error != "" && !backendOwnershipLost(state.Error) {
-			response = g.withGatewayMetadata(response)
 			if _, err := clientWriter.Write(response); err != nil || clientWriter.Flush() != nil {
 				return
 			}
@@ -353,8 +354,10 @@ func (g *gateway) handleClient(ctx context.Context, client net.Conn) {
 			response = resumed
 			state = resumedState
 		}
-		response = g.withGatewayMetadata(response)
-		g.updateSessionFromResponse(id, state)
+		if now := time.Now(); !now.Before(nextDebugSessionUpdate) {
+			g.updateSessionFromResponse(id, state)
+			nextDebugSessionUpdate = now.Add(debugSessionUpdateInterval)
+		}
 		if _, err := clientWriter.Write(response); err != nil || clientWriter.Flush() != nil {
 			return
 		}

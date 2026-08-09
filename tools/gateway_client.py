@@ -100,6 +100,8 @@ class GatewayClient:
             with self.state_lock:
                 if body.get("gateway"):
                     self.gateway = body["gateway"]
+                elif self.gateway:
+                    body["gateway"] = self.gateway
                 if body.get("server"):
                     self.route = body
                     self.connection = "ready"
