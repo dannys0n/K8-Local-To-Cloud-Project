@@ -167,6 +167,8 @@ func (g *gateway) handleClient(ctx context.Context, client net.Conn) {
 	}()
 
 	requested := ""
+	clientUID := ""
+	inputSequence := uint64(0)
 	clientLatitude := 0.0
 	clientLongitude := 0.0
 	for {
@@ -266,16 +268,40 @@ func (g *gateway) handleClient(ctx context.Context, client net.Conn) {
 
 		response, err := g.exchange(downstream, message)
 		state, valid := decodeBackendResponse(response)
-		if err != nil || !valid || state.Error != "" {
+		if valid && state.Error != "" && !backendOwnershipLost(state.Error) {
+			response = g.withGatewayMetadata(response)
+			if _, err := clientWriter.Write(response); err != nil || clientWriter.Flush() != nil {
+				return
+			}
+			continue
+		}
+		if err != nil || !valid || backendOwnershipLost(state.Error) {
+			failedLocation := downstream.info.LocationID
 			downstream.conn.Close()
 			downstream = nil
 			g.setSessionStatus(id, "gateway")
-			candidate, _, routeErr := g.openRoute(ctx, requested)
+			nearest, routeErr := g.nearestRoute(ctx, clientLatitude, clientLongitude, failedLocation)
 			if routeErr != nil {
 				writeJSONError(clientWriter, "server temporarily unavailable")
 				continue
 			}
+			candidate, _, routeErr := g.connectBackend(nearest)
+			if routeErr != nil {
+				writeJSONError(clientWriter, "server temporarily unavailable")
+				continue
+			}
+			if clientUID != "" {
+				resume := fmt.Sprintf("@resume %s %d %.8f %.8f", clientUID, inputSequence, clientLatitude, clientLongitude)
+				resumed, resumeErr := g.exchange(candidate, resume)
+				resumedState, resumeValid := decodeBackendResponse(resumed)
+				if resumeErr != nil || !resumeValid || resumedState.Error != "" {
+					candidate.conn.Close()
+					writeJSONError(clientWriter, "server temporarily unavailable")
+					continue
+				}
+			}
 			downstream = candidate
+			requested = strconv.FormatInt(candidate.info.LocationID, 10)
 			g.updateSession(id, client.RemoteAddr().String(), candidate.info, clientLatitude, clientLongitude)
 			response, err = g.exchange(downstream, message)
 			state, valid = decodeBackendResponse(response)
@@ -290,6 +316,8 @@ func (g *gateway) handleClient(ctx context.Context, client net.Conn) {
 			continue
 		}
 		if state.hasAuthoritativePosition() {
+			clientUID = state.ClientUID
+			inputSequence = state.InputSequence
 			clientLatitude = state.ClientLatitude
 			clientLongitude = state.ClientLongitude
 		}
@@ -461,12 +489,20 @@ func (g *gateway) publicLocations(ctx context.Context) ([]publicLocation, error)
 }
 
 func (g *gateway) locationFor(ctx context.Context, latitude, longitude float64) (string, error) {
-	var route backend
-	command := fmt.Sprintf("@nearest %.8f %.8f", latitude, longitude)
-	if err := g.resolve(ctx, command, &route); err != nil || route.LocationID == 0 {
+	route, err := g.nearestRoute(ctx, latitude, longitude, 0)
+	if err != nil {
 		return "", errors.New("no active locations available")
 	}
 	return strconv.FormatInt(route.LocationID, 10), nil
+}
+
+func (g *gateway) nearestRoute(ctx context.Context, latitude, longitude float64, excludedLocation int64) (backend, error) {
+	var route backend
+	command := fmt.Sprintf("@nearest %.8f %.8f %d", latitude, longitude, excludedLocation)
+	if err := g.resolve(ctx, command, &route); err != nil || route.LocationID == 0 || route.Address == "" {
+		return backend{}, errors.New("no active locations available")
+	}
+	return route, nil
 }
 
 func parsePosition(message string) (float64, float64, bool, error) {
@@ -528,6 +564,10 @@ func decodeBackendResponse(body []byte) (backendResponse, bool) {
 	var response backendResponse
 	err := json.Unmarshal(body, &response)
 	return response, err == nil
+}
+
+func backendOwnershipLost(message string) bool {
+	return message == "assignment changed" || message == "location unavailable"
 }
 
 func writeJSONError(writer *bufio.Writer, message string) {

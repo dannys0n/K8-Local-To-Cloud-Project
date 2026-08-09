@@ -57,23 +57,24 @@ type assignment struct {
 }
 
 type server struct {
-	instanceID       string
-	podName          string
-	routeAddress     string
-	db               *sql.DB
-	redis            *redis.Client
-	leaseDuration    time.Duration
-	renewInterval    time.Duration
-	tickInterval     time.Duration
-	tick             atomic.Uint64
-	nextRoute        atomic.Uint64
-	inputs           chan inputCommand
-	entityMu         sync.Mutex
-	entities         map[string]*entityState
-	topologyMu       sync.RWMutex
-	topology         []locationDefinition
-	mu               sync.RWMutex
-	assignment       *assignment
+	instanceID    string
+	podName       string
+	routeAddress  string
+	db            *sql.DB
+	redis         *redis.Client
+	leaseDuration time.Duration
+	renewInterval time.Duration
+	tickInterval  time.Duration
+	tick          atomic.Uint64
+	nextRoute     atomic.Uint64
+	inputs        chan inputCommand
+	entityMu      sync.Mutex
+	entities      map[string]*entityState
+	topologyMu    sync.RWMutex
+	topology      []locationDefinition
+	routable      []locationDefinition
+	mu            sync.RWMutex
+	assignment    *assignment
 }
 
 type response struct {
@@ -204,6 +205,9 @@ func main() {
 		logger.Error("load location topology", "error", err)
 		os.Exit(1)
 	}
+	if err := s.refreshRoutableTopology(ctx); err != nil {
+		logger.Warn("load routable locations", "error", err)
+	}
 	go s.manageAssignment(ctx, logger)
 	go s.runTopologyRefresh(ctx, logger)
 	go s.heartbeat(ctx, logger)
@@ -333,7 +337,7 @@ drained:
 		for _, entity := range s.entities {
 			if entity.reroute == 0 {
 				destination := s.nearestLocation(entity.latitude, entity.longitude)
-				if destination != current.LocationID {
+				if destination != 0 && destination != current.LocationID {
 					entity.reroute = destination
 					entity.axisX = 0
 					entity.axisY = 0
@@ -366,7 +370,7 @@ func (s *server) nearestLocation(latitude, longitude float64) int64 {
 	latitudeRadians := latitude * math.Pi / 180
 	s.topologyMu.RLock()
 	defer s.topologyMu.RUnlock()
-	for _, location := range s.topology {
+	for _, location := range s.routable {
 		locationLatitude := location.latitude * math.Pi / 180
 		deltaLatitude := locationLatitude - latitudeRadians
 		deltaLongitude := (location.longitude - longitude) * math.Pi / 180
@@ -434,6 +438,9 @@ func (s *server) runTopologyRefresh(ctx context.Context, logger *slog.Logger) {
 		case <-ticker.C:
 			if err := s.refreshTopology(ctx); err != nil && ctx.Err() == nil {
 				logger.Warn("refresh location topology", "error", err)
+			}
+			if err := s.refreshRoutableTopology(ctx); err != nil && ctx.Err() == nil {
+				logger.Warn("refresh routable locations", "error", err)
 			}
 		}
 	}
@@ -832,10 +839,10 @@ func (s *server) handleConnection(ctx context.Context, conn net.Conn, logger *sl
 			return
 		}
 		if arguments, found := strings.CutPrefix(message, "@nearest "); found {
-			latitude, longitude, err := parseRouteCoordinates(arguments)
+			latitude, longitude, excludedLocation, err := parseRouteCoordinates(arguments)
 			if err == nil {
 				var route routeRecord
-				route, err = s.nearestRoute(ctx, latitude, longitude)
+				route, err = s.nearestRoute(ctx, latitude, longitude, excludedLocation)
 				if err == nil {
 					_ = json.NewEncoder(writer).Encode(route)
 				}

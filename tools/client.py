@@ -35,7 +35,7 @@ PAGE = r"""<!doctype html>
     input{width:100%;margin-bottom:8px;border:1px solid #30363d;border-radius:6px;background:#161b22;color:#e6edf3;padding:9px}
     .toggle{display:flex;align-items:center;gap:8px;color:#8b949e;cursor:pointer}.toggle+.toggle{margin-top:9px}.toggle input{width:auto;margin:0}
     button{width:100%;border:1px solid #30363d;border-radius:6px;background:#21262d;color:#e6edf3;padding:9px;cursor:pointer}
-    button:hover{border-color:#58a6ff}.error{color:#f85149;min-height:20px;margin-top:10px}
+    button:hover{border-color:#58a6ff}.error-log{min-height:20px;margin:10px 0 0;padding:0;list-style:none;color:#f85149;font:12px ui-monospace,monospace}.error-log li{padding:4px 0;border-top:1px solid #30363d;overflow-wrap:anywhere}.error-log li:first-child{border-top:0}
     .server-label{background:#161b22;color:#e6edf3;border:1px solid #58a6ff;border-radius:4px;box-shadow:none;padding:2px 5px}
     .entity-label{background:#161b22;color:#39c5cf;border:1px solid #39c5cf;border-radius:4px;box-shadow:none;padding:2px 5px}
     .other-client-pin-wrap{background:transparent;border:0}.other-client-pin{display:block;width:18px;height:18px;background:#39c5cf;border:2px solid #d7ffff;border-radius:50% 50% 50% 0;transform:rotate(-45deg);box-shadow:0 2px 5px #0009}
@@ -57,7 +57,7 @@ PAGE = r"""<!doctype html>
     <div class="card"><div class="label">Server pod</div><div id="instance" class="value">—</div></div>
     <div class="card"><div class="label">Ownership generation</div><div id="generation" class="value">—</div></div>
     <div class="card"><label class="toggle"><input id="showAllServers" type="checkbox">Show all active servers</label></div>
-    <button id="reconnect">Reconnect gateway client</button><div id="error" class="error"></div>
+    <button id="reconnect">Reconnect gateway client</button><ul id="errors" class="error-log" aria-live="polite"></ul>
   </aside></main>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
   <script>
@@ -66,6 +66,9 @@ PAGE = r"""<!doctype html>
     let selectedMarker=null,teleportTargetMarker=null,connectionLine=null,serverLayers=new Map(),otherMarkers=new Map(),locations=[],currentRoute=null,selectedPosition=null,connectionState='disconnected',lastInputAt=0,inputInFlight=false,inputDirty=true,teleporting=false,reconnecting=false;
     const keys=new Set();
     const el=id=>document.getElementById(id);
+    const errors=[];
+    function renderErrors(){const now=Date.now();for(let index=errors.length-1;index>=0;index--)if(now-errors[index].created>=10000)errors.splice(index,1);el('errors').replaceChildren(...errors.map(error=>{const item=document.createElement('li');item.textContent=error.message;return item}))}
+    function reportError(message){if(!message)return;errors.unshift({message,created:Date.now()});errors.length=Math.min(errors.length,3);renderErrors();setTimeout(renderErrors,10000)}
     const clientUid=localStorage.getItem('tcp-lab-client-uid')||crypto.randomUUID();localStorage.setItem('tcp-lab-client-uid',clientUid);el('clientUid').textContent=clientUid;
     const observedGateways=new Set();
     const inputSequenceKey=`tcp-lab-input-sequence-${clientUid}`;let inputSequence=Number(localStorage.getItem(inputSequenceKey)||0);
@@ -103,11 +106,11 @@ PAGE = r"""<!doctype html>
     }
     map.on('click',async event=>{
       if(teleporting)return;
-      const {lat,lng}=event.latlng.wrap();el('coordinate').textContent=`Target: ${lat.toFixed(5)}, ${lng.toFixed(5)}`;el('error').textContent='';
+      const {lat,lng}=event.latlng.wrap();el('coordinate').textContent=`Target: ${lat.toFixed(5)}, ${lng.toFixed(5)}`;
       if(teleportTargetMarker)teleportTargetMarker.setLatLng([lat,lng]);else teleportTargetMarker=L.circleMarker([lat,lng],{radius:9,color:'#d29922',weight:2,dashArray:'4 4',fillColor:'#d29922',fillOpacity:.15}).addTo(map);
       teleporting=true;inputSequence++;localStorage.setItem(inputSequenceKey,inputSequence);
       try{const body=await request('/api/location',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({client_uid:clientUid,sequence:inputSequence,latitude:lat,longitude:lng})});applyAuthoritativePosition(body);showRoute(body);renderEntities(body.entities||[]);connection('ready')}
-      catch(error){el('error').textContent=error.message;refresh()}finally{if(teleportTargetMarker){teleportTargetMarker.remove();teleportTargetMarker=null}teleporting=false;inputDirty=true}
+      catch(error){reportError(error.message);refresh()}finally{if(teleportTargetMarker){teleportTargetMarker.remove();teleportTargetMarker=null}teleporting=false;inputDirty=true}
     });
     function setKey(event,pressed){const key=event.key.toLowerCase();if(!'wasd'.includes(key))return;event.preventDefault();if(pressed)keys.add(key);else keys.delete(key);inputDirty=true}
     addEventListener('keydown',event=>setKey(event,true));addEventListener('keyup',event=>setKey(event,false));addEventListener('blur',()=>{keys.clear();inputDirty=true});
@@ -116,14 +119,14 @@ PAGE = r"""<!doctype html>
       const x=(keys.has('d')?1:0)-(keys.has('a')?1:0),y=(keys.has('w')?1:0)-(keys.has('s')?1:0);
       const now=performance.now();if(x===0&&y===0&&!inputDirty&&now-lastInputAt<50)return;inputDirty=false;inputInFlight=true;lastInputAt=now;
       try{inputSequence++;localStorage.setItem(inputSequenceKey,inputSequence);const body=await request('/api/input',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({client_uid:clientUid,sequence:inputSequence,x,y,zoom:map.getZoom()})});applyAuthoritativePosition(body);showRoute(body);renderEntities(body.entities||[])}
-      catch(error){el('error').textContent=error.message;inputDirty=true}finally{inputInFlight=false}
+      catch(error){reportError(error.message);inputDirty=true}finally{inputInFlight=false}
     }
     el('showAllServers').addEventListener('change',renderServers);
     map.on('move zoom resize',drawProxyEdge);
-    async function reconnect(silent=false){if(reconnecting)return;reconnecting=true;try{const body=await request('/api/reconnect',{method:'POST'});showRoute(body||{});connection(body?'ready':'gateway');inputDirty=true;el('error').textContent=''}catch(error){if(!silent)el('error').textContent=error.message;refresh()}finally{reconnecting=false}}
+    async function reconnect(silent=false){if(reconnecting)return;reconnecting=true;try{const body=await request('/api/reconnect',{method:'POST'});showRoute(body||{});connection(body?'ready':'gateway');inputDirty=true}catch(error){if(!silent)reportError(error.message);refresh()}finally{reconnecting=false}}
     el('reconnect').addEventListener('click',()=>reconnect(false));
     async function refresh(){try{const state=await request('/api/state');connection(state.connection);if(state.latitude!==null&&!teleporting)applyAuthoritativePosition({client_latitude:state.latitude,client_longitude:state.longitude});showRoute(state.route||{gateway:state.gateway})}catch(error){connection('disconnected')}}
-    loadLocations().then(refresh).catch(error=>{el('error').textContent=error.message;refresh()});setInterval(sendInput,1000/30);setInterval(expireEntityMarkers,250);setInterval(refresh,1000);setInterval(()=>{if(connectionState!=='ready')reconnect(true)},1000);setInterval(()=>loadLocations().catch(()=>{}),5000);
+    loadLocations().then(refresh).catch(error=>{reportError(error.message);refresh()});setInterval(sendInput,1000/30);setInterval(expireEntityMarkers,250);setInterval(refresh,1000);setInterval(()=>{if(connectionState!=='ready')reconnect(true)},1000);setInterval(()=>loadLocations().catch(()=>{}),5000);
   </script>
 </body>
 </html>"""
