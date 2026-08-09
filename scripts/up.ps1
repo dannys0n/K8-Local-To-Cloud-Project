@@ -6,6 +6,7 @@ $GatewayImage = "tcp-gateway:dev"
 $AutoscalerImage = "tcp-server-autoscaler:dev"
 $LoadgenImage = "tcp-loadgen:dev"
 $ValkeyImage = "valkey/valkey:8.1-alpine"
+$ValkeyAutoscalerImage = "valkey-primary-autoscaler:dev"
 
 foreach ($Command in @("docker", "kind", "kubectl")) {
     if (-not (Get-Command $Command -ErrorAction SilentlyContinue)) {
@@ -27,12 +28,9 @@ try {
         Write-Host "kind cluster '$Cluster' already exists."
     }
 
-    foreach ($NodeResource in @(kubectl get nodes -l tcp-lab.io/database=true -o name)) {
-        $NodeName = $NodeResource -replace '^node/', ''
-        if (-not [string]::IsNullOrWhiteSpace($NodeName)) {
-            kubectl taint node $NodeName tcp-lab.io/database- 2>$null
-            kubectl label node $NodeName tcp-lab.io/database- 2>$null
-        }
+    $DatabaseNodes = @(kubectl get nodes -l tcp-lab.io/database=true -o name)
+    if ($DatabaseNodes.Count -ne 3) {
+        throw "Cluster topology is outdated: expected 3 dedicated database workers, found $($DatabaseNodes.Count). Recreate the kind cluster."
     }
 
     Write-Host "Building application and load-generator images..."
@@ -42,17 +40,23 @@ try {
     docker build -t $LoadgenImage tools/loadgen
     docker build --provenance=false -t prom/prometheus:v3.13.1 infra/autoscaler/prometheus
     docker build --provenance=false -t $ValkeyImage infra/valkey
+    docker build --provenance=false -t $ValkeyAutoscalerImage infra/valkey/autoscaler
 
     Write-Host "Loading image into kind..."
-    kind load docker-image $ServerImage $GatewayImage $AutoscalerImage prom/prometheus:v3.13.1 $ValkeyImage --name $Cluster
+    kind load docker-image $ServerImage $GatewayImage $AutoscalerImage prom/prometheus:v3.13.1 $ValkeyImage $ValkeyAutoscalerImage --name $Cluster
 
     Write-Host "Installing autoscaling dependencies..."
     & "$Root/infra/autoscaler/install-kind.ps1"
 
     Write-Host "Applying Kubernetes resources..."
     kubectl apply -f deploy/base/namespace.yaml
+    kubectl get statefulset/valkey -n tcp-lab *> $null
+    $ValkeyExists = $LASTEXITCODE -eq 0
     kubectl delete job/valkey-cluster-init -n tcp-lab --ignore-not-found
     kubectl apply -k deploy/overlays/kind
+    if (-not $ValkeyExists) {
+        kubectl scale statefulset/valkey -n tcp-lab --replicas=6
+    }
     kubectl rollout status statefulset/valkey -n tcp-lab --timeout=180s
     kubectl wait --for=condition=Complete job/valkey-cluster-init -n tcp-lab --timeout=180s
     kubectl rollout restart deployment/tcp-server -n tcp-lab
@@ -63,6 +67,7 @@ try {
     kubectl rollout status deployment/prometheus -n tcp-lab --timeout=180s
     kubectl rollout status deployment/gateway-autoscaler -n tcp-lab --timeout=180s
     kubectl rollout status deployment/tcp-server-autoscaler -n tcp-lab --timeout=180s
+    kubectl rollout status deployment/valkey-primary-autoscaler -n tcp-lab --timeout=180s
 
     Write-Host ""
     Write-Host "Ready."

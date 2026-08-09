@@ -7,6 +7,7 @@ GATEWAY_IMAGE="tcp-gateway:dev"
 AUTOSCALER_IMAGE="tcp-server-autoscaler:dev"
 LOADGEN_IMAGE="tcp-loadgen:dev"
 VALKEY_IMAGE="valkey/valkey:8.1-alpine"
+VALKEY_AUTOSCALER_IMAGE="valkey-primary-autoscaler:dev"
 
 for command in docker kind kubectl; do
   command -v "$command" >/dev/null 2>&1 || { echo "Required command not found: $command" >&2; exit 1; }
@@ -20,11 +21,12 @@ else
   echo "kind cluster '$CLUSTER' already exists."
 fi
 
-while read -r node; do
-  [[ -z "$node" ]] && continue
-  kubectl taint node "$node" tcp-lab.io/database- 2>/dev/null || true
-  kubectl label node "$node" tcp-lab.io/database- 2>/dev/null || true
-done < <(kubectl get nodes -l tcp-lab.io/database=true -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}')
+database_nodes="$(kubectl get nodes -l tcp-lab.io/database=true -o name)"
+database_node_count="$(printf '%s\n' "$database_nodes" | sed '/^$/d' | wc -l | tr -d ' ')"
+if [[ "$database_node_count" -ne 3 ]]; then
+  echo "Cluster topology is outdated: expected 3 dedicated database workers, found $database_node_count. Recreate the kind cluster." >&2
+  exit 1
+fi
 
 echo "Building application and load-generator images..."
 docker build -t "$SERVER_IMAGE" app/server
@@ -33,17 +35,26 @@ docker build --provenance=false -t "$AUTOSCALER_IMAGE" infra/autoscaler
 docker build -t "$LOADGEN_IMAGE" tools/loadgen
 docker build --provenance=false -t prom/prometheus:v3.13.1 infra/autoscaler/prometheus
 docker build --provenance=false -t "$VALKEY_IMAGE" infra/valkey
+docker build --provenance=false -t "$VALKEY_AUTOSCALER_IMAGE" infra/valkey/autoscaler
 
 echo "Loading image into kind..."
-kind load docker-image "$SERVER_IMAGE" "$GATEWAY_IMAGE" "$AUTOSCALER_IMAGE" prom/prometheus:v3.13.1 "$VALKEY_IMAGE" --name "$CLUSTER"
+kind load docker-image "$SERVER_IMAGE" "$GATEWAY_IMAGE" "$AUTOSCALER_IMAGE" prom/prometheus:v3.13.1 "$VALKEY_IMAGE" "$VALKEY_AUTOSCALER_IMAGE" --name "$CLUSTER"
 
 echo "Installing autoscaling dependencies..."
 bash "$ROOT/infra/autoscaler/install-kind.sh"
 
 echo "Applying Kubernetes resources..."
 kubectl apply -f deploy/base/namespace.yaml
+if kubectl get statefulset/valkey -n tcp-lab >/dev/null 2>&1; then
+  VALKEY_EXISTS=true
+else
+  VALKEY_EXISTS=false
+fi
 kubectl delete job/valkey-cluster-init -n tcp-lab --ignore-not-found
 kubectl apply -k deploy/overlays/kind
+if [[ "$VALKEY_EXISTS" == false ]]; then
+  kubectl scale statefulset/valkey -n tcp-lab --replicas=6
+fi
 kubectl rollout status statefulset/valkey -n tcp-lab --timeout=180s
 kubectl wait --for=condition=Complete job/valkey-cluster-init -n tcp-lab --timeout=180s
 kubectl rollout restart deployment/tcp-server -n tcp-lab
@@ -53,6 +64,7 @@ kubectl rollout status deployment/gateway -n tcp-lab --timeout=180s
 kubectl rollout status deployment/prometheus -n tcp-lab --timeout=180s
 kubectl rollout status deployment/gateway-autoscaler -n tcp-lab --timeout=180s
 kubectl rollout status deployment/tcp-server-autoscaler -n tcp-lab --timeout=180s
+kubectl rollout status deployment/valkey-primary-autoscaler -n tcp-lab --timeout=180s
 
 echo
 echo "Ready."

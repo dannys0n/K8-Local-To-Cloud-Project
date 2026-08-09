@@ -1,0 +1,87 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: valkey-primary-autoscaler
+  namespace: tcp-lab
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: valkey-primary-autoscaler
+  namespace: tcp-lab
+rules:
+  - apiGroups: ["apps"]
+    resources: ["statefulsets/scale"]
+    verbs: ["get", "patch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: valkey-primary-autoscaler
+  namespace: tcp-lab
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: valkey-primary-autoscaler
+subjects:
+  - kind: ServiceAccount
+    name: valkey-primary-autoscaler
+    namespace: tcp-lab
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: valkey-primary-autoscaler
+  namespace: tcp-lab
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: valkey-primary-autoscaler
+  template:
+    metadata:
+      labels:
+        app: valkey-primary-autoscaler
+    spec:
+      serviceAccountName: valkey-primary-autoscaler
+      containers:
+        - name: autoscaler
+          image: valkey-primary-autoscaler:dev
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: PROMETHEUS_URL
+              value: http://prometheus.tcp-lab.svc.cluster.local:9090
+            - name: CPU_THRESHOLD_PERCENT
+              value: "70"
+            - name: REQUIRED_BREACHES
+              value: "2"
+            - name: EVALUATION_INTERVAL_SECONDS
+              value: "1"
+            - name: SCALE_OUT_COOLDOWN_SECONDS
+              value: "5"
+            - name: MAX_PRIMARIES
+              value: "100"
+            - name: MINIMUM_SCALE_OUT_PERCENT
+              value: "20"
+            - name: VALKEY_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: tcp-server-valkey
+                  key: password
+                  optional: true
+          resources:
+            requests:
+              cpu: 10m
+              memory: 24Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi

@@ -70,9 +70,10 @@ Observe which pods reschedule:
 kubectl get pods -n tcp-lab -o wide -w
 ```
 
-Server pods are diskless and can reschedule on another worker. Valkey primaries
-and replicas are spread across workers; losing one worker should promote a
-surviving replica while the failed pod's local PVC remains attached to its node.
+Server pods are diskless and can reschedule on another general worker. Valkey
+primaries and replicas are isolated to three tainted database workers; losing one
+database worker should promote a surviving replica while the failed pod's local
+PVC remains attached to its node.
 
 For an abrupt hardware-style failure, use `docker kill` instead of draining the
 node. Fresh kind clusters use one-second kubelet status updates and a five-second

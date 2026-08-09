@@ -5,7 +5,6 @@ metadata:
   namespace: tcp-lab
 spec:
   serviceName: valkey-headless
-  replicas: 6
   podManagementPolicy: Parallel
   selector:
     matchLabels:
@@ -16,6 +15,13 @@ spec:
         app: valkey
     spec:
       terminationGracePeriodSeconds: 10
+      nodeSelector:
+        tcp-lab.io/database: "true"
+      tolerations:
+        - key: tcp-lab.io/database
+          operator: Equal
+          value: "true"
+          effect: NoSchedule
       topologySpreadConstraints:
         - maxSkew: 1
           topologyKey: kubernetes.io/hostname

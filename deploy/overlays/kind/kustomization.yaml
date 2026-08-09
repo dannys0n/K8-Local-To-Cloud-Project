@@ -6,6 +6,7 @@ resources:
   - valkey-service.yaml
   - valkey-statefulset.yaml
   - valkey-cluster-job.yaml
+  - valkey-primary-autoscaler.yaml
 patches:
   - path: gateway-nodeport-patch.yaml
   - path: stats-nodeport-patch.yaml

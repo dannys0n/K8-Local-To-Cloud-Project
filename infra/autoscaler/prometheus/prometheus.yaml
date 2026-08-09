@@ -56,7 +56,7 @@ data:
             replacement: kubernetes.default.svc:443
         metric_relabel_configs:
           - source_labels: [__name__, namespace, container]
-            regex: container_cpu_usage_seconds_total;tcp-lab;(server|gateway)
+            regex: container_cpu_usage_seconds_total;tcp-lab;(server|gateway|valkey)
             action: keep
 ---
 apiVersion: apps/v1

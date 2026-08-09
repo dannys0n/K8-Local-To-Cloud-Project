@@ -275,10 +275,12 @@ database deployments are placeholders. The reusable pieces are the Services,
 Deployments, probes, disruption budgets, topology rules, and kind/EKS overlays.
 The credentials in the kind overlay are development-only.
 
-Kind distributes six persistent Valkey pods across all workers. Local PVCs do
-not move between nodes, but replicas on other nodes allow primary failover. The
-EKS overlay deploys no Valkey pods and expects a managed cluster-mode-compatible
-service outside the worker pool.
+Kind uses five general workers and three tainted database workers. Valkey pods
+run only on the database workers and spread evenly across them; application pods
+remain on the general workers. Local PVCs do not move between nodes, but replicas
+on the other database workers allow primary failover. The EKS overlay deploys no
+Valkey pods and expects a managed cluster-mode-compatible service outside the
+worker pool.
 
 Kubernetes creates a cold replacement when a server pod fails. Replacement pods
 poll Valkey-backed leases every 500ms; after a three-second lease expires, one

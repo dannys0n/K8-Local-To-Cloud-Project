@@ -46,3 +46,16 @@ nodes:
     kubeadmConfigPatches: *fastKubelet
   - role: worker
     kubeadmConfigPatches: *fastKubelet
+  - role: worker
+    kubeadmConfigPatches: &databaseKubelet
+      - |
+        kind: JoinConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            housekeeping-interval: "1s"
+            node-labels: "tcp-lab.io/database=true"
+            register-with-taints: "tcp-lab.io/database=true:NoSchedule"
+  - role: worker
+    kubeadmConfigPatches: *databaseKubelet
+  - role: worker
+    kubeadmConfigPatches: *databaseKubelet
