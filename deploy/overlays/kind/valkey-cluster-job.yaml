@@ -1,0 +1,36 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: valkey-cluster-init
+  namespace: tcp-lab
+spec:
+  backoffLimit: 12
+  template:
+    metadata:
+      labels:
+        app: valkey-cluster-init
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: initialize
+          image: valkey/valkey:8.1-alpine
+          command: ["sh", "-ec"]
+          args:
+            - |
+              nodes=""
+              for ordinal in 0 1 2 3 4 5; do
+                host="valkey-${ordinal}.valkey-headless.tcp-lab.svc.cluster.local"
+                until valkey-cli -h "$host" ping >/dev/null 2>&1; do sleep 1; done
+                nodes="$nodes $host:6379"
+              done
+              if valkey-cli -h valkey-0.valkey-headless cluster info 2>/dev/null | grep -q 'cluster_state:ok'; then
+                exit 0
+              fi
+              valkey-cli --cluster create $nodes --cluster-replicas 1 --cluster-yes
+              until valkey-cli -h valkey-0.valkey-headless cluster info | grep -q 'cluster_state:ok'; do sleep 1; done
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              memory: 64Mi

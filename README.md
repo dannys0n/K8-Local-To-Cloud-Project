@@ -4,12 +4,12 @@ A small, replaceable application used to exercise Kubernetes infrastructure:
 
 ```text
 client -> NodePort/NLB -> Gateway Deployment -> TCP Server pool
-                                              -> PostgreSQL + Redis
+                                              -> Valkey Cluster
 ```
 
-It keeps ownership and fencing inside PostgreSQL. A pinned third-party Custom
-Pod Autoscaler operator is used only for infrastructure scaling decisions; it
-does not participate in routing or ownership.
+Valkey Cluster stores authoritative location leases, entity recovery state,
+routes, and fencing generations. The autoscalers participate only in capacity
+and location-count reconciliation, never packet routing.
 
 ## Repository layout
 
@@ -34,13 +34,12 @@ through AWS tooling and then uses the EKS overlay to deploy the same base.
 - **Gateway:** generic Go replicas, starting from an autoscaler minimum of one, that preserve the client connection
   while switching downstream location servers at runtime.
 - **TCP server:** interchangeable Deployment replicas with an autoscaler minimum
-  of one. A fresh database seeds one logical location owned by that initial
+  of one. A fresh Valkey cluster seeds one logical location owned by that initial
   replica. Each active process runs a 20 Hz
   authoritative simulation clock and includes its current tick in responses.
-- **PostgreSQL:** authoritative location identity, entity claims, leases, and
-  ownership generations; one PVC on the dedicated kind database worker.
-- **Redis:** ephemeral server presence for infrastructure visibility. It is not
-  part of authoritative client state.
+- **Valkey Cluster:** three persistent primaries and three replicas in kind;
+  authoritative location identity, leases, routes, entity recovery state, and
+  fencing generations are distributed by hash slot.
 - **CPU autoscaling:** minimal Prometheus CPU collection plus two replaceable scaler
   Deployments. Prometheus supplies per-pod CPU directly to the independent server
   and gateway policies.
@@ -49,8 +48,8 @@ through AWS tooling and then uses the EKS overlay to deploy the same base.
 - **Manifest management:** a shared Kustomize base plus kind and EKS overlays.
 
 The Go workloads remain single packages with narrow source boundaries. Server
-startup, protocol, ownership, simulation, and entity claims stay in
-`app/server/main.go`; same-server spatial relevance is isolated in
+startup, protocol, and simulation stay in `app/server/main.go`; Valkey ownership
+and recovery operations are isolated in `app/server/valkey_state.go`; same-server spatial relevance is isolated in
 `app/server/visibility.go`. Gateway routing and client sessions stay in
 `app/gateway/main.go`; its private health and statistics HTTP surface is isolated
 in `app/gateway/stats.go`. This separation does not add runtime components.
@@ -77,36 +76,27 @@ powershell -ExecutionPolicy Bypass -File tools/smoke.ps1
 powershell -ExecutionPolicy Bypass -File tools/client.ps1
 ```
 
-The lab initially creates one numeric location. On a new database, the server
-application chooses each location's latitude and longitude once; PostgreSQL then
-preserves the numeric ID and coordinates across pod replacement and cluster
-restarts. Existing databases retain their coordinates during migration.
+The lab initially creates one numeric location. The autoscaler assigns its
+coordinate once and Valkey persistence preserves the numeric ID and coordinate
+across pod replacement and cluster restarts.
 
 Names are intentionally not part of location identity or routing. Clients display
-`Location <id>` on the Leaflet map. PostgreSQL coordinates are canonical Leaflet
-`LatLng` values and can later be indexed with Redis GEO; Leaflet's Web Mercator
+`Location <id>` on the Leaflet map. Valkey coordinates are canonical Leaflet
+`LatLng` values; Leaflet's Web Mercator
 projection remains a browser display detail and is not persisted.
 
-PostgreSQL exposes two internal operations used by the server autoscaler:
+The server autoscaler creates or retires Valkey location records after it changes
+the Deployment replica count. Pod replacement does not change that count, so a
+replacement claims the existing location with a higher generation.
 
-```sql
-SELECT * FROM tcp_create_location();
-SELECT * FROM tcp_retire_location();
-```
-
-The first assigns a random coordinate and permanent atomic ID after the autoscaler
-adds a server replica. The second disables the highest active location and fences
-its owner after a replica is removed; referenced entity rows are retained. The
-dashboard has no location mutation or Deployment scaling permissions.
-
-Prometheus scrapes kubelet cAdvisor CPU counters and retains only the server and
+Prometheus scrapes the kubelet's compact resource endpoint and retains only the server and
 gateway container CPU series in this namespace. Each scaler converts the CPU
 rate to utilization relative to the container's 250 millicore request. The workloads have no CPU limit, so they
 can still burst when node capacity is available. The evaluator examines every
 ready pod independently and calculates aggregate capacity at the 80% target.
 After Kubernetes accepts a server scale, the server scaler aligns the enabled
 location count with the requested replicas; gateway scaling has no database
-operation. New generic server pods claim locations through the normal PostgreSQL
+operation. New generic server pods claim locations through the Valkey
 lease path. Evaluations run
 every second in the kind overlay and every 15 seconds in the EKS/base
 configuration, stopping at 500 replicas. The kind cluster also lowers kubelet's
@@ -120,7 +110,7 @@ calculates aggregate required capacity, and retires the same number of locations
 as removed replicas. The base limits one change or 25% per evaluation. The kind overlay uses
 the same 20% threshold with one evaluation and the larger of four pods or 100%.
 The server scaler also reconciles locations on startup, repairing interruption
-between the Kubernetes and PostgreSQL operations. The workload Deployment manifests intentionally
+between the Kubernetes and Valkey operations. The workload Deployment manifests intentionally
 omits `spec.replicas`; the autoscaler owns that field and enforces a minimum of
 one, preventing later Kustomize applies from resetting a scaled Deployment.
 
@@ -169,7 +159,7 @@ projected degrees per second on its authoritative tick. Longitude wraps at the
 date line. Latitude moves in Leaflet's Web Mercator space and wraps between its
 north and south limits, keeping apparent map speed consistent. Input stops automatically if no
 refresh arrives for eight ticks (400 ms). Movement is not written on each tick.
-PostgreSQL records the last server-claim coordinate as a recovery point.
+Valkey records the last server-claim coordinate as a recovery point.
 
 Input responses include nearby entities currently authoritative on the same
 server. The server applies the existing map-radius filter directly to its local
@@ -180,13 +170,13 @@ After every movement tick, the server checks the resulting coordinate against
 the geographic locations. When ownership changes, it returns a transient
 handoff snapshot; the gateway resumes that snapshot on the destination server
 before switching its downstream socket. The browser-to-gateway connection does
-not change. A completed handoff records one entity claim in PostgreSQL.
+not change. A completed handoff atomically updates the entity's Valkey slot.
 
 After a gateway disconnect, the local bridge uses its last coordinate as a
 routing hint. The logical server identity and last entity claim remain in
-PostgreSQL when a pod is replaced. Movement after that claim remains transient.
+Valkey when a pod is replaced. Movement after that claim remains transient.
 An expired 1.5-second lease is claimed by a cold replacement pod;
-the generation increases to fence the old owner. Redis presence keys expire and
+the generation increases to fence the old owner. Valkey presence keys expire and
 repopulate automatically. Generic test messages remain at-least-once, while
 Without a location handshake, port 9000 remains the
 original round-robin endpoint.
@@ -285,22 +275,17 @@ database deployments are placeholders. The reusable pieces are the Services,
 Deployments, probes, disruption budgets, topology rules, and kind/EKS overlays.
 The credentials in the kind overlay are development-only.
 
-Kind labels `tcp-lab-worker` (the first worker) as its database worker.
-PostgreSQL and Redis use
-hard affinity and tolerate its `NoSchedule` taint; gateways and servers cannot
-schedule there. The kind PostgreSQL PVC is node-local and cannot follow its pod
-to another node without a shared storage class. The EKS overlay deploys no
-database pods and expects managed PostgreSQL and Redis-compatible services
-outside the worker pool.
-Changing the dedicated kind database worker requires recreating the cluster;
-the startup scripts reject an in-place move that would strand the local PVC.
+Kind distributes six persistent Valkey pods across all workers. Local PVCs do
+not move between nodes, but replicas on other nodes allow primary failover. The
+EKS overlay deploys no Valkey pods and expects a managed cluster-mode-compatible
+service outside the worker pool.
 
 Kubernetes creates a cold replacement when a server pod fails. Replacement pods
-poll PostgreSQL-backed leases every 250ms; after a 1.5-second lease expires, one
+poll Valkey-backed leases every 500ms; after a three-second lease expires, one
 replacement atomically claims the location and increments its fencing generation.
 These lab defaults are configurable through
 `ASSIGNMENT_LEASE_DURATION` and `ASSIGNMENT_RENEW_INTERVAL`; production values
-must be validated against database and network latency. The replacement
+must be validated against Valkey and network latency. The replacement
 application remains responsible for resumable sessions and application-specific
 durability semantics.
 
@@ -314,11 +299,12 @@ together instead of at the conservative default rate.
 
 Gateway health is independent from server ownership. Kubernetes readiness and
 liveness checks remove or restart an unhealthy gateway, and the EKS NLB checks
-gateway targets directly. A standard CPU HPA maintains 1-20 gateway replicas at
-an 80% average target. Gateways request 250 millicores without a CPU limit, so
-they can burst while replacements start. The kind overlay removes scale-up and
-scale-down stabilization and permits either direction to change by 100% or four
-pods per 10-second evaluation; EKS retains Kubernetes' conservative defaults.
+gateway targets directly. Small Prometheus-backed autoscaler Deployments adjust
+both gateway and server replicas from aggregate CPU demand with an 80% target.
+Gateways request 250 millicores without a CPU limit, so they can burst while
+replacements start. The kind overlay evaluates every second and deliberately
+uses short stabilization for development drills; EKS retains the slower base
+interval and stabilization values.
 Gateways discover every active location
 owner and do not claim, rebalance, or exclusively own servers. Hard hostname
 spreading distributes server and dynamically scaled gateway pods across kind's

@@ -4,11 +4,13 @@
 import json
 import math
 import os
+import random
 import ssl
-import subprocess
 import time
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
+
+from redis.cluster import RedisCluster
 
 
 MIN_REPLICAS = 1
@@ -37,6 +39,7 @@ class Scaler:
         self.max_change_pods = env_int("MAX_SCALE_CHANGE_PODS", 1)
         self.max_change_percent = env_int("MAX_SCALE_CHANGE_PERCENT", 25)
         self.manage_locations = os.getenv("MANAGE_LOCATIONS") == "true"
+        self.valkey = self.connect_valkey() if self.manage_locations else None
         self.low_cpu_count = 0
         self.token = open(TOKEN_PATH, encoding="utf-8").read().strip()
         self.api = os.getenv("KUBERNETES_SERVICE_HOST")
@@ -93,22 +96,75 @@ class Scaler:
             return max(MIN_REPLICAS, current - change, required)
         return current
 
+    def connect_valkey(self) -> RedisCluster:
+        address = os.environ["VALKEY_ADDRS"].split(",", 1)[0].strip()
+        host, port = address.rsplit(":", 1)
+        deadline = time.monotonic() + 90
+        while True:
+            try:
+                client = RedisCluster(
+                    host=host, port=int(port), decode_responses=True,
+                    username=os.getenv("VALKEY_USERNAME") or None,
+                    password=os.getenv("VALKEY_PASSWORD") or None,
+                    ssl=os.getenv("VALKEY_TLS", "false").lower() == "true",
+                    socket_connect_timeout=2, socket_timeout=2,
+                )
+                if client.cluster_info().get("cluster_state") == "ok":
+                    return client
+            except Exception as error:  # Startup may precede cluster slot assignment.
+                print(f"waiting for valkey cluster: {error}", flush=True)
+            if time.monotonic() >= deadline:
+                raise RuntimeError("valkey cluster did not become ready within 90 seconds")
+            time.sleep(1)
+
+    @staticmethod
+    def location_key(location_id: int) -> str:
+        return f"tcp-lab:location:{{{location_id}}}"
+
+    def publish_topology_change(self, action: str, location_id: int) -> None:
+        revision = self.valkey.incr("tcp-lab:topology:revision")
+        self.valkey.publish("tcp-lab:topology:changed", json.dumps({
+            "revision": revision, "action": action, "location_id": location_id,
+        }))
+
+    def create_location(self) -> None:
+        location_id = int(self.valkey.incr("tcp-lab:location:counter"))
+        server_id = "tcp-server-0" if location_id == 1 else f"tcp-server-location-{location_id}"
+        self.valkey.hset(self.location_key(location_id), mapping={
+            "server_id": server_id,
+            "location_id": location_id,
+            "latitude": random.uniform(-85.05112878, 85.05112878),
+            "longitude": random.uniform(-180, 180),
+            "enabled": 1, "owner": "", "generation": 0, "lease_until": 0,
+        })
+        self.valkey.zadd("tcp-lab:locations", {str(location_id): location_id})
+        self.publish_topology_change("created", location_id)
+
+    def retire_location(self) -> None:
+        retired = self.valkey.zpopmax("tcp-lab:locations", 1)
+        if not retired:
+            return
+        location_id = int(retired[0][0])
+        if location_id == 1:
+            self.valkey.zadd("tcp-lab:locations", {"1": 1})
+            return
+        self.valkey.hset(self.location_key(location_id), mapping={
+            "enabled": 0, "owner": "", "lease_until": 0,
+        })
+        self.valkey.delete(f"tcp-lab:route:{{{location_id}}}")
+        self.publish_topology_change("retired", location_id)
+
     def reconcile_locations(self, replicas: int) -> None:
         if not self.manage_locations:
             return
-        dsn = os.environ["POSTGRES_DSN"]
-        count = int(subprocess.check_output(
-            ["psql", dsn, "-v", "ON_ERROR_STOP=1", "-Atc", "SELECT COUNT(*) FROM tcp_server_state WHERE enabled"],
-            text=True,
-        ).strip())
+        count = int(self.valkey.zcard("tcp-lab:locations"))
         difference = replicas - count
+        for _ in range(max(0, difference)):
+            self.create_location()
+        for _ in range(max(0, -difference)):
+            self.retire_location()
         if difference == 0:
-            return
-        function = "tcp_create_location" if difference > 0 else "tcp_retire_location"
-        subprocess.run(
-            ["psql", dsn, "-v", "ON_ERROR_STOP=1", "-Atc", f"SELECT {function}() FROM generate_series(1, {abs(difference)})"],
-            check=True,
-        )
+            self.publish_topology_change("reconciled", 0)
 
     def run(self) -> None:
         needs_reconcile = self.manage_locations

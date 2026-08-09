@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"context"
 	"crypto/rand"
-	"database/sql"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -21,7 +20,6 @@ import (
 	"syscall"
 	"time"
 
-	_ "github.com/lib/pq"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -57,24 +55,23 @@ type assignment struct {
 }
 
 type server struct {
-	instanceID    string
-	podName       string
-	routeAddress  string
-	db            *sql.DB
-	redis         *redis.Client
-	leaseDuration time.Duration
-	renewInterval time.Duration
-	tickInterval  time.Duration
-	tick          atomic.Uint64
-	nextRoute     atomic.Uint64
-	inputs        chan inputCommand
-	entityMu      sync.Mutex
-	entities      map[string]*entityState
-	topologyMu    sync.RWMutex
-	topology      []locationDefinition
-	routable      []locationDefinition
-	mu            sync.RWMutex
-	assignment    *assignment
+	instanceID       string
+	podName          string
+	routeAddress     string
+	valkey           *redis.ClusterClient
+	leaseDuration    time.Duration
+	renewInterval    time.Duration
+	tickInterval     time.Duration
+	tick             atomic.Uint64
+	nextRoute        atomic.Uint64
+	inputs           chan inputCommand
+	entityMu         sync.Mutex
+	entities         map[string]*entityState
+	topologyMu       sync.RWMutex
+	topology         []locationDefinition
+	topologyRevision atomic.Int64
+	mu               sync.RWMutex
+	assignment       *assignment
 }
 
 type response struct {
@@ -150,29 +147,12 @@ func main() {
 
 	podName := envOrDefault("POD_NAME", hostname())
 	instanceID := envOrDefault("POD_UID", podName)
-	db, cache, err := connectDatabases(ctx, logger)
+	cache, err := connectValkey(ctx, logger)
 	if err != nil {
-		logger.Error("connect databases", "error", err)
+		logger.Error("connect valkey cluster", "error", err)
 		os.Exit(1)
 	}
-	defer db.Close()
 	defer cache.Close()
-	if strings.EqualFold(strings.TrimSpace(os.Getenv("RUN_SCHEMA_MIGRATION")), "true") {
-		ready, schemaErr := schemaReady(ctx, db)
-		if schemaErr == nil && !ready {
-			schemaErr = createSchema(ctx, db)
-		}
-		if schemaErr != nil {
-			logger.Error("migrate database schema", "error", schemaErr)
-			os.Exit(1)
-		}
-		logger.Info("database schema ready")
-		return
-	}
-	if err := waitForSchema(ctx, db); err != nil {
-		logger.Error("wait for database schema", "error", err)
-		os.Exit(1)
-	}
 
 	leaseDuration, err := durationFromEnv("ASSIGNMENT_LEASE_DURATION", defaultLeaseDuration)
 	if err != nil {
@@ -196,17 +176,14 @@ func main() {
 
 	s := &server{
 		instanceID: instanceID, podName: podName,
-		routeAddress: net.JoinHostPort(envOrDefault("POD_IP", hostname()), envOrDefault("SERVER_PORT", "7000")),
-		db:           db, redis: cache,
+		routeAddress:  net.JoinHostPort(envOrDefault("POD_IP", hostname()), envOrDefault("SERVER_PORT", "7000")),
+		valkey:        cache,
 		leaseDuration: leaseDuration, renewInterval: renewInterval, tickInterval: tickInterval,
 		inputs: make(chan inputCommand, 8192), entities: make(map[string]*entityState),
 	}
 	if err := s.refreshTopology(ctx); err != nil {
 		logger.Error("load location topology", "error", err)
 		os.Exit(1)
-	}
-	if err := s.refreshRoutableTopology(ctx); err != nil {
-		logger.Warn("load routable locations", "error", err)
 	}
 	go s.manageAssignment(ctx, logger)
 	go s.runTopologyRefresh(ctx, logger)
@@ -249,7 +226,7 @@ func main() {
 	cleanupCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	s.release(cleanupCtx)
-	_ = s.redis.Del(cleanupCtx, s.presenceKey()).Err()
+	_ = s.valkey.Del(cleanupCtx, s.presenceKey()).Err()
 	logger.Info("pool server stopped", "instance", podName)
 }
 
@@ -370,7 +347,7 @@ func (s *server) nearestLocation(latitude, longitude float64) int64 {
 	latitudeRadians := latitude * math.Pi / 180
 	s.topologyMu.RLock()
 	defer s.topologyMu.RUnlock()
-	for _, location := range s.routable {
+	for _, location := range s.topology {
 		locationLatitude := location.latitude * math.Pi / 180
 		deltaLatitude := locationLatitude - latitudeRadians
 		deltaLongitude := (location.longitude - longitude) * math.Pi / 180
@@ -387,27 +364,8 @@ func (s *server) nearestLocation(latitude, longitude float64) int64 {
 }
 
 func (s *server) refreshTopology(ctx context.Context) error {
-	queryCtx, cancel := context.WithTimeout(ctx, time.Second)
-	defer cancel()
-	rows, err := s.db.QueryContext(queryCtx, `
-		SELECT state.server_id, state.location_id, state.latitude, state.longitude,
-			assignment.generation
-		FROM tcp_server_state AS state
-		JOIN tcp_server_assignment AS assignment USING (server_id)
-		WHERE state.enabled ORDER BY state.location_id`)
+	loaded, revision, err := s.loadTopology(ctx)
 	if err != nil {
-		return err
-	}
-	defer rows.Close()
-	loaded := make([]locationDefinition, 0)
-	for rows.Next() {
-		var item locationDefinition
-		if err := rows.Scan(&item.serverID, &item.locationID, &item.latitude, &item.longitude, &item.generation); err != nil {
-			return err
-		}
-		loaded = append(loaded, item)
-	}
-	if err := rows.Err(); err != nil {
 		return err
 	}
 	if current := s.currentAssignment(); current != nil {
@@ -425,22 +383,37 @@ func (s *server) refreshTopology(ctx context.Context) error {
 	s.topologyMu.Lock()
 	s.topology = loaded
 	s.topologyMu.Unlock()
+	s.topologyRevision.Store(revision)
 	return nil
 }
 
 func (s *server) runTopologyRefresh(ctx context.Context, logger *slog.Logger) {
-	ticker := time.NewTicker(time.Second)
+	updates := s.valkey.Subscribe(ctx, topologyChannel)
+	defer updates.Close()
+	updateChannel := updates.Channel()
+	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
-			if err := s.refreshTopology(ctx); err != nil && ctx.Err() == nil {
-				logger.Warn("refresh location topology", "error", err)
+		case _, open := <-updateChannel:
+			if !open {
+				return
 			}
-			if err := s.refreshRoutableTopology(ctx); err != nil && ctx.Err() == nil {
-				logger.Warn("refresh routable locations", "error", err)
+			if err := s.refreshTopology(ctx); err != nil && ctx.Err() == nil {
+				logger.Warn("refresh changed topology", "error", err)
+			}
+		case <-ticker.C:
+			revision, err := s.readTopologyRevision(ctx)
+			if err != nil {
+				if ctx.Err() == nil {
+					logger.Warn("check topology revision", "error", err)
+				}
+			} else if revision != s.topologyRevision.Load() {
+				if err := s.refreshTopology(ctx); err != nil && ctx.Err() == nil {
+					logger.Warn("reconcile location topology", "error", err)
+				}
 			}
 		}
 	}
@@ -453,16 +426,7 @@ func (s *server) ensureEntity(ctx context.Context, clientUID string) (bool, erro
 	if exists {
 		return false, nil
 	}
-	loaded := &entityState{viewZoom: minimumViewZoom}
-	var persisted bool
-	queryCtx, cancel := context.WithTimeout(ctx, time.Second)
-	defer cancel()
-	err := s.db.QueryRowContext(queryCtx, `
-		SELECT COALESCE(entity.latitude, 0), COALESCE(entity.longitude, 0),
-			entity.entity_uid IS NOT NULL
-		FROM (SELECT $1::TEXT AS entity_uid) AS requested
-		LEFT JOIN entity_state AS entity ON entity.entity_uid = requested.entity_uid`, clientUID).
-		Scan(&loaded.latitude, &loaded.longitude, &persisted)
+	loaded, persisted, err := s.loadEntity(ctx, clientUID)
 	if err != nil {
 		return false, err
 	}
@@ -478,186 +442,6 @@ func (s *server) ensureEntity(ctx context.Context, clientUID string) (bool, erro
 	}
 	s.entityMu.Unlock()
 	return !exists, nil
-}
-
-func connectDatabases(ctx context.Context, logger *slog.Logger) (*sql.DB, *redis.Client, error) {
-	postgresDSN := strings.TrimSpace(os.Getenv("POSTGRES_DSN"))
-	redisAddr := strings.TrimSpace(os.Getenv("REDIS_ADDR"))
-	if postgresDSN == "" || redisAddr == "" {
-		return nil, nil, errors.New("POSTGRES_DSN and REDIS_ADDR are required")
-	}
-	if !strings.Contains(postgresDSN, "connect_timeout=") {
-		separator := "&"
-		if !strings.Contains(postgresDSN, "?") {
-			separator = "?"
-		}
-		postgresDSN += separator + "connect_timeout=2"
-	}
-	db, err := sql.Open("postgres", postgresDSN)
-	if err != nil {
-		return nil, nil, err
-	}
-	db.SetMaxOpenConns(2)
-	db.SetMaxIdleConns(1)
-	cache := redis.NewClient(&redis.Options{Addr: redisAddr})
-
-	startupCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
-	defer cancel()
-	for {
-		if err := db.PingContext(startupCtx); err == nil {
-			break
-		} else {
-			logger.Info("waiting for postgres", "error", err)
-		}
-		select {
-		case <-startupCtx.Done():
-			db.Close()
-			cache.Close()
-			return nil, nil, fmt.Errorf("postgres startup timeout: %w", startupCtx.Err())
-		case <-time.After(time.Second):
-		}
-	}
-	cacheCtx, cancelCache := context.WithTimeout(ctx, time.Second)
-	cacheErr := cache.Ping(cacheCtx).Err()
-	cancelCache()
-	if cacheErr != nil {
-		logger.Warn("redis unavailable; continuing without cache", "error", cacheErr)
-	}
-	return db, cache, nil
-}
-
-func schemaReady(ctx context.Context, db *sql.DB) (bool, error) {
-	var ready bool
-	err := db.QueryRowContext(ctx, `
-		SELECT to_regclass('tcp_server_state') IS NOT NULL
-			AND to_regclass('tcp_server_assignment') IS NOT NULL
-			AND to_regclass('entity_state') IS NOT NULL
-			AND to_regprocedure('tcp_create_location()') IS NOT NULL
-			AND to_regprocedure('tcp_retire_location()') IS NOT NULL
-			AND to_regclass('client_state') IS NULL
-			AND to_regclass('client_operation') IS NULL
-			AND to_regprocedure('tcp_increment_client(text,text,text)') IS NULL`).Scan(&ready)
-	return ready, err
-}
-
-func waitForSchema(ctx context.Context, db *sql.DB) error {
-	waitCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
-	defer cancel()
-	for {
-		ready, err := schemaReady(waitCtx, db)
-		if err == nil && ready {
-			return nil
-		}
-		select {
-		case <-waitCtx.Done():
-			return fmt.Errorf("schema readiness timeout: %w", waitCtx.Err())
-		case <-time.After(time.Second):
-		}
-	}
-}
-
-func createSchema(ctx context.Context, db *sql.DB) error {
-	const schema = `
-		CREATE TABLE IF NOT EXISTS tcp_server_state (
-			server_id TEXT PRIMARY KEY,
-			location_id BIGINT NOT NULL UNIQUE,
-			latitude DOUBLE PRECISION NOT NULL DEFAULT 0,
-			longitude DOUBLE PRECISION NOT NULL DEFAULT 0,
-			enabled BOOLEAN NOT NULL DEFAULT TRUE,
-			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-		);
-		CREATE TABLE IF NOT EXISTS tcp_server_assignment (
-			server_id TEXT PRIMARY KEY REFERENCES tcp_server_state(server_id),
-			owner_instance_id TEXT,
-			generation BIGINT NOT NULL DEFAULT 0,
-			lease_until TIMESTAMPTZ
-		);
-		CREATE TABLE IF NOT EXISTS entity_state (
-			entity_uid TEXT PRIMARY KEY,
-			server_id TEXT NOT NULL REFERENCES tcp_server_state(server_id),
-			location_id BIGINT NOT NULL,
-			latitude DOUBLE PRECISION NOT NULL,
-			longitude DOUBLE PRECISION NOT NULL,
-			server_generation BIGINT NOT NULL,
-			entity_generation BIGINT NOT NULL DEFAULT 1,
-			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-		);
-		ALTER TABLE tcp_server_state DROP COLUMN IF EXISTS counter;
-		DROP FUNCTION IF EXISTS tcp_increment_client(TEXT, TEXT, TEXT);
-		DROP TABLE IF EXISTS client_operation;
-		DROP TABLE IF EXISTS client_state;
-		CREATE SEQUENCE IF NOT EXISTS tcp_location_id_seq;`
-	if _, err := db.ExecContext(ctx, schema); err != nil {
-		return fmt.Errorf("create schema: %w", err)
-	}
-	latitude, longitude, err := randomCoordinate()
-	if err != nil {
-		return fmt.Errorf("generate bootstrap location coordinates: %w", err)
-	}
-	if _, err := db.ExecContext(ctx, `
-		INSERT INTO tcp_server_state (server_id, location_id, latitude, longitude)
-		SELECT 'tcp-server-0', 1, $1::DOUBLE PRECISION, $2::DOUBLE PRECISION
-		WHERE NOT EXISTS (SELECT 1 FROM tcp_server_state)
-		ON CONFLICT DO NOTHING`,
-		latitude, longitude); err != nil {
-		return fmt.Errorf("seed locations: %w", err)
-	}
-	if _, err := db.ExecContext(ctx, `
-		INSERT INTO tcp_server_assignment (server_id)
-		SELECT server_id FROM tcp_server_state
-		ON CONFLICT (server_id) DO NOTHING`); err != nil {
-		return fmt.Errorf("seed assignments: %w", err)
-	}
-	if _, err := db.ExecContext(ctx, `
-		SELECT setval('tcp_location_id_seq',
-			GREATEST((SELECT last_value FROM tcp_location_id_seq),
-				(SELECT COALESCE(MAX(location_id), 1) FROM tcp_server_state)), true);
-		CREATE OR REPLACE FUNCTION tcp_create_location()
-		RETURNS TABLE(location_id BIGINT, latitude DOUBLE PRECISION, longitude DOUBLE PRECISION)
-		LANGUAGE plpgsql AS $$
-		DECLARE
-			new_id BIGINT;
-			new_latitude DOUBLE PRECISION;
-			new_longitude DOUBLE PRECISION;
-		BEGIN
-			new_latitude := (random() * 2 - 1) * 85.05112878;
-			new_longitude := random() * 360 - 180;
-			new_id := nextval('tcp_location_id_seq');
-			INSERT INTO tcp_server_state (server_id, location_id, latitude, longitude)
-			VALUES ('tcp-server-location-' || new_id, new_id, new_latitude, new_longitude);
-			INSERT INTO tcp_server_assignment (server_id)
-			VALUES ('tcp-server-location-' || new_id);
-			RETURN QUERY SELECT new_id, new_latitude, new_longitude;
-		END
-		$$;
-		CREATE OR REPLACE FUNCTION tcp_retire_location()
-		RETURNS TABLE(location_id BIGINT, server_id TEXT)
-		LANGUAGE plpgsql AS $$
-		DECLARE
-			retired_server_id TEXT;
-			retired_location_id BIGINT;
-		BEGIN
-			IF (SELECT COUNT(*) FROM tcp_server_state WHERE enabled) <= 1 THEN
-				RAISE EXCEPTION 'cannot retire the final location';
-			END IF;
-			SELECT state.server_id, state.location_id
-			INTO retired_server_id, retired_location_id
-			FROM tcp_server_state AS state
-			WHERE state.enabled
-			ORDER BY state.location_id DESC
-			FOR UPDATE LIMIT 1;
-			UPDATE tcp_server_state
-			SET enabled = FALSE, updated_at = NOW()
-			WHERE tcp_server_state.server_id = retired_server_id;
-			UPDATE tcp_server_assignment
-			SET owner_instance_id = NULL, lease_until = NULL, generation = generation + 1
-			WHERE tcp_server_assignment.server_id = retired_server_id;
-			RETURN QUERY SELECT retired_location_id, retired_server_id;
-		END
-		$$;`); err != nil {
-		return fmt.Errorf("create autoscaled location operation: %w", err)
-	}
-	return nil
 }
 
 func randomCoordinate() (float64, float64, error) {
@@ -712,60 +496,6 @@ func (s *server) manageAssignment(ctx context.Context, logger *slog.Logger) {
 	}
 }
 
-func (s *server) claim(ctx context.Context) (*assignment, error) {
-	const query = `
-		WITH candidate AS (
-			SELECT assignment.server_id FROM tcp_server_assignment AS assignment
-			JOIN tcp_server_state AS state USING (server_id)
-			WHERE state.enabled AND (assignment.owner_instance_id IS NULL OR assignment.lease_until < NOW())
-			ORDER BY assignment.server_id
-			FOR UPDATE SKIP LOCKED LIMIT 1
-		), claimed AS (
-			UPDATE tcp_server_assignment AS a
-			SET owner_instance_id = $1, generation = generation + 1,
-				lease_until = NOW() + ($2 * INTERVAL '1 second')
-			FROM candidate c WHERE a.server_id = c.server_id
-			RETURNING a.server_id, a.generation, a.lease_until
-		)
-		SELECT c.server_id, s.location_id, s.latitude, s.longitude,
-			c.generation, c.lease_until
-		FROM claimed c JOIN tcp_server_state s USING (server_id)`
-	claimed := &assignment{}
-	err := s.db.QueryRowContext(ctx, query, s.instanceID, s.leaseDuration.Seconds()).Scan(
-		&claimed.ServerID, &claimed.LocationID, &claimed.Latitude, &claimed.Longitude,
-		&claimed.Generation, &claimed.LeaseUntil,
-	)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil
-	}
-	return claimed, err
-}
-
-func (s *server) renew(ctx context.Context, current *assignment) (*assignment, error) {
-	const query = `
-		UPDATE tcp_server_assignment AS assignment
-		SET lease_until = NOW() + ($4 * INTERVAL '1 second')
-		FROM tcp_server_state AS state
-		WHERE assignment.server_id = $1 AND assignment.owner_instance_id = $2
-			AND assignment.generation = $3 AND state.server_id = assignment.server_id AND state.enabled
-		RETURNING assignment.lease_until`
-	renewed := *current
-	err := s.db.QueryRowContext(ctx, query, current.ServerID, s.instanceID, current.Generation, s.leaseDuration.Seconds()).Scan(&renewed.LeaseUntil)
-	return &renewed, err
-}
-
-func (s *server) release(ctx context.Context) {
-	current := s.currentAssignment()
-	if current == nil {
-		return
-	}
-	_, _ = s.db.ExecContext(ctx, `
-		UPDATE tcp_server_assignment SET owner_instance_id = NULL, lease_until = NULL
-		WHERE server_id = $1 AND owner_instance_id = $2 AND generation = $3`,
-		current.ServerID, s.instanceID, current.Generation,
-	)
-}
-
 func (s *server) heartbeat(ctx context.Context, logger *slog.Logger) {
 	ticker := time.NewTicker(3 * time.Second)
 	defer ticker.Stop()
@@ -782,10 +512,10 @@ func (s *server) heartbeat(ctx context.Context, logger *slog.Logger) {
 		}
 		body, _ := json.Marshal(value)
 		cacheCtx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
-		err := s.redis.Set(cacheCtx, s.presenceKey(), body, 10*time.Second).Err()
+		err := s.valkey.Set(cacheCtx, s.presenceKey(), body, 10*time.Second).Err()
 		cancel()
 		if err != nil && ctx.Err() == nil {
-			logger.Warn("refresh redis presence", "instance", s.podName, "error", err)
+			logger.Warn("refresh valkey presence", "instance", s.podName, "error", err)
 		}
 		select {
 		case <-ctx.Done():
@@ -918,7 +648,7 @@ func (s *server) handleConnection(ctx context.Context, conn net.Conn, logger *sl
 func (s *server) handleInputCommand(ctx context.Context, writer *bufio.Writer, bound *assignment, intent inputIntent, logger *slog.Logger) bool {
 	created, err := s.ensureEntity(ctx, intent.ClientUID)
 	if err != nil {
-		s.writeDatabaseError(writer, logger, err)
+		s.writeStateError(writer, logger, err)
 		return true
 	}
 	command := inputCommand{
@@ -938,12 +668,18 @@ func (s *server) handleInputCommand(ctx context.Context, writer *bufio.Writer, b
 	select {
 	case result := <-command.result:
 		if result.err != nil {
-			s.writeDatabaseError(writer, logger, result.err)
+			s.writeStateError(writer, logger, result.err)
 			return true
 		}
 		if result.claim {
 			if err := s.storeEntityClaim(ctx, bound, intent.ClientUID, result.latitude, result.longitude); err != nil {
-				s.writeDatabaseError(writer, logger, err)
+				s.writeStateError(writer, logger, err)
+				return true
+			}
+		}
+		if result.reroute != 0 {
+			if err := s.prepareEntityHandoff(ctx, bound, intent.ClientUID, result.reroute, result.latitude, result.longitude); err != nil {
+				s.writeStateError(writer, logger, err)
 				return true
 			}
 		}
@@ -951,42 +687,6 @@ func (s *server) handleInputCommand(ctx context.Context, writer *bufio.Writer, b
 	case <-ctx.Done():
 		return false
 	}
-}
-
-func (s *server) storeEntityClaim(ctx context.Context, current *assignment, entityUID string, latitude, longitude float64) error {
-	queryCtx, cancel := context.WithTimeout(ctx, time.Second)
-	defer cancel()
-	result, err := s.db.ExecContext(queryCtx, `
-		INSERT INTO entity_state (
-			entity_uid, server_id, location_id, latitude, longitude, server_generation
-		)
-		SELECT $1, assignment.server_id, state.location_id, $2, $3, assignment.generation
-		FROM tcp_server_assignment AS assignment
-		JOIN tcp_server_state AS state USING (server_id)
-		WHERE assignment.server_id = $4
-			AND assignment.owner_instance_id = $5
-			AND assignment.generation = $6
-			AND assignment.lease_until > NOW()
-		ON CONFLICT (entity_uid) DO UPDATE SET
-			server_id = EXCLUDED.server_id,
-			location_id = EXCLUDED.location_id,
-			latitude = EXCLUDED.latitude,
-			longitude = EXCLUDED.longitude,
-			server_generation = EXCLUDED.server_generation,
-			entity_generation = entity_state.entity_generation + 1,
-			updated_at = NOW()`,
-		entityUID, latitude, longitude, current.ServerID, s.instanceID, current.Generation)
-	if err != nil {
-		return err
-	}
-	rows, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if rows != 1 {
-		return errors.New("server lost ownership before entity claim")
-	}
-	return nil
 }
 
 func parseTeleport(message string) (inputIntent, bool, error) {
@@ -1091,9 +791,9 @@ func (s *server) writeResponse(writer *bufio.Writer, current *assignment, messag
 	return writer.Flush() == nil
 }
 
-func (s *server) writeDatabaseError(writer *bufio.Writer, logger *slog.Logger, err error) {
-	logger.Error("database operation", "instance", s.podName, "error", err)
-	_, _ = fmt.Fprintln(writer, `{"error":"database operation failed"}`)
+func (s *server) writeStateError(writer *bufio.Writer, logger *slog.Logger, err error) {
+	logger.Error("authoritative state operation", "instance", s.podName, "error", err)
+	_, _ = fmt.Fprintln(writer, `{"error":"authoritative state operation failed"}`)
 	_ = writer.Flush()
 }
 

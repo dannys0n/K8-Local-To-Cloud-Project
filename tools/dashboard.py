@@ -19,8 +19,7 @@ except ModuleNotFoundError:
 NAMESPACE = "tcp-lab"
 LABEL = "app=gateway"
 DATA_SERVICES = {
-    "postgres": ("PostgreSQL", "postgres:5432"),
-    "redis": ("Redis", "redis:6379"),
+    "valkey": ("Valkey Cluster", "valkey:6379"),
 }
 INFRASTRUCTURE_CACHE = {"data": None, "error": ""}
 INFRASTRUCTURE_REFRESH = {"seconds": 2.0}
@@ -197,7 +196,7 @@ def list_server_pods(node_statuses: dict[str, str]) -> list[dict[str, str]]:
 def list_data_services() -> list[dict]:
     raw = run(
         "kubectl", "get", "pods", "-n", NAMESPACE,
-        "-l", "app in (postgres,redis)", "-o", "json",
+        "-l", "app=valkey", "-o", "json",
     )
     result = []
     for item in json.loads(raw).get("items", []):

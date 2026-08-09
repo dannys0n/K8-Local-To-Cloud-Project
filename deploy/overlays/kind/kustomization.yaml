@@ -2,11 +2,10 @@ apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
   - ../../base
-  - database-secret.yaml
-  - postgres-service.yaml
-  - postgres-statefulset.yaml
-  - redis-service.yaml
-  - redis-deployment.yaml
+  - valkey-secret.yaml
+  - valkey-service.yaml
+  - valkey-statefulset.yaml
+  - valkey-cluster-job.yaml
 patches:
   - path: gateway-nodeport-patch.yaml
   - path: stats-nodeport-patch.yaml

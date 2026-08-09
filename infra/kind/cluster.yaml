@@ -32,21 +32,14 @@ nodes:
         listenAddress: "127.0.0.1"
         protocol: TCP
   - role: worker
-    kubeadmConfigPatches:
-      - |
-        kind: JoinConfiguration
-        nodeRegistration:
-          kubeletExtraArgs:
-            node-labels: "tcp-lab.io/database=true"
-            register-with-taints: "tcp-lab.io/database=true:NoSchedule"
-            housekeeping-interval: "1s"
-  - role: worker
     kubeadmConfigPatches: &fastKubelet
       - |
         kind: JoinConfiguration
         nodeRegistration:
           kubeletExtraArgs:
             housekeeping-interval: "1s"
+  - role: worker
+    kubeadmConfigPatches: *fastKubelet
   - role: worker
     kubeadmConfigPatches: *fastKubelet
   - role: worker

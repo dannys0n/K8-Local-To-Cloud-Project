@@ -61,16 +61,29 @@ spec:
               value: "3s"
             - name: ASSIGNMENT_RENEW_INTERVAL
               value: "500ms"
-            - name: POSTGRES_DSN
+            - name: VALKEY_ADDRS
               valueFrom:
                 secretKeyRef:
-                  name: tcp-server-databases
-                  key: postgres-dsn
-            - name: REDIS_ADDR
+                  name: tcp-server-valkey
+                  key: addresses
+            - name: VALKEY_USERNAME
               valueFrom:
                 secretKeyRef:
-                  name: tcp-server-databases
-                  key: redis-addr
+                  name: tcp-server-valkey
+                  key: username
+                  optional: true
+            - name: VALKEY_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: tcp-server-valkey
+                  key: password
+                  optional: true
+            - name: VALKEY_TLS
+              valueFrom:
+                secretKeyRef:
+                  name: tcp-server-valkey
+                  key: tls
+                  optional: true
           ports:
             - name: tcp
               containerPort: 7000

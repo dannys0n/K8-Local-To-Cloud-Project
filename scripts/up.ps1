@@ -5,6 +5,7 @@ $ServerImage = "simple-tcp-server:dev"
 $GatewayImage = "tcp-gateway:dev"
 $AutoscalerImage = "tcp-server-autoscaler:dev"
 $LoadgenImage = "tcp-loadgen:dev"
+$ValkeyImage = "valkey/valkey:8.1-alpine"
 
 foreach ($Command in @("docker", "kind", "kubectl")) {
     if (-not (Get-Command $Command -ErrorAction SilentlyContinue)) {
@@ -26,17 +27,13 @@ try {
         Write-Host "kind cluster '$Cluster' already exists."
     }
 
-    $DatabaseNode = "$Cluster-worker"
-    $ExistingDatabaseNodes = @(
-        (kubectl get nodes -l tcp-lab.io/database=true -o jsonpath='{.items[*].metadata.name}') -split '\s+' |
-            Where-Object { $_ }
-    )
-    if ($ExistingDatabaseNodes | Where-Object { $_ -ne $DatabaseNode }) {
-        throw "Database node placement changed. Recreate the kind cluster before running up.ps1 so the node-local PostgreSQL volume is not stranded."
+    foreach ($NodeResource in @(kubectl get nodes -l tcp-lab.io/database=true -o name)) {
+        $NodeName = $NodeResource -replace '^node/', ''
+        if (-not [string]::IsNullOrWhiteSpace($NodeName)) {
+            kubectl taint node $NodeName tcp-lab.io/database- 2>$null
+            kubectl label node $NodeName tcp-lab.io/database- 2>$null
+        }
     }
-    Write-Host "Labeling and tainting kind database node '$DatabaseNode'..."
-    kubectl label node $DatabaseNode tcp-lab.io/database=true --overwrite
-    kubectl taint node $DatabaseNode tcp-lab.io/database=true:NoSchedule --overwrite
 
     Write-Host "Building application and load-generator images..."
     docker build -t $ServerImage app/server
@@ -44,18 +41,20 @@ try {
     docker build --provenance=false -t $AutoscalerImage infra/autoscaler
     docker build -t $LoadgenImage tools/loadgen
     docker build --provenance=false -t prom/prometheus:v3.13.1 infra/autoscaler/prometheus
+    docker build --provenance=false -t $ValkeyImage infra/valkey
 
     Write-Host "Loading image into kind..."
-    kind load docker-image $ServerImage $GatewayImage $AutoscalerImage prom/prometheus:v3.13.1 --name $Cluster
+    kind load docker-image $ServerImage $GatewayImage $AutoscalerImage prom/prometheus:v3.13.1 $ValkeyImage --name $Cluster
 
     Write-Host "Installing autoscaling dependencies..."
     & "$Root/infra/autoscaler/install-kind.ps1"
 
     Write-Host "Applying Kubernetes resources..."
     kubectl apply -f deploy/base/namespace.yaml
-    kubectl delete job/tcp-server-schema -n tcp-lab --ignore-not-found
+    kubectl delete job/valkey-cluster-init -n tcp-lab --ignore-not-found
     kubectl apply -k deploy/overlays/kind
-    kubectl wait --for=condition=Complete job/tcp-server-schema -n tcp-lab --timeout=180s
+    kubectl rollout status statefulset/valkey -n tcp-lab --timeout=180s
+    kubectl wait --for=condition=Complete job/valkey-cluster-init -n tcp-lab --timeout=180s
     kubectl rollout restart deployment/tcp-server -n tcp-lab
     kubectl rollout restart deployment/gateway -n tcp-lab
 

@@ -5,20 +5,39 @@ The local lab is fully runnable. The EKS overlay assumes an existing EKS cluster
 - AWS Load Balancer Controller installed.
 - Worker capacity across multiple Availability Zones.
 - The server and gateway images pushed to ECR.
-- Managed PostgreSQL and Redis-compatible endpoints available to the cluster.
+- A managed Valkey-compatible cluster-mode endpoint available to the cluster.
 - The repository's minimal Prometheus deployment installed.
-- A `tcp-server-databases` Secret containing `postgres-dsn` and `redis-addr`.
+- A `tcp-server-valkey` Secret containing comma-separated seed `addresses`.
 
 Before applying:
 
 1. Replace the example ECR repository in `deploy/overlays/eks/kustomization.yaml`.
 2. Build and push `app/server`, `app/gateway`, and `infra/autoscaler` to their
    ECR repositories.
-3. Create the database Secret from your AWS-integrated secret workflow; do not
+3. Create the Valkey Secret from your AWS-integrated secret workflow; do not
    copy the kind development credentials.
 4. Confirm the NLB annotations match your controller version and security requirements.
 5. Apply with `kubectl apply -k deploy/overlays/eks`.
 6. Read the external endpoint with `kubectl get service gateway -n tcp-lab`.
+
+The resulting Secret contract is:
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: tcp-server-valkey
+  namespace: tcp-lab
+stringData:
+  addresses: valkey-seed.example.internal:6379
+  username: application-user
+  password: replace-through-your-secret-workflow
+  tls: "true"
+```
+
+`username`, `password`, and `tls` are optional so the same base manifests work
+with the unauthenticated kind cluster. Rolling the server and server-autoscaler
+Deployments reloads rotated credentials.
 
 Install the pinned autoscaling prerequisites before applying the overlay:
 
@@ -28,7 +47,7 @@ kubectl apply -k infra/autoscaler/prometheus
 kubectl rollout status deployment/prometheus -n tcp-lab --timeout=180s
 ```
 
-Prometheus reads kubelet cAdvisor CPU through the Kubernetes node proxy and is
+Prometheus reads the kubelet's compact resource metrics through the Kubernetes node proxy and is
 not exposed outside the cluster. The EKS overlay maps `tcp-server-autoscaler` to its own ECR
 repository alongside the server and gateway images.
 The two scaler processes are ordinary one-replica Deployments, so a ReplicaSet
@@ -51,7 +70,7 @@ Then open `http://127.0.0.1:8404/`.
 The NLB Service publishes port `9000`. Location-aware clients begin with the
 small lab `@location` handshake. The gateway resolves it to the active location
 owner and can change downstream servers while preserving the client connection.
-PostgreSQL leases assign each identity to one server pod and fence stale owners
+Valkey leases assign each identity to one server pod and fence stale owners
 with a monotonically increasing generation.
 
 The NLB registers gateway pod IPs directly and performs TCP health checks on the
@@ -72,9 +91,9 @@ repair enabled and install the EKS node monitoring agent; keep enough existing
 worker capacity for replacement pods because launching a new EC2 node is not a
 realtime recovery path.
 
-## Database availability
+## Valkey availability
 
-Server pods are diskless. PostgreSQL is authoritative for durable server state;
-Redis is disposable and non-authoritative. The EKS overlay does not deploy
-either database. Production should use managed, private, Multi-AZ services with
-TLS, credential rotation, backups, and appropriate network policies.
+Server pods are diskless. Valkey is authoritative for location and entity
+recovery state. The EKS overlay does not deploy it. Use a managed, private,
+Multi-AZ cluster-mode service with persistence, backups, TLS, credential
+rotation, and appropriate network policies.

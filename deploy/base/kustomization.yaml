@@ -4,7 +4,6 @@ resources:
   - namespace.yaml
   - server-service.yaml
   - server-discovery-service.yaml
-  - server-schema-job.yaml
   - server-deployment.yaml
   - autoscaler-rbac.yaml
   - server-autoscaler.yaml

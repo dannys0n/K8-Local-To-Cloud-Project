@@ -57,14 +57,14 @@ clients and the public EKS load balancer.
 Other connected clients on the same authoritative server are shown as cyan map
 pins when they fall within the existing spatial relevance radius. Normal input
 responses carry this local view directly from in-memory server state; servers do
-not exchange entity visibility through Redis. Client markers turn gray after
+not exchange entity visibility through Valkey. Client markers turn gray after
 one second without an observation and disappear after five seconds. Visibility
 is never used for connection truth, entity authority, or recovery.
 
 The Data services table uses Kubernetes pod status to show the in-cluster
-PostgreSQL and Redis instances, their worker placement, pod IPs, stable Service
-endpoints, restart counts, and readiness. It does not inspect database contents
-or credentials. Managed EKS databases run outside the cluster and therefore do
+Valkey instances, their worker placement, pod IPs, stable Service
+endpoints, restart counts, and readiness. It does not inspect Valkey contents
+or credentials. Managed EKS data services run outside the cluster and therefore do
 not appear in this local infrastructure table.
 
 The client address represents the network connection seen by the gateway. Once

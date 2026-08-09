@@ -29,16 +29,17 @@ counts. Every gateway discovers server endpoints through the headless Service DN
 
 1. Start `tools/client.ps1`, then click near New York on the browser map.
 2. Note the numeric location ID, logical server, and client coordinate.
-3. Find the physical owner and generation in PostgreSQL:
+3. Find the physical owner and generation in Valkey:
 
    ```bash
-   kubectl exec -n tcp-lab postgres-0 -- psql -U tcp_lab -d tcp_lab -c "select * from tcp_server_assignment order by server_id"
+   kubectl exec -n tcp-lab valkey-0 -- valkey-cli -c ZRANGE tcp-lab:locations 0 -1
+   kubectl exec -n tcp-lab valkey-0 -- valkey-cli -c HGETALL 'tcp-lab:location:{<id>}'
    ```
 
 4. Delete the owner pod while leaving the client open.
 5. Move again. The gateway retains the client connection, discovers the
    replacement, and the new server restores the last claimed coordinate from
-   PostgreSQL.
+   Valkey.
 6. Confirm a cold replacement owns the same logical server and its generation
    increased.
 
@@ -46,13 +47,13 @@ The server-side TCP socket cannot survive a pod failure, but the client-to-gatew
 socket remains open. Movement since the last server claim is transient and is
 intentionally not recovered after a server failure.
 
-The default ownership lease is 1.5 seconds and renews every 250ms. Gateways
+The default ownership lease is three seconds and renews every 500ms. Gateways
 discover eligible backends every 200ms, with a separate 500ms discovery timeout,
 and re-resolve immediately after an error.
 The expected application-level handoff is therefore a few seconds and does not
 wait for Kubernetes to declare the worker `NotReady`. The generation change is
-the safety boundary: database writes from the former owner no longer match the
-authoritative assignment row.
+the safety boundary: state operations from the former owner no longer match the
+authoritative Valkey record.
 
 ## Worker failure
 
@@ -69,9 +70,9 @@ Observe which pods reschedule:
 kubectl get pods -n tcp-lab -o wide -w
 ```
 
-Server pods are diskless and can reschedule on another worker. Local kind still
-uses a node-local PVC for PostgreSQL, so losing the PostgreSQL worker can leave
-the database unavailable until that worker returns.
+Server pods are diskless and can reschedule on another worker. Valkey primaries
+and replicas are spread across workers; losing one worker should promote a
+surviving replica while the failed pod's local PVC remains attached to its node.
 
 For an abrupt hardware-style failure, use `docker kill` instead of draining the
 node. Fresh kind clusters use one-second kubelet status updates and a five-second
@@ -96,19 +97,15 @@ After every general worker is `Ready`, restore the warm per-node distribution:
 kubectl rollout restart deployment/tcp-server deployment/gateway -n tcp-lab
 ```
 
-## Database restarts
+## Valkey failover
 
-Restart Redis and confirm its expiring presence keys repopulate:
-
-```bash
-kubectl delete pod -n tcp-lab -l app=redis
-kubectl exec -n tcp-lab deployment/redis -- redis-cli --scan --pattern 'tcp-lab:*'
-```
-
-Restart PostgreSQL and confirm location ownership and entity claims remain on
-its single kind PVC:
+Inspect cluster ownership, delete one primary, and confirm its replica promotes:
 
 ```bash
-kubectl delete pod -n tcp-lab postgres-0
-kubectl wait --for=condition=Ready pod/postgres-0 -n tcp-lab --timeout=180s
+kubectl exec -n tcp-lab valkey-0 -- valkey-cli cluster nodes
+kubectl delete pod -n tcp-lab <one-primary-valkey-pod>
+kubectl exec -n tcp-lab valkey-0 -- valkey-cli cluster info
 ```
+
+The cluster should return to `cluster_state:ok`; location and entity keys remain
+available, and clients reconnect through the normal gateway/server paths.

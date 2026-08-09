@@ -10,4 +10,5 @@ function Invoke-Kubectl {
 
 Invoke-Kubectl apply -f "$Root/deploy/base/namespace.yaml"
 Invoke-Kubectl apply -k "$Root/infra/autoscaler/prometheus"
+Invoke-Kubectl rollout restart deployment/prometheus -n tcp-lab
 Invoke-Kubectl rollout status deployment/prometheus -n tcp-lab --timeout=180s

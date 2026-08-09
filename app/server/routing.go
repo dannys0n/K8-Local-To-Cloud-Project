@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/redis/go-redis/v9"
 )
 
 type routeRecord struct {
@@ -33,7 +35,7 @@ func (s *server) publishRoute(ctx context.Context, current *assignment) error {
 	}
 	cacheCtx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
 	defer cancel()
-	return s.redis.Set(cacheCtx, routeKey(current.LocationID), body, 2*s.renewInterval).Err()
+	return s.valkey.Set(cacheCtx, routeKey(current.LocationID), body, 2*s.renewInterval).Err()
 }
 
 func (s *server) resolveRoute(ctx context.Context, requested string) (routeRecord, error) {
@@ -50,7 +52,7 @@ func (s *server) resolveRoute(ctx context.Context, requested string) (routeRecor
 	}
 	cacheCtx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
 	defer cancel()
-	body, err := s.redis.Get(cacheCtx, routeKey(locationID)).Bytes()
+	body, err := s.valkey.Get(cacheCtx, routeKey(locationID)).Bytes()
 	if err != nil {
 		return routeRecord{}, errors.New("route unavailable")
 	}
@@ -71,14 +73,20 @@ func (s *server) resolveRoutes(ctx context.Context) ([]routeRecord, error) {
 	}
 	cacheCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
 	defer cancel()
-	values, err := s.redis.MGet(cacheCtx, keys...).Result()
-	if err != nil {
+	commands := make([]*redis.StringCmd, len(keys))
+	_, err := s.valkey.Pipelined(cacheCtx, func(pipe redis.Pipeliner) error {
+		for index, key := range keys {
+			commands[index] = pipe.Get(cacheCtx, key)
+		}
+		return nil
+	})
+	if err != nil && !errors.Is(err, redis.Nil) {
 		return nil, err
 	}
-	routes := make([]routeRecord, 0, len(values))
-	for index, value := range values {
-		text, ok := value.(string)
-		if !ok {
+	routes := make([]routeRecord, 0, len(commands))
+	for index, command := range commands {
+		text, commandErr := command.Result()
+		if commandErr != nil {
 			continue
 		}
 		route, err := decodeRoute([]byte(text), locationIDs[index])
@@ -88,24 +96,6 @@ func (s *server) resolveRoutes(ctx context.Context) ([]routeRecord, error) {
 	}
 	sort.Slice(routes, func(i, j int) bool { return routes[i].LocationID < routes[j].LocationID })
 	return routes, nil
-}
-
-func (s *server) refreshRoutableTopology(ctx context.Context) error {
-	routes, err := s.resolveRoutes(ctx)
-	if err != nil {
-		return err
-	}
-	routable := make([]locationDefinition, 0, len(routes))
-	for _, route := range routes {
-		routable = append(routable, locationDefinition{
-			serverID: route.Server, locationID: route.LocationID,
-			latitude: route.Latitude, longitude: route.Longitude, generation: route.Generation,
-		})
-	}
-	s.topologyMu.Lock()
-	s.routable = routable
-	s.topologyMu.Unlock()
-	return nil
 }
 
 func (s *server) nearestRoute(ctx context.Context, latitude, longitude float64, excludedLocation int64) (routeRecord, error) {
@@ -166,6 +156,9 @@ func decodeRoute(body []byte, expectedLocation int64) (routeRecord, error) {
 	return route, nil
 }
 
-func routeKey(locationID int64) string { return routePrefix + strconv.FormatInt(locationID, 10) }
+func routeKey(locationID int64) string {
+	id := strconv.FormatInt(locationID, 10)
+	return routePrefix + "{" + id + "}"
+}
 
 const routePrefix = "tcp-lab:route:"
