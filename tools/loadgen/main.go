@@ -143,7 +143,7 @@ func (c *client) run(ctx context.Context, rng *mathrand.Rand) {
 		if c.state != 2 {
 			if !started.Before(nextReconnect) {
 				_ = c.connect()
-				nextReconnect = time.Now().Add(750*time.Millisecond + time.Duration(rng.Float64()*float64(500*time.Millisecond)))
+				nextReconnect = time.Now().Add(100 * time.Millisecond)
 			}
 		} else {
 			if !started.Before(nextDirection) {

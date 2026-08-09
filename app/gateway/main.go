@@ -276,26 +276,31 @@ func (g *gateway) handleClient(ctx context.Context, client net.Conn) {
 			continue
 		}
 		if err != nil || !valid || backendOwnershipLost(state.Error) {
+			recoveryCtx, cancelRecovery := context.WithTimeout(ctx, g.backendTimeout)
 			failedLocation := downstream.info.LocationID
 			downstream.conn.Close()
 			downstream = nil
 			g.setSessionStatus(id, "gateway")
-			nearest, routeErr := g.nearestRoute(ctx, clientLatitude, clientLongitude, failedLocation)
+			nearest, routeErr := g.nearestRoute(recoveryCtx, clientLatitude, clientLongitude, failedLocation)
 			if routeErr != nil {
+				cancelRecovery()
 				writeJSONError(clientWriter, "server temporarily unavailable")
 				continue
 			}
-			candidate, _, routeErr := g.connectBackend(nearest)
+			deadline, _ := recoveryCtx.Deadline()
+			candidate, _, routeErr := g.connectBackendUntil(nearest, deadline)
 			if routeErr != nil {
+				cancelRecovery()
 				writeJSONError(clientWriter, "server temporarily unavailable")
 				continue
 			}
 			if clientUID != "" {
 				resume := fmt.Sprintf("@resume %s %d %.8f %.8f", clientUID, inputSequence, clientLatitude, clientLongitude)
-				resumed, resumeErr := g.exchange(candidate, resume)
+				resumed, resumeErr := g.exchangeUntil(candidate, resume, deadline)
 				resumedState, resumeValid := decodeBackendResponse(resumed)
 				if resumeErr != nil || !resumeValid || resumedState.Error != "" {
 					candidate.conn.Close()
+					cancelRecovery()
 					writeJSONError(clientWriter, "server temporarily unavailable")
 					continue
 				}
@@ -303,8 +308,9 @@ func (g *gateway) handleClient(ctx context.Context, client net.Conn) {
 			downstream = candidate
 			requested = strconv.FormatInt(candidate.info.LocationID, 10)
 			g.updateSession(id, client.RemoteAddr().String(), candidate.info, clientLatitude, clientLongitude)
-			response, err = g.exchange(downstream, message)
+			response, err = g.exchangeUntil(downstream, message, deadline)
 			state, valid = decodeBackendResponse(response)
+			cancelRecovery()
 		}
 		if err != nil || !valid || state.Error != "" {
 			if downstream != nil {
@@ -383,7 +389,11 @@ func (g *gateway) openRoute(ctx context.Context, requested string) (*backendConn
 }
 
 func (g *gateway) exchange(connection *backendConnection, message string) ([]byte, error) {
-	_ = connection.conn.SetDeadline(time.Now().Add(g.backendTimeout))
+	return g.exchangeUntil(connection, message, time.Now().Add(g.backendTimeout))
+}
+
+func (g *gateway) exchangeUntil(connection *backendConnection, message string, deadline time.Time) ([]byte, error) {
+	_ = connection.conn.SetDeadline(deadline)
 	if _, err := connection.writer.WriteString(message + "\n"); err != nil {
 		return nil, err
 	}
@@ -394,12 +404,20 @@ func (g *gateway) exchange(connection *backendConnection, message string) ([]byt
 }
 
 func (g *gateway) connectBackend(info backend) (*backendConnection, []byte, error) {
-	conn, err := net.DialTimeout("tcp", info.Address, g.backendTimeout)
+	return g.connectBackendUntil(info, time.Now().Add(g.backendTimeout))
+}
+
+func (g *gateway) connectBackendUntil(info backend, deadline time.Time) (*backendConnection, []byte, error) {
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		return nil, nil, os.ErrDeadlineExceeded
+	}
+	conn, err := net.DialTimeout("tcp", info.Address, remaining)
 	if err != nil {
 		return nil, nil, err
 	}
 	connection := &backendConnection{info: info, conn: conn, reader: bufio.NewReader(conn), writer: bufio.NewWriter(conn)}
-	hello, err := g.exchange(connection, "@location "+strconv.FormatInt(info.LocationID, 10))
+	hello, err := g.exchangeUntil(connection, "@location "+strconv.FormatInt(info.LocationID, 10), deadline)
 	if err != nil {
 		conn.Close()
 		return nil, nil, err
