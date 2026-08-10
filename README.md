@@ -37,12 +37,13 @@ through AWS tooling and then uses the EKS overlay to deploy the same base.
   of one. A fresh Valkey cluster seeds one logical location owned by that initial
   replica. Each active process runs a 20 Hz
   authoritative simulation clock and includes its current tick in responses.
-- **Valkey Cluster:** three persistent primaries and three replicas in kind;
-  authoritative location identity, leases, routes, entity recovery state, and
-  fencing generations are distributed by hash slot.
-- **CPU autoscaling:** minimal Prometheus CPU collection plus two replaceable scaler
-  Deployments. Prometheus supplies per-pod CPU directly to the independent server
-  and gateway policies.
+- **Valkey Cluster:** an operator-managed kind cluster starting with three
+  persistent primaries and one replica per primary. Authoritative location
+  identity, leases, routes, entity recovery state, and fencing generations are
+  distributed by hash slot.
+- **CPU autoscaling:** minimal Prometheus CPU collection plus replaceable gateway,
+  server, and kind-only Valkey shard scalers. Prometheus supplies per-pod CPU
+  directly to each independent policy.
 - **Client entry:** `127.0.0.1:9000`; the browser map keeps one TCP connection
   through its local bridge. The EKS overlay uses an AWS NLB.
 - **Manifest management:** a shared Kustomize base plus kind and EKS overlays.
@@ -89,11 +90,12 @@ The server autoscaler creates or retires Valkey location records after it change
 the Deployment replica count. Pod replacement does not change that count, so a
 replacement claims the existing location with a higher generation.
 
-Prometheus scrapes the kubelet's compact resource endpoint and retains only the server and
-gateway container CPU series in this namespace. Each scaler converts the CPU
-rate to utilization relative to the container's 250 millicore request. The workloads have no CPU limit, so they
-can still burst when node capacity is available. The evaluator examines every
-ready pod independently and calculates aggregate capacity at the 80% target.
+Prometheus scrapes the kubelet's compact resource endpoint and retains only the
+resource series needed by this namespace. The gateway and server scalers convert CPU
+rate to utilization relative to each workload's 250 millicore request. The
+workloads have no CPU limit, so they can still burst when node capacity is
+available. Desired replicas are calculated from aggregate CPU capacity at an
+80% target; client count alone does not trigger scaling.
 After Kubernetes accepts a server scale, the server scaler aligns the enabled
 location count with the requested replicas; gateway scaling has no database
 operation. New generic server pods claim locations through the Valkey
@@ -103,12 +105,12 @@ configuration, stopping at 500 replicas. The kind cluster also lowers kubelet's
 cAdvisor housekeeping interval to one second, allowing Prometheus's one-second
 scrapes to calculate CPU over a four-second rate window. The base uses a
 30-second window for nodes retaining kubelet's normal ten-second housekeeping.
-Missing metrics stop an evaluation;
-they never trigger speculative scaling or scale-down. Scale-down begins only
-after the complete replica sample set averages at or below 20% for 20 evaluations,
-calculates aggregate required capacity, and retires the same number of locations
-as removed replicas. The base limits one change or 25% per evaluation. The kind overlay uses
-the same 20% threshold with one evaluation and the larger of four pods or 100%.
+Missing metrics stop an evaluation; they never trigger speculative scaling or
+scale-down. Scale-down begins only after the complete replica sample set
+averages at or below 20% for 20 base evaluations, calculates aggregate required
+capacity, and retires the same number of locations as removed replicas. The base
+limits one change or 25% per evaluation. The kind overlay uses the same 20%
+threshold with two evaluations and the larger of four pods or 100%.
 The server scaler also reconciles locations on startup, repairing interruption
 between the Kubernetes and Valkey operations. The workload Deployment manifests intentionally
 omits `spec.replicas`; the autoscaler owns that field and enforces a minimum of
@@ -116,7 +118,18 @@ one, preventing later Kustomize applies from resetting a scaled Deployment.
 
 The kind startup scripts install the minimal Prometheus deployment and preload its
 image across workers. The independent scaler Deployments query Prometheus directly;
-no custom autoscaler operator, metrics adapter, or aggregated metrics API is installed.
+no custom metrics adapter or aggregated metrics API is installed. The kind
+Valkey data plane uses the standard Valkey operator for cluster reconciliation;
+the small lab scaler only changes its requested shard count.
+
+The kind Valkey scaler evaluates primary CPU every second over a four-second
+rate window. It starts at three shards, scales out at a 70% target, and
+considers scale-in below 52.5% after two complete samples. Scale-out is
+proportional with a minimum 50% increase; scale-in removes one shard at a time
+and waits for operator reconciliation. The range is three to 100 shards, with
+one replica per primary. Missing primary metrics pause the decision rather than
+being interpreted as idle capacity. EKS uses an external managed Valkey service
+instead of this kind-only policy.
 
 `tools/client.py` asks the operating system for a free local port, prints the
 resulting URL, and opens it in the default browser. It keeps a stable client UID
@@ -138,7 +151,7 @@ individually or together. Their cyan pins become stale after one second without
 an observation and disappear after five seconds; abandoned in-memory server
 entities are removed after 30 seconds.
 When routing is unavailable, bots pause application commands and retry their
-existing reconnect/resume path with 0.75–1.25 seconds of per-bot jitter. The UI
+existing reconnect/resume path with 0.75-1.25 seconds of per-bot jitter. The UI
 reports ready, gateway-only, and disconnected bots separately instead of treating
 every allocated bot process as connected. Each dummy runs in its own spawned
 Python process rather than sharing the dashboard interpreter.
@@ -177,9 +190,8 @@ routing hint. The logical server identity and last entity claim remain in
 Valkey when a pod is replaced. Movement after that claim remains transient.
 An expired 1.5-second lease is claimed by a cold replacement pod;
 the generation increases to fence the old owner. Valkey presence keys expire and
-repopulate automatically. Generic test messages remain at-least-once, while
-Without a location handshake, port 9000 remains the
-original round-robin endpoint.
+repopulate automatically. Generic test messages remain at-least-once. Without a
+location handshake, port 9000 remains the original round-robin endpoint.
 
 Use the map's reconnect button to replace the gateway connection while retaining
 the selected coordinate. Use the aggregate dashboard to see the gateway and
@@ -212,7 +224,10 @@ Then visit `http://127.0.0.1:3000/d/tcp-lab-live`. Grafana is the read-only
 operational dashboard for resource capacity, traffic, sessions, routing events,
 server ticks, and pod health. It is anonymous in kind and reachable only through
 this explicit port-forward. When `tools/dashboard.py` is also running, its
-interactive map and controls appear at the top of the Grafana dashboard.
+interactive map and controls appear at the top of the Grafana dashboard. Current
+capacity tables keep their columns stable and show unavailable metrics as `N/A`;
+deleted pods leave the current tables while their samples remain available in
+historical graphs until Prometheus retention expires.
 
 Inspect the cluster:
 
