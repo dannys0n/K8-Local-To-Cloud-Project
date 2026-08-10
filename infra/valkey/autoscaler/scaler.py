@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Kind-only Valkey shard and replica autoscaler."""
+"""Kind-only Valkey primary-shard autoscaler."""
 
 import json
 import math
@@ -25,15 +25,11 @@ class ClusterScaler:
         self.cpu_request = float(os.getenv("CPU_REQUEST_MILLICORES", "50"))
         self.primary_up = float(os.getenv("PRIMARY_SCALE_UP_PERCENT", "70"))
         self.primary_down = float(os.getenv("PRIMARY_SCALE_DOWN_PERCENT", "20"))
-        self.replica_up = float(os.getenv("REPLICA_SCALE_UP_PERCENT", "70"))
-        self.replica_down = float(os.getenv("REPLICA_SCALE_DOWN_PERCENT", "20"))
         self.required_breaches = int(os.getenv("REQUIRED_BREACHES", "2"))
         self.interval = float(os.getenv("EVALUATION_INTERVAL_SECONDS", "5"))
         self.cooldown = float(os.getenv("SCALE_COOLDOWN_SECONDS", "60"))
         self.min_primaries = int(os.getenv("MIN_PRIMARIES", "3"))
         self.max_primaries = int(os.getenv("MAX_PRIMARIES", "6"))
-        self.min_replicas = int(os.getenv("MIN_REPLICAS_PER_PRIMARY", "1"))
-        self.max_replicas = int(os.getenv("MAX_REPLICAS_PER_PRIMARY", "2"))
         self.minimum_scale_percent = float(os.getenv("MINIMUM_SCALE_OUT_PERCENT", "20"))
         self.seed_host = f"valkey-0.{self.headless}.{self.namespace}.svc.cluster.local"
         self.password = os.getenv("VALKEY_PASSWORD", "")
@@ -180,10 +176,10 @@ class ClusterScaler:
                     f"are both on {primary['pod']['node']}"
                 )
             counts[primary["id"]] += 1
-        missing = [primary["pod"]["name"] for primary in primaries.values()
-                   if counts[primary["id"]] < self.min_replicas]
-        if missing:
-            raise RuntimeError(f"under-replicated primaries: {', '.join(missing)}")
+        invalid = [primary["pod"]["name"] for primary in primaries.values()
+                   if counts[primary["id"]] != 1]
+        if invalid:
+            raise RuntimeError(f"primaries must have exactly one replica: {', '.join(invalid)}")
 
     def cpu(self, pod_names: set[str]) -> list[float]:
         query = ('sum by (pod) (rate(container_cpu_usage_seconds_total{namespace="' + self.namespace
@@ -212,26 +208,6 @@ class ClusterScaler:
         self.cli("--cluster", "rebalance", f"{self.seed_host}:6379", "--cluster-use-empty-masters", "--cluster-yes")
         self.wait_for_cluster()
         self.scaled("primaries_scaled_up", amount, added)
-
-    def add_replicas(self, amount: int, members: list[dict], pods: list[dict]) -> None:
-        primaries = [member for member in members if "master" in member["flags"]]
-        counts = Counter(member["master"] for member in members if "slave" in member["flags"])
-        old_count = len(pods)
-        self.set_statefulset_replicas(old_count + amount)
-        candidates = self.wait_for_pods(old_count + amount)[old_count:]
-        added = []
-        for replica in candidates:
-            choices = [primary for primary in primaries if primary["pod"]["node"] != replica["node"]
-                       and counts[primary["id"]] < self.max_replicas]
-            if not choices:
-                raise RuntimeError(f"no failure-domain-safe primary for {replica['name']}")
-            primary = min(choices, key=lambda item: counts[item["id"]])
-            self.cli("--cluster", "add-node", f"{replica['host']}:6379", f"{self.seed_host}:6379",
-                     "--cluster-slave", "--cluster-master-id", primary["id"], "--cluster-yes")
-            counts[primary["id"]] += 1
-            added.append({"replica": replica["name"], "primary": primary["pod"]["name"]})
-        self.wait_for_cluster()
-        self.scaled("replicas_scaled_up", amount, added)
 
     def wait_for_role(self, node_id: str, role: str) -> None:
         deadline = time.monotonic() + 30
@@ -295,10 +271,6 @@ class ClusterScaler:
         self.wait_for_cluster()
         self.scaled("primaries_scaled_down", 1)
 
-    def scale_down_replica(self) -> None:
-        self.remove_highest(as_primary=False)
-        self.scaled("replicas_scaled_down", 1)
-
     def scaled(self, event: str, amount: int, nodes=None) -> None:
         self.breaches.clear()
         self.cooldown_until = time.monotonic() + self.cooldown
@@ -323,13 +295,9 @@ class ClusterScaler:
         primaries = [member for member in members if "master" in member["flags"]]
         replicas = [member for member in members if "slave" in member["flags"]]
         primary_values = self.cpu({member["pod"]["name"] for member in primaries})
-        replica_values = self.cpu({member["pod"]["name"] for member in replicas}) if replicas else []
         primary_average = sum(primary_values) / len(primary_values)
-        replica_average = sum(replica_values) / len(replica_values) if replica_values else 0
-        replica_ratio = len(replicas) / len(primaries)
         print(json.dumps({"primaries": len(primaries), "replicas": len(replicas),
                           "primary_cpu_average": round(primary_average, 2),
-                          "replica_cpu_average": round(replica_average, 2),
                           "cooldown": max(0, round(self.cooldown_until - time.monotonic()))}), flush=True)
         if time.monotonic() < self.cooldown_until:
             return
@@ -339,12 +307,6 @@ class ClusterScaler:
             self.add_primary_pairs(min(self.max_primaries - len(primaries), max(minimum, proportional)), pods)
         elif self.breach("primary_down", primary_average < self.primary_down) and len(primaries) > self.min_primaries:
             self.scale_down_primary_pair()
-        elif (self.breach("replica_up", replica_average >= self.replica_up)
-              and replica_ratio < self.max_replicas):
-            self.add_replicas(1, members, pods)
-        elif (self.breach("replica_down", replica_average < self.replica_down)
-              and len(replicas) > len(primaries) * self.min_replicas):
-            self.scale_down_replica()
 
     def run(self) -> None:
         while True:
