@@ -206,17 +206,13 @@ def list_server_pods(node_statuses: dict[str, str]) -> list[dict[str, str]]:
 def list_data_services(node_statuses: dict[str, str]) -> list[dict]:
     raw = run(
         "kubectl", "get", "pods", "-n", NAMESPACE,
-        "-l", "app=valkey", "-o", "json",
+        "-l", "valkey.io/cluster=tcp-lab", "-o", "json",
     )
     result = []
     for item in json.loads(raw).get("items", []):
         metadata = item.get("metadata", {})
         spec = item.get("spec", {})
         status = item.get("status", {})
-        labels = metadata.get("labels", {})
-        app = labels.get("app", "")
-        if app not in DATA_SERVICES:
-            continue
         pod_status = application_pod(item, node_statuses)["status"]
         ready = any(
             condition.get("type") == "Ready" and condition.get("status") == "True"
@@ -231,7 +227,7 @@ def list_data_services(node_statuses: dict[str, str]) -> list[dict]:
             health = "NOT READY"
         else:
             health = phase.upper()
-        service, endpoint = DATA_SERVICES[app]
+        service, endpoint = DATA_SERVICES["valkey"]
         result.append({
             "service": service,
             "instance": metadata.get("name", ""),

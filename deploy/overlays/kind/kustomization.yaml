@@ -4,9 +4,8 @@ resources:
   - ../../base
   - valkey-secret.yaml
   - valkey-service.yaml
-  - valkey-statefulset.yaml
-  - valkey-cluster-job.yaml
-  - valkey-primary-autoscaler.yaml
+  - valkey-cluster.yaml
+  - valkey-shard-autoscaler.yaml
 patches:
   - path: gateway-nodeport-patch.yaml
   - path: stats-nodeport-patch.yaml

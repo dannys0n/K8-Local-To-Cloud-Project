@@ -1,17 +1,17 @@
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: valkey-primary-autoscaler
+  name: valkey-shard-autoscaler
   namespace: tcp-lab
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: valkey-primary-autoscaler
+  name: valkey-shard-autoscaler
   namespace: tcp-lab
 rules:
-  - apiGroups: ["apps"]
-    resources: ["statefulsets/scale"]
+  - apiGroups: ["valkey.io"]
+    resources: ["valkeyclusters"]
     verbs: ["get", "patch"]
   - apiGroups: [""]
     resources: ["pods"]
@@ -20,21 +20,21 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: valkey-primary-autoscaler
+  name: valkey-shard-autoscaler
   namespace: tcp-lab
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
-  name: valkey-primary-autoscaler
+  name: valkey-shard-autoscaler
 subjects:
   - kind: ServiceAccount
-    name: valkey-primary-autoscaler
+    name: valkey-shard-autoscaler
     namespace: tcp-lab
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: valkey-primary-autoscaler
+  name: valkey-shard-autoscaler
   namespace: tcp-lab
 spec:
   replicas: 1
@@ -42,27 +42,33 @@ spec:
     type: Recreate
   selector:
     matchLabels:
-      app: valkey-primary-autoscaler
+      app: valkey-shard-autoscaler
   template:
     metadata:
       labels:
-        app: valkey-primary-autoscaler
+        app: valkey-shard-autoscaler
     spec:
-      serviceAccountName: valkey-primary-autoscaler
+      serviceAccountName: valkey-shard-autoscaler
       containers:
         - name: autoscaler
-          image: valkey-primary-autoscaler:dev
+          image: valkey-shard-autoscaler:dev
           imagePullPolicy: IfNotPresent
           env:
             - name: POD_NAMESPACE
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
+            - name: VALKEY_CLUSTER
+              value: tcp-lab
+            - name: VALKEY_ADDRESS
+              value: valkey.tcp-lab.svc.cluster.local:6379
+            - name: VALKEY_CONTAINER
+              value: server
             - name: PROMETHEUS_URL
               value: http://prometheus.tcp-lab.svc.cluster.local:9090
-            - name: PRIMARY_SCALE_UP_PERCENT
+            - name: SCALE_UP_PERCENT
               value: "70"
-            - name: PRIMARY_SCALE_DOWN_PERCENT
+            - name: SCALE_DOWN_PERCENT
               value: "20"
             - name: REQUIRED_BREACHES
               value: "2"
@@ -70,18 +76,12 @@ spec:
               value: "1"
             - name: SCALE_COOLDOWN_SECONDS
               value: "5"
-            - name: MIN_PRIMARIES
+            - name: MIN_SHARDS
               value: "3"
-            - name: MAX_PRIMARIES
+            - name: MAX_SHARDS
               value: "100"
             - name: MINIMUM_SCALE_OUT_PERCENT
               value: "20"
-            - name: VALKEY_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: tcp-server-valkey
-                  key: password
-                  optional: true
           resources:
             requests:
               cpu: 10m

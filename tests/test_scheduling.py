@@ -10,7 +10,7 @@ GENERAL_WORKLOADS = (
     ROOT / "deploy/base/gateway-deployment.yaml",
 )
 DATABASE_WORKLOADS = (
-    ROOT / "deploy/overlays/kind/valkey-statefulset.yaml",
+    ROOT / "deploy/overlays/kind/valkey-cluster.yaml",
 )
 class WorkerSchedulingTests(unittest.TestCase):
     def test_general_workloads_have_no_hard_node_placement(self) -> None:
@@ -29,13 +29,15 @@ class WorkerSchedulingTests(unittest.TestCase):
         for manifest in DATABASE_WORKLOADS:
             content = manifest.read_text(encoding="utf-8")
             with self.subTest(manifest=manifest.relative_to(ROOT)):
-                self.assertNotIn("tcp-lab.io/database", content)
-                self.assertIn("topologyKey: kubernetes.io/hostname", content)
-                self.assertIn("replicas: 6", content)
+                self.assertIn("tcp-lab.io/database", content)
+                self.assertIn("shards: 3", content)
+                self.assertIn("replicas: 1", content)
+                self.assertRegex(content, re.compile(r"shard:\s+mode: Required"))
 
     def test_kind_node_roles_and_fast_monitoring(self) -> None:
         content = (ROOT / "infra/kind/cluster.yaml").read_text(encoding="utf-8")
-        self.assertNotIn("tcp-lab.io/database", content)
+        self.assertIn('node-labels: "tcp-lab.io/database=true"', content)
+        self.assertEqual(2, content.count("*databaseKubelet"))
         self.assertIn('node-monitor-grace-period: "5s"', content)
         self.assertIn('node-monitor-period: "1s"', content)
         self.assertIn('node-eviction-rate: "10"', content)

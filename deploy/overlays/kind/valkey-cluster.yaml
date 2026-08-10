@@ -1,0 +1,35 @@
+apiVersion: valkey.io/v1alpha1
+kind: ValkeyCluster
+metadata:
+  name: tcp-lab
+  namespace: tcp-lab
+  labels:
+    app: valkey
+spec:
+  shards: 3
+  replicas: 1
+  persistence:
+    size: 512Mi
+    reclaimPolicy: Delete
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      memory: 256Mi
+  scheduling:
+    nodeSelector:
+      tcp-lab.io/database: "true"
+    tolerations:
+      - key: tcp-lab.io/database
+        operator: Equal
+        value: "true"
+        effect: NoSchedule
+    node:
+      spread:
+        shard:
+          mode: Required
+        pods:
+          mode: Preferred
+  exporter:
+    enabled: false
