@@ -60,16 +60,28 @@ spec:
                   fieldPath: metadata.namespace
             - name: PROMETHEUS_URL
               value: http://prometheus.tcp-lab.svc.cluster.local:9090
-            - name: CPU_THRESHOLD_PERCENT
+            - name: PRIMARY_SCALE_UP_PERCENT
               value: "70"
+            - name: PRIMARY_SCALE_DOWN_PERCENT
+              value: "20"
+            - name: REPLICA_SCALE_UP_PERCENT
+              value: "70"
+            - name: REPLICA_SCALE_DOWN_PERCENT
+              value: "20"
             - name: REQUIRED_BREACHES
               value: "2"
             - name: EVALUATION_INTERVAL_SECONDS
               value: "1"
-            - name: SCALE_OUT_COOLDOWN_SECONDS
+            - name: SCALE_COOLDOWN_SECONDS
               value: "5"
+            - name: MIN_PRIMARIES
+              value: "3"
             - name: MAX_PRIMARIES
               value: "100"
+            - name: MIN_REPLICAS_PER_PRIMARY
+              value: "1"
+            - name: MAX_REPLICAS_PER_PRIMARY
+              value: "2"
             - name: MINIMUM_SCALE_OUT_PERCENT
               value: "20"
             - name: VALKEY_PASSWORD
