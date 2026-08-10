@@ -1,5 +1,25 @@
 # Live connection visibility
 
+## Grafana live-resource dashboard
+
+The kind dependency installer deploys a small Grafana instance and
+`kube-state-metrics` alongside the existing Prometheus collector. Start local
+access explicitly:
+
+```bash
+kubectl port-forward -n tcp-lab service/grafana 3000:3000
+```
+
+Open `http://127.0.0.1:3000/d/tcp-lab-live`. The single provisioned dashboard
+shows gateway TCP sessions, ready workload counts, pod CPU against requests,
+memory against limits, pod network rates, restart totals, and requested node
+capacity. Grafana is anonymous read-only and has no NodePort or EKS load-balancer
+exposure.
+
+Prometheus receives bounded per-pod gateway connection counters. Exact client
+UIDs and TCP-session relationships stay in the aggregate dashboard below rather
+than becoming high-cardinality Prometheus labels.
+
 ## Aggregate dashboard
 
 Run the development-only dashboard from the repository root:

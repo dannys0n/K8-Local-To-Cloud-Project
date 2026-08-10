@@ -201,6 +201,15 @@ python tools/dashboard.py
 Then visit `http://127.0.0.1:8080`. This combines every gateway pod and lists
 active client sessions, routes, generations, and backend instances.
 
+Open the local live-resource dashboard:
+
+```powershell
+kubectl port-forward -n tcp-lab service/grafana 3000:3000
+```
+
+Then visit `http://127.0.0.1:3000/d/tcp-lab-live`. Grafana is anonymous and
+read-only in kind; it is reachable only through this explicit port-forward.
+
 Inspect the cluster:
 
 ```powershell

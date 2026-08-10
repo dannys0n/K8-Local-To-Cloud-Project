@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"sort"
 	"time"
@@ -35,6 +36,21 @@ func (g *gateway) serveHTTP(ctx context.Context, address string) {
 		g.mu.RUnlock()
 		routes := g.routesSnapshot()
 		_ = json.NewEncoder(writer).Encode(map[string]any{"instance": g.instance, "accepted": g.accepted.Load(), "session_count": sessionCount, "ready_session_count": g.readySessions.Load(), "sessions": sessions, "sessions_included": includeSessions, "routes": routes})
+	})
+	mux.HandleFunc("/metrics", func(writer http.ResponseWriter, _ *http.Request) {
+		g.mu.RLock()
+		sessionCount := len(g.sessions)
+		g.mu.RUnlock()
+		writer.Header().Set("Content-Type", "text/plain; version=0.0.4")
+		_, _ = fmt.Fprintf(writer,
+			"# TYPE tcp_gateway_sessions gauge\n"+
+				"tcp_gateway_sessions %d\n"+
+				"# TYPE tcp_gateway_ready_sessions gauge\n"+
+				"tcp_gateway_ready_sessions %d\n"+
+				"# TYPE tcp_gateway_accepted_total counter\n"+
+				"tcp_gateway_accepted_total %d\n",
+			sessionCount, g.readySessions.Load(), g.accepted.Load(),
+		)
 	})
 	mux.HandleFunc("/", func(writer http.ResponseWriter, _ *http.Request) {
 		writer.Header().Set("Content-Type", "text/html; charset=utf-8")
