@@ -211,7 +211,8 @@ kubectl port-forward -n tcp-lab service/grafana 3000:3000
 Then visit `http://127.0.0.1:3000/d/tcp-lab-live`. Grafana is the read-only
 operational dashboard for resource capacity, traffic, sessions, routing events,
 server ticks, and pod health. It is anonymous in kind and reachable only through
-this explicit port-forward.
+this explicit port-forward. When `tools/dashboard.py` is also running, its
+interactive map and controls appear at the top of the Grafana dashboard.
 
 Inspect the cluster:
 
