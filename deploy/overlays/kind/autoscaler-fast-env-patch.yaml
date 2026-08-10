@@ -7,7 +7,7 @@
   path: /spec/template/spec/containers/0/env/-
   value:
     name: SCALE_DOWN_STABILIZATION_EVALUATIONS
-    value: "1"
+    value: "2"
 - op: add
   path: /spec/template/spec/containers/0/env/-
   value:
