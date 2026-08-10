@@ -56,6 +56,8 @@ spec:
               value: "true"
             - name: GF_USERS_DEFAULT_THEME
               value: dark
+            - name: GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH
+              value: /var/lib/grafana/dashboards/live-cluster.json
             - name: GF_PANELS_DISABLE_SANITIZE_HTML
               value: "true"
           ports:
