@@ -78,8 +78,8 @@ spec:
               mountPath: /etc/grafana/provisioning/dashboards/dashboards.yaml
               subPath: dashboards.yaml
             - name: dashboard
-              mountPath: /var/lib/grafana/dashboards/live-cluster.json
-              subPath: live-cluster.json
+              mountPath: /var/lib/grafana/dashboards
+              readOnly: true
       volumes:
         - name: provisioning
           configMap:
