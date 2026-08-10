@@ -69,23 +69,31 @@ type session struct {
 }
 
 type gateway struct {
-	instance        string
-	gatewayMetadata []byte
-	serverHost      string
-	serverPort      string
-	backendTimeout  time.Duration
-	logger          *slog.Logger
-	mu              sync.RWMutex
-	catalog         map[string]backend
-	catalogUpdated  time.Time
-	sessions        map[string]session
-	resolverMu      sync.Mutex
-	resolverHosts   []string
-	resolverUntil   time.Time
-	accepted        atomic.Uint64
-	readySessions   atomic.Int64
-	nextSession     atomic.Uint64
-	nextResolver    atomic.Uint64
+	instance            string
+	gatewayMetadata     []byte
+	serverHost          string
+	serverPort          string
+	backendTimeout      time.Duration
+	logger              *slog.Logger
+	mu                  sync.RWMutex
+	catalog             map[string]backend
+	catalogUpdated      time.Time
+	sessions            map[string]session
+	resolverMu          sync.Mutex
+	resolverHosts       []string
+	resolverUntil       time.Time
+	accepted            atomic.Uint64
+	readySessions       atomic.Int64
+	backendDials        atomic.Uint64
+	backendDialFailures atomic.Uint64
+	routeFailures       atomic.Uint64
+	backendFailures     atomic.Uint64
+	recoveryAttempts    atomic.Uint64
+	recoverySuccesses   atomic.Uint64
+	handoffAttempts     atomic.Uint64
+	handoffSuccesses    atomic.Uint64
+	nextSession         atomic.Uint64
+	nextResolver        atomic.Uint64
 }
 
 type backendConnection struct {
@@ -287,6 +295,7 @@ func (g *gateway) handleClient(ctx context.Context, client net.Conn) {
 			continue
 		}
 		if err != nil || !valid || backendOwnershipLost(state.Error) {
+			g.recoveryAttempts.Add(1)
 			recoveryCtx, cancelRecovery := context.WithTimeout(ctx, g.backendTimeout)
 			failedLocation := downstream.info.LocationID
 			downstream.conn.Close()
@@ -321,9 +330,13 @@ func (g *gateway) handleClient(ctx context.Context, client net.Conn) {
 			g.updateSession(id, client.RemoteAddr().String(), candidate.info, clientLatitude, clientLongitude)
 			response, err = g.exchangeUntil(downstream, message, deadline)
 			state, valid = decodeBackendResponse(response)
+			if err == nil && valid && state.Error == "" {
+				g.recoverySuccesses.Add(1)
+			}
 			cancelRecovery()
 		}
 		if err != nil || !valid || state.Error != "" {
+			g.backendFailures.Add(1)
 			if downstream != nil {
 				downstream.conn.Close()
 				downstream = nil
@@ -339,6 +352,7 @@ func (g *gateway) handleClient(ctx context.Context, client net.Conn) {
 			clientLongitude = state.ClientLongitude
 		}
 		if state.Reroute != 0 {
+			g.handoffAttempts.Add(1)
 			nextLocation := strconv.FormatInt(state.Reroute, 10)
 			candidate, _, routeErr := g.openRoute(ctx, nextLocation)
 			if routeErr != nil {
@@ -361,6 +375,7 @@ func (g *gateway) handleClient(ctx context.Context, client net.Conn) {
 			g.updateSession(id, client.RemoteAddr().String(), candidate.info, clientLatitude, clientLongitude)
 			response = resumed
 			state = resumedState
+			g.handoffSuccesses.Add(1)
 		}
 		if now := time.Now(); !now.Before(nextDebugSessionUpdate) {
 			g.updateSessionFromResponse(id, state)
@@ -392,10 +407,12 @@ func (g *gateway) openRoute(ctx context.Context, requested string) (*backendConn
 	}
 	candidate, err := g.resolveRoute(ctx, requested)
 	if err != nil {
+		g.routeFailures.Add(1)
 		return nil, nil, fmt.Errorf("location %q unavailable", requested)
 	}
 	connection, hello, err := g.connectBackend(candidate)
 	if err != nil {
+		g.routeFailures.Add(1)
 		return nil, nil, fmt.Errorf("location %q unavailable", requested)
 	}
 	return connection, hello, nil
@@ -421,23 +438,28 @@ func (g *gateway) connectBackend(info backend) (*backendConnection, []byte, erro
 }
 
 func (g *gateway) connectBackendUntil(info backend, deadline time.Time) (*backendConnection, []byte, error) {
+	g.backendDials.Add(1)
 	remaining := time.Until(deadline)
 	if remaining <= 0 {
+		g.backendDialFailures.Add(1)
 		return nil, nil, os.ErrDeadlineExceeded
 	}
 	conn, err := net.DialTimeout("tcp", info.Address, remaining)
 	if err != nil {
+		g.backendDialFailures.Add(1)
 		return nil, nil, err
 	}
 	connection := &backendConnection{info: info, conn: conn, reader: bufio.NewReader(conn), writer: bufio.NewWriter(conn)}
 	hello, err := g.exchangeUntil(connection, "@location "+strconv.FormatInt(info.LocationID, 10), deadline)
 	if err != nil {
 		conn.Close()
+		g.backendDialFailures.Add(1)
 		return nil, nil, err
 	}
 	var confirmed backend
 	if err := json.Unmarshal(hello, &confirmed); err != nil || confirmed.Server != info.Server || confirmed.Generation != info.Generation {
 		conn.Close()
+		g.backendDialFailures.Add(1)
 		return nil, nil, errors.New("backend ownership changed")
 	}
 	_ = conn.SetDeadline(time.Time{})

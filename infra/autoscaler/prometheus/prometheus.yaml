@@ -111,6 +111,30 @@ data:
           - source_labels: [__name__]
             regex: tcp_gateway_.*
             action: keep
+      - job_name: server
+        scrape_interval: 1s
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces:
+              names: [tcp-lab]
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_label_app]
+            regex: tcp-server
+            action: keep
+          - source_labels: [__meta_kubernetes_pod_phase]
+            regex: Running
+            action: keep
+          - source_labels: [__meta_kubernetes_pod_ip]
+            target_label: __address__
+            replacement: $1:8405
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: pod
+          - source_labels: [__meta_kubernetes_pod_node_name]
+            target_label: node
+        metric_relabel_configs:
+          - source_labels: [__name__]
+            regex: tcp_server_.*
+            action: keep
 ---
 apiVersion: apps/v1
 kind: Deployment

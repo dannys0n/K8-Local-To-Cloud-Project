@@ -48,8 +48,27 @@ func (g *gateway) serveHTTP(ctx context.Context, address string) {
 				"# TYPE tcp_gateway_ready_sessions gauge\n"+
 				"tcp_gateway_ready_sessions %d\n"+
 				"# TYPE tcp_gateway_accepted_total counter\n"+
-				"tcp_gateway_accepted_total %d\n",
+				"tcp_gateway_accepted_total %d\n"+
+				"# TYPE tcp_gateway_backend_dials_total counter\n"+
+				"tcp_gateway_backend_dials_total %d\n"+
+				"# TYPE tcp_gateway_backend_dial_failures_total counter\n"+
+				"tcp_gateway_backend_dial_failures_total %d\n"+
+				"# TYPE tcp_gateway_route_failures_total counter\n"+
+				"tcp_gateway_route_failures_total %d\n"+
+				"# TYPE tcp_gateway_backend_failures_total counter\n"+
+				"tcp_gateway_backend_failures_total %d\n"+
+				"# TYPE tcp_gateway_recovery_attempts_total counter\n"+
+				"tcp_gateway_recovery_attempts_total %d\n"+
+				"# TYPE tcp_gateway_recovery_successes_total counter\n"+
+				"tcp_gateway_recovery_successes_total %d\n"+
+				"# TYPE tcp_gateway_handoff_attempts_total counter\n"+
+				"tcp_gateway_handoff_attempts_total %d\n"+
+				"# TYPE tcp_gateway_handoff_successes_total counter\n"+
+				"tcp_gateway_handoff_successes_total %d\n",
 			sessionCount, g.readySessions.Load(), g.accepted.Load(),
+			g.backendDials.Load(), g.backendDialFailures.Load(), g.routeFailures.Load(),
+			g.backendFailures.Load(), g.recoveryAttempts.Load(), g.recoverySuccesses.Load(),
+			g.handoffAttempts.Load(), g.handoffSuccesses.Load(),
 		)
 	})
 	mux.HandleFunc("/", func(writer http.ResponseWriter, _ *http.Request) {

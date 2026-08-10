@@ -191,15 +191,16 @@ Open the selected gateway replica's live page:
 http://127.0.0.1:8404/
 ```
 
-Open the local aggregate connection dashboard (requires Python and a running
-`kubectl` context):
+Open the local interactive topology map and scoped lab controls (requires Python
+and a running `kubectl` context):
 
 ```powershell
 python tools/dashboard.py
 ```
 
-Then visit `http://127.0.0.1:8080`. This combines every gateway pod and lists
-active client sessions, routes, generations, and backend instances.
+Then visit `http://127.0.0.1:8080`. This view retains exact client, gateway,
+server, and Valkey topology plus dummy-client controls. It is intentionally not
+the operational metrics dashboard.
 
 Open the local live-resource dashboard:
 
@@ -207,8 +208,10 @@ Open the local live-resource dashboard:
 kubectl port-forward -n tcp-lab service/grafana 3000:3000
 ```
 
-Then visit `http://127.0.0.1:3000/d/tcp-lab-live`. Grafana is anonymous and
-read-only in kind; it is reachable only through this explicit port-forward.
+Then visit `http://127.0.0.1:3000/d/tcp-lab-live`. Grafana is the read-only
+operational dashboard for resource capacity, traffic, sessions, routing events,
+server ticks, and pod health. It is anonymous in kind and reachable only through
+this explicit port-forward.
 
 Inspect the cluster:
 

@@ -55,24 +55,33 @@ type assignment struct {
 }
 
 type server struct {
-	instanceID       string
-	podName          string
-	routeAddress     string
-	valkey           *redis.ClusterClient
-	leaseDuration    time.Duration
-	renewInterval    time.Duration
-	tickInterval     time.Duration
-	tick             atomic.Uint64
-	nextRoute        atomic.Uint64
-	inputs           chan inputCommand
-	entityMu         sync.Mutex
-	entities         map[string]*entityState
-	topologyMu       sync.RWMutex
-	topology         []locationDefinition
-	locationIndex    *locationNode
-	topologyRevision atomic.Int64
-	mu               sync.RWMutex
-	assignment       *assignment
+	instanceID          string
+	podName             string
+	routeAddress        string
+	valkey              *redis.ClusterClient
+	leaseDuration       time.Duration
+	renewInterval       time.Duration
+	tickInterval        time.Duration
+	tick                atomic.Uint64
+	nextRoute           atomic.Uint64
+	inputs              chan inputCommand
+	entityMu            sync.Mutex
+	entities            map[string]*entityState
+	topologyMu          sync.RWMutex
+	topology            []locationDefinition
+	locationIndex       *locationNode
+	topologyRevision    atomic.Int64
+	mu                  sync.RWMutex
+	assignment          *assignment
+	activeConnections   atomic.Int64
+	acceptedConnections atomic.Uint64
+	inputCommands       atomic.Uint64
+	inputQueueFull      atomic.Uint64
+	handoffAttempts     atomic.Uint64
+	handoffFailures     atomic.Uint64
+	stateErrors         atomic.Uint64
+	tickDurationBits    atomic.Uint64
+	maxTickDurationBits atomic.Uint64
 }
 
 type response struct {
@@ -192,6 +201,7 @@ func main() {
 	go s.runTopologyRefresh(ctx, logger)
 	go s.heartbeat(ctx, logger)
 	go s.runTicks(ctx)
+	go s.serveMetrics(ctx, envOrDefault("STATS_ADDR", ":8405"), logger)
 
 	listenAddr := envOrDefault("LISTEN_ADDR", ":7000")
 	listener, err := net.Listen("tcp", listenAddr)
@@ -219,8 +229,11 @@ func main() {
 			continue
 		}
 		connections.Add(1)
+		s.acceptedConnections.Add(1)
+		s.activeConnections.Add(1)
 		go func() {
 			defer connections.Done()
+			defer s.activeConnections.Add(-1)
 			s.handleConnection(ctx, conn, logger)
 		}()
 	}
@@ -241,8 +254,10 @@ func (s *server) runTicks(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			started := time.Now()
 			currentTick := s.tick.Add(1)
 			s.applyTransientInputs(currentTick)
+			s.recordTickDuration(time.Since(started))
 		}
 	}
 }
@@ -634,6 +649,7 @@ func (s *server) handleConnection(ctx context.Context, conn net.Conn, logger *sl
 }
 
 func (s *server) handleInputCommand(ctx context.Context, writer *bufio.Writer, bound *assignment, intent inputIntent, logger *slog.Logger) bool {
+	s.inputCommands.Add(1)
 	created, err := s.ensureEntity(ctx, intent.ClientUID)
 	if err != nil {
 		s.writeStateError(writer, logger, err)
@@ -649,6 +665,7 @@ func (s *server) handleInputCommand(ctx context.Context, writer *bufio.Writer, b
 	case <-ctx.Done():
 		return false
 	default:
+		s.inputQueueFull.Add(1)
 		_, _ = fmt.Fprintln(writer, `{"error":"input queue full"}`)
 		_ = writer.Flush()
 		return true
@@ -666,7 +683,9 @@ func (s *server) handleInputCommand(ctx context.Context, writer *bufio.Writer, b
 			}
 		}
 		if result.reroute != 0 {
+			s.handoffAttempts.Add(1)
 			if err := s.prepareEntityHandoff(ctx, bound, intent.ClientUID, result.reroute, result.latitude, result.longitude); err != nil {
+				s.handoffFailures.Add(1)
 				s.writeStateError(writer, logger, err)
 				return true
 			}
@@ -799,6 +818,7 @@ func (s *server) writeResponse(writer *bufio.Writer, current *assignment, messag
 }
 
 func (s *server) writeStateError(writer *bufio.Writer, logger *slog.Logger, err error) {
+	s.stateErrors.Add(1)
 	logger.Error("authoritative state operation", "instance", s.podName, "error", err)
 	_, _ = fmt.Fprintln(writer, `{"error":"authoritative state operation failed"}`)
 	_ = writer.Flush()
