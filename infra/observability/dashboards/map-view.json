@@ -1,0 +1,26 @@
+{
+  "annotations": {"list": []},
+  "editable": false,
+  "panels": [
+    {
+      "type": "text",
+      "title": "",
+      "transparent": true,
+      "id": 1,
+      "gridPos": {"x": 0, "y": 0, "w": 24, "h": 30},
+      "options": {
+        "mode": "html",
+        "content": "<iframe src=\"http://127.0.0.1:8080/?grafana=solo&amp;grafana_origin=http%3A%2F%2F127.0.0.1%3A3000\" title=\"TCP lab topology map\" style=\"display:block;width:100%;height:100%;border:0;background:#0d1117\"></iframe>"
+      },
+      "fieldConfig": {"defaults": {}, "overrides": []}
+    }
+  ],
+  "schemaVersion": 42,
+  "tags": ["tcp-lab", "map"],
+  "templating": {"list": []},
+  "time": {"from": "now-15m", "to": "now"},
+  "timezone": "browser",
+  "title": "TCP Lab Map",
+  "uid": "tcp-lab-map",
+  "version": 1
+}

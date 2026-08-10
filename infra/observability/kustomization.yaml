@@ -9,6 +9,7 @@ configMapGenerator:
     namespace: tcp-lab
     files:
       - live-cluster.json=dashboards/live-cluster.json
+      - map-view.json=dashboards/map-view.json
 
 generatorOptions:
   disableNameSuffixHash: true
