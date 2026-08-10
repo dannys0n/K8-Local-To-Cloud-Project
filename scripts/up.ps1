@@ -48,14 +48,36 @@ try {
     Write-Host "Loading image into kind..."
     kind load docker-image $ServerImage $GatewayImage $AutoscalerImage prom/prometheus:v3.13.1 $ValkeyAutoscalerImage --name $Cluster
 
-    Write-Host "Installing autoscaling dependencies..."
-    & "$Root/infra/autoscaler/install-kind.ps1"
-
-    Write-Host "Installing Valkey Operator v0.4.0..."
-    helm repo add valkey https://valkey.io/valkey-helm --force-update
-    helm upgrade --install valkey-operator valkey/valkey-operator --version 0.4.0 `
-        --namespace valkey-operator-system --create-namespace `
-        --values infra/valkey/operator-values.yaml --wait --timeout 3m
+    Write-Host "Installing autoscaling dependencies and Valkey Operator in parallel..."
+    $AutoscalingJob = Start-Job -ScriptBlock {
+        param($InstallScript)
+        & powershell -NoProfile -ExecutionPolicy Bypass -File $InstallScript
+        if ($LASTEXITCODE -ne 0) {
+            throw "Autoscaling dependency installation failed with exit code $LASTEXITCODE"
+        }
+    } -ArgumentList "$Root/infra/autoscaler/install-kind.ps1"
+    $OperatorJob = Start-Job -ScriptBlock {
+        param($WorkingDirectory)
+        Set-Location $WorkingDirectory
+        & helm repo add valkey https://valkey.io/valkey-helm --force-update
+        if ($LASTEXITCODE -ne 0) {
+            throw "Helm repository update failed with exit code $LASTEXITCODE"
+        }
+        & helm upgrade --install valkey-operator valkey/valkey-operator --version 0.4.0 `
+            --namespace valkey-operator-system --create-namespace `
+            --values infra/valkey/operator-values.yaml --wait --timeout 3m
+        if ($LASTEXITCODE -ne 0) {
+            throw "Valkey Operator installation failed with exit code $LASTEXITCODE"
+        }
+    } -ArgumentList $Root
+    $StartupJobs = @($AutoscalingJob, $OperatorJob)
+    $StartupJobs | Wait-Job | Out-Null
+    $FailedJobs = @($StartupJobs | Where-Object State -ne "Completed")
+    $StartupJobs | Receive-Job -ErrorAction Continue
+    $StartupJobs | Remove-Job
+    if ($FailedJobs.Count -gt 0) {
+        throw "One or more parallel infrastructure installations failed."
+    }
 
     Write-Host "Applying Kubernetes resources..."
     kubectl apply -f deploy/base/namespace.yaml

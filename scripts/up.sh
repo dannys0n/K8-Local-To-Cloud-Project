@@ -43,14 +43,25 @@ docker build --provenance=false -t "$VALKEY_AUTOSCALER_IMAGE" infra/valkey/autos
 echo "Loading image into kind..."
 kind load docker-image "$SERVER_IMAGE" "$GATEWAY_IMAGE" "$AUTOSCALER_IMAGE" prom/prometheus:v3.13.1 "$VALKEY_AUTOSCALER_IMAGE" --name "$CLUSTER"
 
-echo "Installing autoscaling dependencies..."
-bash "$ROOT/infra/autoscaler/install-kind.sh"
+echo "Installing autoscaling dependencies and Valkey Operator in parallel..."
+bash "$ROOT/infra/autoscaler/install-kind.sh" &
+autoscaling_pid=$!
+(
+  helm repo add valkey https://valkey.io/valkey-helm --force-update
+  helm upgrade --install valkey-operator valkey/valkey-operator --version 0.4.0 \
+    --namespace valkey-operator-system --create-namespace \
+    --values infra/valkey/operator-values.yaml --wait --timeout 3m
+) &
+operator_pid=$!
 
-echo "Installing Valkey Operator v0.4.0..."
-helm repo add valkey https://valkey.io/valkey-helm --force-update
-helm upgrade --install valkey-operator valkey/valkey-operator --version 0.4.0 \
-  --namespace valkey-operator-system --create-namespace \
-  --values infra/valkey/operator-values.yaml --wait --timeout 3m
+autoscaling_status=0
+operator_status=0
+wait "$autoscaling_pid" || autoscaling_status=$?
+wait "$operator_pid" || operator_status=$?
+if [[ "$autoscaling_status" -ne 0 || "$operator_status" -ne 0 ]]; then
+  echo "Parallel infrastructure installation failed (autoscaling=$autoscaling_status, operator=$operator_status)." >&2
+  exit 1
+fi
 
 echo "Applying Kubernetes resources..."
 kubectl apply -f deploy/base/namespace.yaml
