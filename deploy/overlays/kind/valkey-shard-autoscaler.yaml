@@ -81,7 +81,7 @@ spec:
             - name: MAX_SHARDS
               value: "100"
             - name: MINIMUM_SCALE_OUT_PERCENT
-              value: "20"
+              value: "50"
           resources:
             requests:
               cpu: 10m
