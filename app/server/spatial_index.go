@@ -39,7 +39,7 @@ func buildLocationNode(points []locationPoint, depth int) *locationNode {
 	middle := len(points) / 2
 	return &locationNode{
 		point: points[middle], axis: axis,
-		left: buildLocationNode(points[:middle], depth+1),
+		left:  buildLocationNode(points[:middle], depth+1),
 		right: buildLocationNode(points[middle+1:], depth+1),
 	}
 }
