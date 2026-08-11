@@ -200,6 +200,9 @@ function Deploy-Workloads([string]$Tag) {
     Write-RuntimeOverlay $Tag
     & kubectl apply -k $RuntimeOverlay
     if ($LASTEXITCODE -ne 0) { throw "Unable to deploy the EKS workload overlay." }
+
+    & kubectl apply -k (Join-Path $Root "infra/observability-eks")
+    if ($LASTEXITCODE -ne 0) { throw "Unable to install EKS observability." }
 }
 
 switch ($Action) {

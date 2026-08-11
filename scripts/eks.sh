@@ -62,6 +62,7 @@ deploy() {
   kubectl apply -k "$ROOT/infra/autoscaler/prometheus"
   write_runtime "$tag"
   kubectl apply -k "$RUNTIME"
+  kubectl apply -k "$ROOT/infra/observability-eks"
 }
 
 case "$ACTION" in

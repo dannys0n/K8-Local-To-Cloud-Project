@@ -1,0 +1,121 @@
+{
+  "annotations": {"list": []},
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "id": 1,
+      "type": "row",
+      "title": "ElastiCache Serverless - capacity and pressure",
+      "gridPos": {"x": 0, "y": 0, "w": 24, "h": 1},
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Processing units consumed",
+      "description": "ECPUs consumed in each CloudWatch period.",
+      "gridPos": {"x": 0, "y": 1, "w": 12, "h": 8},
+      "datasource": {"type": "cloudwatch", "uid": "cloudwatch"},
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "options": {"legend": {"displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "max"]}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"refId": "A", "datasource": {"type": "cloudwatch", "uid": "cloudwatch"}, "queryMode": "Metrics", "metricQueryType": 0, "metricEditorMode": 0, "id": "", "expression": "", "sqlExpression": "", "namespace": "AWS/ElastiCache", "metricName": "ElastiCacheProcessingUnits", "dimensions": {"clusterId": "tcp-lab"}, "region": "default", "statistic": "Sum", "period": "60", "label": "ECPUs / minute", "matchExact": true}
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Request latency",
+      "gridPos": {"x": 12, "y": 1, "w": 12, "h": 8},
+      "datasource": {"type": "cloudwatch", "uid": "cloudwatch"},
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
+      "options": {"legend": {"displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "max"]}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"refId": "A", "datasource": {"type": "cloudwatch", "uid": "cloudwatch"}, "queryMode": "Metrics", "metricQueryType": 0, "metricEditorMode": 0, "id": "", "expression": "", "sqlExpression": "", "namespace": "AWS/ElastiCache", "metricName": "SuccessfulReadRequestLatency", "dimensions": {"clusterId": "tcp-lab"}, "region": "default", "statistic": "Average", "period": "60", "label": "Read", "matchExact": true},
+        {"refId": "B", "datasource": {"type": "cloudwatch", "uid": "cloudwatch"}, "queryMode": "Metrics", "metricQueryType": 0, "metricEditorMode": 0, "id": "", "expression": "", "sqlExpression": "", "namespace": "AWS/ElastiCache", "metricName": "SuccessfulWriteRequestLatency", "dimensions": {"clusterId": "tcp-lab"}, "region": "default", "statistic": "Average", "period": "60", "label": "Write", "matchExact": true}
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Connections",
+      "gridPos": {"x": 0, "y": 9, "w": 12, "h": 8},
+      "datasource": {"type": "cloudwatch", "uid": "cloudwatch"},
+      "fieldConfig": {"defaults": {"unit": "short", "min": 0}, "overrides": []},
+      "options": {"legend": {"displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "max"]}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"refId": "A", "datasource": {"type": "cloudwatch", "uid": "cloudwatch"}, "queryMode": "Metrics", "metricQueryType": 0, "metricEditorMode": 0, "id": "", "expression": "", "sqlExpression": "", "namespace": "AWS/ElastiCache", "metricName": "CurrConnections", "dimensions": {"clusterId": "tcp-lab"}, "region": "default", "statistic": "Average", "period": "60", "label": "Current", "matchExact": true},
+        {"refId": "B", "datasource": {"type": "cloudwatch", "uid": "cloudwatch"}, "queryMode": "Metrics", "metricQueryType": 0, "metricEditorMode": 0, "id": "", "expression": "", "sqlExpression": "", "namespace": "AWS/ElastiCache", "metricName": "NewConnections", "dimensions": {"clusterId": "tcp-lab"}, "region": "default", "statistic": "Sum", "period": "60", "label": "New / minute", "matchExact": true}
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Commands and throttling",
+      "gridPos": {"x": 12, "y": 9, "w": 12, "h": 8},
+      "datasource": {"type": "cloudwatch", "uid": "cloudwatch"},
+      "fieldConfig": {"defaults": {"unit": "short", "min": 0}, "overrides": [{"matcher": {"id": "byName", "options": "Throttled / minute"}, "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "red"}}]}]},
+      "options": {"legend": {"displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "max"]}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"refId": "A", "datasource": {"type": "cloudwatch", "uid": "cloudwatch"}, "queryMode": "Metrics", "metricQueryType": 0, "metricEditorMode": 0, "id": "", "expression": "", "sqlExpression": "", "namespace": "AWS/ElastiCache", "metricName": "TotalCmdsCount", "dimensions": {"clusterId": "tcp-lab"}, "region": "default", "statistic": "Sum", "period": "60", "label": "Commands / minute", "matchExact": true},
+        {"refId": "B", "datasource": {"type": "cloudwatch", "uid": "cloudwatch"}, "queryMode": "Metrics", "metricQueryType": 0, "metricEditorMode": 0, "id": "", "expression": "", "sqlExpression": "", "namespace": "AWS/ElastiCache", "metricName": "ThrottledCmds", "dimensions": {"clusterId": "tcp-lab"}, "region": "default", "statistic": "Sum", "period": "60", "label": "Throttled / minute", "matchExact": true}
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Network traffic",
+      "gridPos": {"x": 0, "y": 17, "w": 12, "h": 8},
+      "datasource": {"type": "cloudwatch", "uid": "cloudwatch"},
+      "fieldConfig": {"defaults": {"unit": "bytes"}, "overrides": []},
+      "options": {"legend": {"displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "max"]}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"refId": "A", "datasource": {"type": "cloudwatch", "uid": "cloudwatch"}, "queryMode": "Metrics", "metricQueryType": 0, "metricEditorMode": 0, "id": "", "expression": "", "sqlExpression": "", "namespace": "AWS/ElastiCache", "metricName": "NetworkBytesIn", "dimensions": {"clusterId": "tcp-lab"}, "region": "default", "statistic": "Sum", "period": "60", "label": "Received / minute", "matchExact": true},
+        {"refId": "B", "datasource": {"type": "cloudwatch", "uid": "cloudwatch"}, "queryMode": "Metrics", "metricQueryType": 0, "metricEditorMode": 0, "id": "", "expression": "", "sqlExpression": "", "namespace": "AWS/ElastiCache", "metricName": "NetworkBytesOut", "dimensions": {"clusterId": "tcp-lab"}, "region": "default", "statistic": "Sum", "period": "60", "label": "Sent / minute", "matchExact": true}
+      ]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Stored data and items",
+      "gridPos": {"x": 12, "y": 17, "w": 12, "h": 8},
+      "datasource": {"type": "cloudwatch", "uid": "cloudwatch"},
+      "fieldConfig": {"defaults": {"min": 0}, "overrides": [{"matcher": {"id": "byName", "options": "Bytes used"}, "properties": [{"id": "unit", "value": "bytes"}]}]},
+      "options": {"legend": {"displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "max"]}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"refId": "A", "datasource": {"type": "cloudwatch", "uid": "cloudwatch"}, "queryMode": "Metrics", "metricQueryType": 0, "metricEditorMode": 0, "id": "", "expression": "", "sqlExpression": "", "namespace": "AWS/ElastiCache", "metricName": "BytesUsedForCache", "dimensions": {"clusterId": "tcp-lab"}, "region": "default", "statistic": "Average", "period": "60", "label": "Bytes used", "matchExact": true},
+        {"refId": "B", "datasource": {"type": "cloudwatch", "uid": "cloudwatch"}, "queryMode": "Metrics", "metricQueryType": 0, "metricEditorMode": 0, "id": "", "expression": "", "sqlExpression": "", "namespace": "AWS/ElastiCache", "metricName": "CurrItems", "dimensions": {"clusterId": "tcp-lab"}, "region": "default", "statistic": "Average", "period": "60", "label": "Items", "matchExact": true}
+      ]
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Cache efficiency and data loss signals",
+      "gridPos": {"x": 0, "y": 25, "w": 24, "h": 8},
+      "datasource": {"type": "cloudwatch", "uid": "cloudwatch"},
+      "fieldConfig": {"defaults": {"min": 0}, "overrides": [{"matcher": {"id": "byName", "options": "Hit rate"}, "properties": [{"id": "unit", "value": "percent"}, {"id": "max", "value": 100}]}, {"matcher": {"id": "byName", "options": "Evictions / minute"}, "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "red"}}]}]},
+      "options": {"legend": {"displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "max"]}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"refId": "A", "datasource": {"type": "cloudwatch", "uid": "cloudwatch"}, "queryMode": "Metrics", "metricQueryType": 0, "metricEditorMode": 0, "id": "", "expression": "", "sqlExpression": "", "namespace": "AWS/ElastiCache", "metricName": "CacheHitRate", "dimensions": {"clusterId": "tcp-lab"}, "region": "default", "statistic": "Average", "period": "60", "label": "Hit rate", "matchExact": true},
+        {"refId": "B", "datasource": {"type": "cloudwatch", "uid": "cloudwatch"}, "queryMode": "Metrics", "metricQueryType": 0, "metricEditorMode": 0, "id": "", "expression": "", "sqlExpression": "", "namespace": "AWS/ElastiCache", "metricName": "Evictions", "dimensions": {"clusterId": "tcp-lab"}, "region": "default", "statistic": "Sum", "period": "60", "label": "Evictions / minute", "matchExact": true}
+      ]
+    }
+  ],
+  "refresh": "1m",
+  "schemaVersion": 41,
+  "tags": ["tcp-lab", "eks", "elasticache"],
+  "templating": {"list": []},
+  "time": {"from": "now-1h", "to": "now"},
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "TCP Lab - ElastiCache Serverless",
+  "uid": "tcp-lab-elasticache",
+  "version": 3,
+  "weekStart": ""
+}

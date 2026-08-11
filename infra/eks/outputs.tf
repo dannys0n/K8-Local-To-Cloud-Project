@@ -30,6 +30,10 @@ output "valkey_tls" {
   value = true
 }
 
+output "grafana_cloudwatch_role_arn" {
+  value = aws_iam_role.grafana_cloudwatch.arn
+}
+
 output "nlb_source_cidrs" {
   value = var.nlb_source_cidrs
 }

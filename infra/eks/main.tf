@@ -138,3 +138,47 @@ resource "aws_elasticache_serverless_cache" "valkey" {
     }
   }
 }
+
+resource "aws_iam_role" "grafana_cloudwatch" {
+  name_prefix = "${var.cluster_name}-grafana-cloudwatch-"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Principal = {
+        Service = "pods.eks.amazonaws.com"
+      }
+      Action = [
+        "sts:AssumeRole",
+        "sts:TagSession",
+      ]
+    }]
+  })
+}
+
+resource "aws_iam_role_policy" "grafana_cloudwatch" {
+  name = "elasticache-cloudwatch-read"
+  role = aws_iam_role.grafana_cloudwatch.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Action = [
+        "cloudwatch:GetMetricData",
+        "cloudwatch:GetMetricStatistics",
+        "cloudwatch:ListMetrics",
+        "logs:DescribeLogGroups",
+      ]
+      Resource = "*"
+    }]
+  })
+}
+
+resource "aws_eks_pod_identity_association" "grafana_cloudwatch" {
+  cluster_name    = module.eks.cluster_name
+  namespace       = "tcp-lab"
+  service_account = "grafana-cloudwatch"
+  role_arn        = aws_iam_role.grafana_cloudwatch.arn
+}
