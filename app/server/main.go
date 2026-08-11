@@ -55,36 +55,41 @@ type assignment struct {
 }
 
 type server struct {
-	instanceID          string
-	podName             string
-	routeAddress        string
-	valkey              *redis.ClusterClient
-	leaseDuration       time.Duration
-	renewInterval       time.Duration
-	tickInterval        time.Duration
-	tick                atomic.Uint64
-	nextRoute           atomic.Uint64
-	inputs              chan inputCommand
-	entityMu            sync.Mutex
-	entities            map[string]*entityState
-	remoteEntityMu      sync.RWMutex
-	remoteEntities      map[spatialCell]map[int64]visibilityCellSnapshot
-	topologyMu          sync.RWMutex
-	topology            []locationDefinition
-	locationIndex       *locationNode
-	visibilityIndex     *visibilityLocationNode
-	topologyRevision    atomic.Int64
-	mu                  sync.RWMutex
-	assignment          *assignment
-	activeConnections   atomic.Int64
-	acceptedConnections atomic.Uint64
-	inputCommands       atomic.Uint64
-	inputQueueFull      atomic.Uint64
-	handoffAttempts     atomic.Uint64
-	handoffFailures     atomic.Uint64
-	stateErrors         atomic.Uint64
-	tickDurationBits    atomic.Uint64
-	maxTickDurationBits atomic.Uint64
+	instanceID               string
+	podName                  string
+	routeAddress             string
+	valkey                   *redis.ClusterClient
+	leaseDuration            time.Duration
+	renewInterval            time.Duration
+	tickInterval             time.Duration
+	tick                     atomic.Uint64
+	nextRoute                atomic.Uint64
+	inputs                   chan inputCommand
+	entityMu                 sync.Mutex
+	entities                 map[string]*entityState
+	remoteEntityMu           sync.RWMutex
+	remoteEntities           map[spatialCell]map[int64]visibilityCellSnapshot
+	topologyMu               sync.RWMutex
+	topology                 []locationDefinition
+	locationIndex            *locationNode
+	visibilityIndex          *visibilityLocationNode
+	topologyRevision         atomic.Int64
+	mu                       sync.RWMutex
+	assignment               *assignment
+	activeConnections        atomic.Int64
+	acceptedConnections      atomic.Uint64
+	inputCommands            atomic.Uint64
+	inputQueueFull           atomic.Uint64
+	handoffAttempts          atomic.Uint64
+	handoffFailures          atomic.Uint64
+	stateErrors              atomic.Uint64
+	tickDurationBits         atomic.Uint64
+	maxTickDurationBits      atomic.Uint64
+	visibilityManifestReads  atomic.Int64
+	visibilitySnapshotReads  atomic.Int64
+	visibilityRemoteEntities atomic.Int64
+	visibilityDurationBits   atomic.Uint64
+	visibilityFailures       atomic.Uint64
 }
 
 type response struct {

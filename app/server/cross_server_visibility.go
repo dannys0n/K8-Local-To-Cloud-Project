@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"math"
 	"strconv"
 	"time"
@@ -96,8 +97,12 @@ func (s *server) runVisibilityExchange(ctx context.Context) {
 }
 
 func (s *server) exchangeVisibility(ctx context.Context) {
+	started := time.Now()
+	defer func() { s.visibilityDurationBits.Store(math.Float64bits(time.Since(started).Seconds())) }()
 	current := s.currentAssignment()
 	if current == nil {
+		s.visibilityManifestReads.Store(0)
+		s.visibilitySnapshotReads.Store(0)
 		s.replaceRemoteVisibility(nil, time.Now())
 		return
 	}
@@ -149,7 +154,7 @@ func (s *server) exchangeVisibility(ctx context.Context) {
 	queryCtx, cancel := context.WithTimeout(ctx, 200*time.Millisecond)
 	defer cancel()
 	manifestCommands := make(map[int64]*redis.StringCmd, len(requestedCells))
-	_, _ = s.valkey.Pipelined(queryCtx, func(pipe redis.Pipeliner) error {
+	_, pipelineErr := s.valkey.Pipelined(queryCtx, func(pipe redis.Pipeliner) error {
 		pipe.Set(queryCtx, visibilityManifestKey(current.LocationID), manifestPayload, visibilitySnapshotTTL)
 		for cell, entities := range localCells {
 			payload, err := json.Marshal(visibilityCellSnapshot{
@@ -166,6 +171,10 @@ func (s *server) exchangeVisibility(ctx context.Context) {
 		}
 		return nil
 	})
+	if pipelineErr != nil && !errors.Is(pipelineErr, redis.Nil) {
+		s.visibilityFailures.Add(1)
+	}
+	s.visibilityManifestReads.Store(int64(len(manifestCommands)))
 
 	wanted := make(map[remoteCellKey]struct{})
 	for locationID, command := range manifestCommands {
@@ -174,8 +183,11 @@ func (s *server) exchangeVisibility(ctx context.Context) {
 			continue
 		}
 		var remoteManifest visibilityCellManifest
-		if json.Unmarshal(value, &remoteManifest) != nil || remoteManifest.LocationID != locationID ||
-			now.Sub(time.UnixMilli(remoteManifest.Published)) >= visibilitySnapshotTTL {
+		if json.Unmarshal(value, &remoteManifest) != nil {
+			s.visibilityFailures.Add(1)
+			continue
+		}
+		if remoteManifest.LocationID != locationID || now.Sub(time.UnixMilli(remoteManifest.Published)) >= visibilitySnapshotTTL {
 			continue
 		}
 		for _, cell := range remoteManifest.Cells {
@@ -187,13 +199,17 @@ func (s *server) exchangeVisibility(ctx context.Context) {
 
 	commands := make(map[remoteCellKey]*redis.StringCmd, len(wanted))
 	if len(wanted) > 0 {
-		_, _ = s.valkey.Pipelined(queryCtx, func(pipe redis.Pipeliner) error {
+		_, pipelineErr = s.valkey.Pipelined(queryCtx, func(pipe redis.Pipeliner) error {
 			for key := range wanted {
 				commands[key] = pipe.Get(queryCtx, visibilityCellKey(key))
 			}
 			return nil
 		})
+		if pipelineErr != nil && !errors.Is(pipelineErr, redis.Nil) {
+			s.visibilityFailures.Add(1)
+		}
 	}
+	s.visibilitySnapshotReads.Store(int64(len(commands)))
 
 	updates := make(map[remoteCellKey]visibilityCellSnapshot, len(commands))
 	for key, command := range commands {
@@ -202,7 +218,11 @@ func (s *server) exchangeVisibility(ctx context.Context) {
 			continue
 		}
 		var snapshot visibilityCellSnapshot
-		if json.Unmarshal(value, &snapshot) == nil && snapshot.LocationID == key.LocationID {
+		if json.Unmarshal(value, &snapshot) != nil {
+			s.visibilityFailures.Add(1)
+			continue
+		}
+		if snapshot.LocationID == key.LocationID {
 			updates[key] = snapshot
 		}
 	}
@@ -232,12 +252,15 @@ func inverseMercatorY(y float64) float64 {
 func (s *server) mergeRemoteVisibility(wanted map[remoteCellKey]struct{}, updates map[remoteCellKey]visibilityCellSnapshot, now time.Time) {
 	s.remoteEntityMu.Lock()
 	defer s.remoteEntityMu.Unlock()
+	remoteEntities := 0
 	for cell, locations := range s.remoteEntities {
 		for locationID, snapshot := range locations {
 			key := remoteCellKey{LocationID: locationID, Cell: cell}
 			_, stillWanted := wanted[key]
 			if !stillWanted || now.Sub(time.UnixMilli(snapshot.Published)) >= visibilitySnapshotTTL {
 				delete(locations, locationID)
+			} else {
+				remoteEntities += len(snapshot.Entities)
 			}
 		}
 		if len(locations) == 0 {
@@ -249,21 +272,29 @@ func (s *server) mergeRemoteVisibility(wanted map[remoteCellKey]struct{}, update
 			if s.remoteEntities[key.Cell] == nil {
 				s.remoteEntities[key.Cell] = make(map[int64]visibilityCellSnapshot)
 			}
+			if previous, exists := s.remoteEntities[key.Cell][key.LocationID]; exists {
+				remoteEntities -= len(previous.Entities)
+			}
 			s.remoteEntities[key.Cell][key.LocationID] = snapshot
+			remoteEntities += len(snapshot.Entities)
 		}
 	}
+	s.visibilityRemoteEntities.Store(int64(remoteEntities))
 }
 
 func (s *server) replaceRemoteVisibility(snapshots map[remoteCellKey]visibilityCellSnapshot, now time.Time) {
 	s.remoteEntityMu.Lock()
 	defer s.remoteEntityMu.Unlock()
 	clear(s.remoteEntities)
+	remoteEntities := 0
 	for key, snapshot := range snapshots {
 		if now.Sub(time.UnixMilli(snapshot.Published)) < visibilitySnapshotTTL {
 			if s.remoteEntities[key.Cell] == nil {
 				s.remoteEntities[key.Cell] = make(map[int64]visibilityCellSnapshot)
 			}
 			s.remoteEntities[key.Cell][key.LocationID] = snapshot
+			remoteEntities += len(snapshot.Entities)
 		}
 	}
+	s.visibilityRemoteEntities.Store(int64(remoteEntities))
 }

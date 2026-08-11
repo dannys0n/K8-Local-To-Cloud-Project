@@ -66,6 +66,8 @@ spec:
               value: server
             - name: PROMETHEUS_URL
               value: http://prometheus.tcp-lab.svc.cluster.local:9090
+            - name: CPU_REQUEST_MILLICORES
+              value: "100"
             - name: SCALE_UP_PERCENT
               value: "70"
             - name: SCALE_DOWN_PERCENT
