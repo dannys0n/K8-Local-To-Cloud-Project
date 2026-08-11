@@ -11,6 +11,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from redis.cluster import RedisCluster
+from redis.exceptions import RedisError
 
 
 MIN_REPLICAS = 1
@@ -101,6 +102,7 @@ class Scaler:
         host, port = address.rsplit(":", 1)
         deadline = time.monotonic() + 90
         while True:
+            client = None
             try:
                 client = RedisCluster(
                     host=host, port=int(port), decode_responses=True,
@@ -111,11 +113,19 @@ class Scaler:
                 )
                 if client.cluster_info().get("cluster_state") == "ok":
                     return client
+                client.close()
             except Exception as error:  # Startup may precede cluster slot assignment.
+                if client is not None:
+                    client.close()
                 print(f"waiting for valkey cluster: {error}", flush=True)
             if time.monotonic() >= deadline:
                 raise RuntimeError("valkey cluster did not become ready within 90 seconds")
             time.sleep(1)
+
+    def reconnect_valkey(self) -> None:
+        if self.valkey is not None:
+            self.valkey.close()
+        self.valkey = self.connect_valkey()
 
     @staticmethod
     def location_key(location_id: int) -> str:
@@ -183,6 +193,15 @@ class Scaler:
                     self.reconcile_locations(desired)
                     needs_reconcile = False
                     print(json.dumps({"target": self.target, "current": current, "desired": desired}), flush=True)
+            except RedisError as error:
+                needs_reconcile = self.manage_locations
+                print(json.dumps({"target": self.target, "error": str(error),
+                                  "action": "reconnecting valkey"}), flush=True)
+                try:
+                    self.reconnect_valkey()
+                except Exception as reconnect_error:
+                    print(json.dumps({"target": self.target,
+                                      "error": f"valkey reconnect failed: {reconnect_error}"}), flush=True)
             except Exception as error:
                 print(json.dumps({"target": self.target, "error": str(error)}), flush=True)
             time.sleep(max(0.1, self.interval - (time.monotonic() - started)))

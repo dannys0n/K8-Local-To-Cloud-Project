@@ -50,8 +50,10 @@ through AWS tooling and then uses the EKS overlay to deploy the same base.
 
 The Go workloads remain single packages with narrow source boundaries. Server
 startup, protocol, and simulation stay in `app/server/main.go`; Valkey ownership
-and recovery operations are isolated in `app/server/valkey_state.go`; same-server spatial relevance is isolated in
-`app/server/visibility.go`. Gateway routing and client sessions stay in
+and recovery operations are isolated in `app/server/valkey_state.go`; exact
+spatial relevance is isolated in `app/server/visibility.go`, while transient
+cross-server cell exchange is isolated in `app/server/cross_server_visibility.go`.
+Gateway routing and client sessions stay in
 `app/gateway/main.go`; its private health and statistics HTTP surface is isolated
 in `app/gateway/stats.go`. This separation does not add runtime components.
 
@@ -174,9 +176,22 @@ north and south limits, keeping apparent map speed consistent. Input stops autom
 refresh arrives for eight ticks (400 ms). Movement is not written on each tick.
 Valkey records the last server-claim coordinate as a recovery point.
 
-Input responses include nearby entities currently authoritative on the same
-server. The server applies the existing map-radius filter directly to its local
-entity state; clients do not receive entities owned by other servers. Idle
+Input responses include nearby entities authoritative on the same server and on
+other servers whose authority may intersect a local client's view radius.
+Candidate servers are selected through an in-memory Web Mercator spatial index;
+Valkey is not scanned for discovery. Each server groups its entities into a
+fixed 64-by-64 wrapped world grid and publishes only its occupied cells as
+two-second Valkey snapshots at 20 Hz. A compact per-server manifest lists which
+cells are occupied, so readers intersect requested cells with existing cells
+instead of querying every candidate server/cell combination. Manifest and
+matching snapshot reads are each deduplicated across all local clients and
+batched per server tick rather than performed per client. The existing
+client-specific map-radius filter is applied
+locally after cell snapshots are merged. This
+transient visibility path does not participate in ownership, handoff, recovery,
+or routing. Browser and dummy clients expose separate server, cross-server, and
+spatial relevance controls. Same-server and cross-server sources can be selected
+independently; spatial relevance applies to whichever sources are enabled. Idle
 clients send zero-axis heartbeats at 20 Hz.
 
 After every movement tick, the server checks the resulting coordinate against

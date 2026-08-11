@@ -90,8 +90,8 @@ func connectValkey(ctx context.Context, logger *slog.Logger) (*redis.ClusterClie
 	}
 	options := &redis.ClusterOptions{
 		Addrs: addresses, MaxRedirects: 8,
-		Username: strings.TrimSpace(os.Getenv("VALKEY_USERNAME")),
-		Password: os.Getenv("VALKEY_PASSWORD"),
+		Username:    strings.TrimSpace(os.Getenv("VALKEY_USERNAME")),
+		Password:    os.Getenv("VALKEY_PASSWORD"),
 		DialTimeout: time.Second, ReadTimeout: time.Second, WriteTimeout: time.Second,
 		PoolSize: 16, MinIdleConns: 1,
 	}
@@ -226,7 +226,7 @@ func (s *server) loadEntity(ctx context.Context, uid string) (*entityState, bool
 	if err != nil {
 		return nil, false, err
 	}
-	state := &entityState{viewZoom: minimumViewZoom}
+	state := &entityState{viewZoom: minimumViewZoom, serverRelevant: true, crossServerRelevant: true}
 	if len(values) == 0 {
 		return state, false, nil
 	}

@@ -28,16 +28,17 @@ const (
 type counters struct{ disconnected, gateway, ready atomic.Int64 }
 
 type client struct {
-	host                string
-	uid                 string
-	state               int
-	counts              *counters
-	conn                net.Conn
-	reader              *bufio.Reader
-	latitude, longitude float64
-	hasPosition         bool
-	serverRelevance     bool
-	spatialRelevance    bool
+	host                 string
+	uid                  string
+	state                int
+	counts               *counters
+	conn                 net.Conn
+	reader               *bufio.Reader
+	latitude, longitude  float64
+	hasPosition          bool
+	serverRelevance      bool
+	spatialRelevance     bool
+	crossServerRelevance bool
 }
 
 func (c *client) setState(next int) {
@@ -156,8 +157,9 @@ func (c *client) run(ctx context.Context, rng *mathrand.Rand) {
 			if c.state == 2 {
 				sequence++
 				body, err := c.request(fmt.Sprintf(
-					"@input %s %d %.3f %.3f %.2f %t %t",
-					c.uid, sequence, x, y, float64(zoom), c.serverRelevance, c.serverRelevance && c.spatialRelevance,
+					"@input %s %d %.3f %.3f %.2f %t %t %t",
+					c.uid, sequence, x, y, float64(zoom), c.serverRelevance,
+					c.spatialRelevance, c.crossServerRelevance,
 				))
 				if err == nil {
 					lat, latOK := body["client_latitude"].(float64)
@@ -202,6 +204,7 @@ func main() {
 	count := flag.Int("clients", 1, "number of clients")
 	serverRelevance := flag.Bool("server-relevance", true, "request entities authoritative on the same server")
 	spatialRelevance := flag.Bool("spatial-relevance", true, "spatially filter requested server entities")
+	crossServerRelevance := flag.Bool("cross-server-relevance", true, "request relevant entities from other servers")
 	flag.Parse()
 	if *count < 1 || *count > 500 {
 		fmt.Fprintln(os.Stderr, "clients must be between 1 and 500")
@@ -217,7 +220,8 @@ func main() {
 		uid := "bot:" + randomID()
 		item := &client{
 			host: net.JoinHostPort(*host, fmt.Sprint(*port)), uid: uid, counts: &counts,
-			serverRelevance: *serverRelevance, spatialRelevance: *serverRelevance && *spatialRelevance,
+			serverRelevance: *serverRelevance, spatialRelevance: *spatialRelevance,
+			crossServerRelevance: *crossServerRelevance,
 		}
 		clients = append(clients, item)
 		wait.Add(1)

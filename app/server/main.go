@@ -55,33 +55,41 @@ type assignment struct {
 }
 
 type server struct {
-	instanceID          string
-	podName             string
-	routeAddress        string
-	valkey              *redis.ClusterClient
-	leaseDuration       time.Duration
-	renewInterval       time.Duration
-	tickInterval        time.Duration
-	tick                atomic.Uint64
-	nextRoute           atomic.Uint64
-	inputs              chan inputCommand
-	entityMu            sync.Mutex
-	entities            map[string]*entityState
-	topologyMu          sync.RWMutex
-	topology            []locationDefinition
-	locationIndex       *locationNode
-	topologyRevision    atomic.Int64
-	mu                  sync.RWMutex
-	assignment          *assignment
-	activeConnections   atomic.Int64
-	acceptedConnections atomic.Uint64
-	inputCommands       atomic.Uint64
-	inputQueueFull      atomic.Uint64
-	handoffAttempts     atomic.Uint64
-	handoffFailures     atomic.Uint64
-	stateErrors         atomic.Uint64
-	tickDurationBits    atomic.Uint64
-	maxTickDurationBits atomic.Uint64
+	instanceID               string
+	podName                  string
+	routeAddress             string
+	valkey                   *redis.ClusterClient
+	leaseDuration            time.Duration
+	renewInterval            time.Duration
+	tickInterval             time.Duration
+	tick                     atomic.Uint64
+	nextRoute                atomic.Uint64
+	inputs                   chan inputCommand
+	entityMu                 sync.Mutex
+	entities                 map[string]*entityState
+	remoteEntityMu           sync.RWMutex
+	remoteEntities           map[spatialCell]map[int64]visibilityCellSnapshot
+	topologyMu               sync.RWMutex
+	topology                 []locationDefinition
+	locationIndex            *locationNode
+	visibilityIndex          *visibilityLocationNode
+	topologyRevision         atomic.Int64
+	mu                       sync.RWMutex
+	assignment               *assignment
+	activeConnections        atomic.Int64
+	acceptedConnections      atomic.Uint64
+	inputCommands            atomic.Uint64
+	inputQueueFull           atomic.Uint64
+	handoffAttempts          atomic.Uint64
+	handoffFailures          atomic.Uint64
+	stateErrors              atomic.Uint64
+	tickDurationBits         atomic.Uint64
+	maxTickDurationBits      atomic.Uint64
+	visibilityManifestReads  atomic.Int64
+	visibilitySnapshotReads  atomic.Int64
+	visibilityRemoteEntities atomic.Int64
+	visibilityDurationBits   atomic.Uint64
+	visibilityFailures       atomic.Uint64
 }
 
 type response struct {
@@ -111,17 +119,18 @@ type visibleEntity struct {
 }
 
 type inputIntent struct {
-	ClientUID        string
-	Sequence         uint64
-	X                float64
-	Y                float64
-	Zoom             float64
-	ServerRelevance  bool
-	SpatialRelevance bool
-	Teleport         bool
-	Resume           bool
-	Latitude         float64
-	Longitude        float64
+	ClientUID            string
+	Sequence             uint64
+	X                    float64
+	Y                    float64
+	Zoom                 float64
+	ServerRelevance      bool
+	SpatialRelevance     bool
+	CrossServerRelevance bool
+	Teleport             bool
+	Resume               bool
+	Latitude             float64
+	Longitude            float64
 }
 
 type inputCommand struct {
@@ -142,14 +151,16 @@ type inputResult struct {
 }
 
 type entityState struct {
-	latitude      float64
-	longitude     float64
-	sequence      uint64
-	axisX         float64
-	axisY         float64
-	viewZoom      float64
-	lastInputTick uint64
-	reroute       int64
+	latitude            float64
+	longitude           float64
+	sequence            uint64
+	axisX               float64
+	axisY               float64
+	viewZoom            float64
+	serverRelevant      bool
+	crossServerRelevant bool
+	lastInputTick       uint64
+	reroute             int64
 }
 
 func main() {
@@ -192,6 +203,7 @@ func main() {
 		valkey:        cache,
 		leaseDuration: leaseDuration, renewInterval: renewInterval, tickInterval: tickInterval,
 		inputs: make(chan inputCommand, 8192), entities: make(map[string]*entityState),
+		remoteEntities: make(map[spatialCell]map[int64]visibilityCellSnapshot),
 	}
 	if err := s.refreshTopology(ctx); err != nil {
 		logger.Error("load location topology", "error", err)
@@ -201,6 +213,7 @@ func main() {
 	go s.runTopologyRefresh(ctx, logger)
 	go s.heartbeat(ctx, logger)
 	go s.runTicks(ctx)
+	go s.runVisibilityExchange(ctx)
 	go s.serveMetrics(ctx, envOrDefault("STATS_ADDR", ":8405"), logger)
 
 	listenAddr := envOrDefault("LISTEN_ADDR", ":7000")
@@ -295,6 +308,8 @@ drained:
 					entity.axisY = command.intent.Y
 				}
 				entity.viewZoom = command.intent.Zoom
+				entity.serverRelevant = command.intent.ServerRelevance
+				entity.crossServerRelevant = command.intent.CrossServerRelevance
 			}
 		}
 	}
@@ -385,6 +400,7 @@ func (s *server) refreshTopology(ctx context.Context) error {
 	s.topologyMu.Lock()
 	s.topology = loaded
 	s.locationIndex = buildLocationIndex(loaded)
+	s.visibilityIndex = buildVisibilityLocationIndex(loaded)
 	s.topologyMu.Unlock()
 	s.topologyRevision.Store(revision)
 	return nil
@@ -729,7 +745,7 @@ func parseInput(message string) (inputIntent, bool, error) {
 		return inputIntent{}, false, nil
 	}
 	fields := strings.Fields(arguments)
-	if (len(fields) != 5 && len(fields) != 7) || !validIdentifier(fields[0]) {
+	if (len(fields) != 5 && len(fields) != 7 && len(fields) != 8) || !validIdentifier(fields[0]) {
 		return inputIntent{}, true, errors.New("input requires client UID, sequence, x axis, y axis, zoom, and optional relevance flags")
 	}
 	sequence, sequenceErr := strconv.ParseUint(fields[1], 10, 64)
@@ -741,18 +757,22 @@ func parseInput(message string) (inputIntent, bool, error) {
 		x < -1 || x > 1 || y < -1 || y > 1 || zoom < minimumViewZoom || zoom > maximumViewZoom {
 		return inputIntent{}, true, errors.New("input axes or zoom are outside their allowed ranges")
 	}
-	serverRelevance, spatialRelevance := true, true
-	if len(fields) == 7 {
-		var serverErr, spatialErr error
+	serverRelevance, spatialRelevance, crossServerRelevance := true, true, true
+	if len(fields) >= 7 {
+		var serverErr, spatialErr, crossServerErr error
 		serverRelevance, serverErr = strconv.ParseBool(fields[5])
 		spatialRelevance, spatialErr = strconv.ParseBool(fields[6])
-		if serverErr != nil || spatialErr != nil {
+		if len(fields) == 8 {
+			crossServerRelevance, crossServerErr = strconv.ParseBool(fields[7])
+		}
+		if serverErr != nil || spatialErr != nil || crossServerErr != nil {
 			return inputIntent{}, true, errors.New("input relevance flags must be true or false")
 		}
 	}
 	return inputIntent{
 		ClientUID: fields[0], Sequence: sequence, X: x, Y: y, Zoom: zoom,
-		ServerRelevance: serverRelevance, SpatialRelevance: serverRelevance && spatialRelevance,
+		ServerRelevance: serverRelevance, SpatialRelevance: spatialRelevance,
+		CrossServerRelevance: crossServerRelevance,
 	}, true, nil
 }
 
@@ -776,7 +796,7 @@ func (s *server) writeInputResponse(writer *bufio.Writer, current *assignment, i
 	}
 	entities, entityCount := s.visibleEntities(
 		intent.ClientUID, result.latitude, result.longitude, result.zoom,
-		intent.ServerRelevance, intent.SpatialRelevance,
+		intent.ServerRelevance, intent.SpatialRelevance, intent.CrossServerRelevance,
 	)
 	body, err := json.Marshal(response{
 		Server: current.ServerID, LocationID: current.LocationID,

@@ -71,6 +71,16 @@ func (s *server) serveMetrics(ctx context.Context, address string, logger *slog.
 				"tcp_server_tick_duration_max_seconds %g\n"+
 				"# TYPE tcp_server_tick_interval_seconds gauge\n"+
 				"tcp_server_tick_interval_seconds %g\n"+
+				"# TYPE tcp_server_visibility_manifest_reads gauge\n"+
+				"tcp_server_visibility_manifest_reads %d\n"+
+				"# TYPE tcp_server_visibility_snapshot_reads gauge\n"+
+				"tcp_server_visibility_snapshot_reads %d\n"+
+				"# TYPE tcp_server_visibility_remote_entities gauge\n"+
+				"tcp_server_visibility_remote_entities %d\n"+
+				"# TYPE tcp_server_visibility_exchange_duration_seconds gauge\n"+
+				"tcp_server_visibility_exchange_duration_seconds %g\n"+
+				"# TYPE tcp_server_visibility_failures_total counter\n"+
+				"tcp_server_visibility_failures_total %d\n"+
 				"# TYPE tcp_server_topology_revision gauge\n"+
 				"tcp_server_topology_revision %d\n"+
 				"# TYPE tcp_server_assignment gauge\n"+
@@ -85,7 +95,9 @@ func (s *server) serveMetrics(ctx context.Context, address string, logger *slog.
 			s.inputCommands.Load(), s.inputQueueFull.Load(), s.handoffAttempts.Load(),
 			s.handoffFailures.Load(), s.stateErrors.Load(),
 			math.Float64frombits(s.tickDurationBits.Load()), math.Float64frombits(s.maxTickDurationBits.Load()),
-			s.tickInterval.Seconds(), s.topologyRevision.Load(),
+			s.tickInterval.Seconds(), s.visibilityManifestReads.Load(), s.visibilitySnapshotReads.Load(),
+			s.visibilityRemoteEntities.Load(), math.Float64frombits(s.visibilityDurationBits.Load()),
+			s.visibilityFailures.Load(), s.topologyRevision.Load(),
 			strconv.Quote(serverID), strconv.FormatInt(locationID, 10), assigned,
 			strconv.Quote(serverID), strconv.FormatInt(locationID, 10), generation,
 			strconv.Quote(serverID), strconv.FormatInt(locationID, 10), latitude,
