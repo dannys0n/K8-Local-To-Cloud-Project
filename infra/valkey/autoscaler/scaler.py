@@ -31,6 +31,7 @@ class ShardScaler:
         self.min_shards = int(os.getenv("MIN_SHARDS", "3"))
         self.max_shards = int(os.getenv("MAX_SHARDS", "100"))
         self.minimum_scale_percent = float(os.getenv("MINIMUM_SCALE_OUT_PERCENT", "20"))
+        self.maximum_scale_in_percent = float(os.getenv("MAXIMUM_SCALE_IN_PERCENT", "50"))
         self.up_breaches = 0
         self.down_breaches = 0
         self.cooldown_until = 0.0
@@ -127,7 +128,9 @@ class ShardScaler:
             minimum = math.ceil(shards * self.minimum_scale_percent / 100)
             desired = min(self.max_shards, shards + max(minimum, proportional))
         elif self.down_breaches >= self.required_breaches and shards > self.min_shards:
-            desired = shards - 1
+            proportional = math.ceil(shards * average / self.scale_down)
+            maximum_removal = max(1, math.floor(shards * self.maximum_scale_in_percent / 100))
+            desired = max(self.min_shards, proportional, shards - maximum_removal)
         if desired != shards:
             self.set_shards(desired)
             self.up_breaches = self.down_breaches = 0
