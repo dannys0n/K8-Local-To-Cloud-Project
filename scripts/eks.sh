@@ -65,12 +65,36 @@ deploy() {
   kubectl apply -k "$ROOT/infra/observability-eks"
 }
 
+cleanup_kubernetes() {
+  if ! command -v kubectl >/dev/null; then
+    echo "Warning: kubectl was not found; Terraform will still destroy the AWS infrastructure." >&2
+    return
+  fi
+  if ! kubectl --request-timeout=10s get namespace tcp-lab >/dev/null 2>&1; then
+    echo "Warning: the EKS API is unavailable; skipping Kubernetes cleanup and continuing with Terraform." >&2
+    return
+  fi
+
+  # Removing the public Service first lets its finalizer delete the NLB before
+  # Terraform dismantles the cluster networking.
+  kubectl delete service gateway -n tcp-lab --ignore-not-found=true --wait=true --timeout=5m || \
+    echo "Warning: Gateway NLB cleanup was incomplete." >&2
+  kubectl delete -k "$ROOT/infra/observability-eks" --ignore-not-found=true --wait=true --timeout=3m || \
+    echo "Warning: observability cleanup was incomplete." >&2
+  kubectl delete -k "$ROOT/infra/autoscaler/prometheus" --ignore-not-found=true --wait=true --timeout=3m || \
+    echo "Warning: Prometheus cleanup was incomplete." >&2
+  if [[ -f "$RUNTIME/kustomization.yaml" ]]; then
+    kubectl delete -k "$RUNTIME" --ignore-not-found=true --wait=true --timeout=5m || \
+      echo "Warning: workload cleanup was incomplete; Terraform destroy will still be attempted." >&2
+  fi
+}
+
 case "$ACTION" in
   infra-up) infra_up ;;
   push) tag="$(resolve_tag)"; push_images "$tag"; echo "Pushed immutable image tag: $tag" ;;
   deploy) [[ -n "$IMAGE_TAG" ]] || { echo 'deploy requires an image tag as the second argument.' >&2; exit 1; }; deploy "$IMAGE_TAG" ;;
   up) infra_up; tag="$(resolve_tag)"; push_images "$tag"; deploy "$tag"; echo "EKS lab deployed with image tag: $tag" ;;
   status) need kubectl; kubectl get nodes; kubectl get pods,service,pdb -n tcp-lab -o wide ;;
-  down) need terraform; if [[ -f "$RUNTIME/kustomization.yaml" ]]; then kubectl delete -k "$RUNTIME" --ignore-not-found=true || true; fi; terraform -chdir="$TF_DIR" destroy ;;
+  down) need terraform; cleanup_kubernetes; terraform -chdir="$TF_DIR" destroy ;;
   *) echo "Usage: scripts/eks.sh {infra-up|push|deploy TAG|up|status|down}" >&2; exit 2 ;;
 esac

@@ -119,4 +119,15 @@ powershell -ExecutionPolicy Bypass -File scripts/eks.ps1 -Action down
 
 Review the Terraform destroy plan before confirming. ElastiCache Serverless is
 authoritative for this lab, so destroying it removes the lab state after its
-configured snapshot behavior.
+configured snapshot behavior. The script first removes the public Gateway
+Service so Kubernetes can finish deleting its NLB, then removes the remaining
+observability workloads and runs Terraform even when the Kubernetes API is
+already unavailable. Lab ECR repositories use force deletion so pushed images
+cannot block teardown. Do not delete the local Terraform state until destroy
+finishes successfully.
+
+For non-interactive disposable-environment cleanup:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/eks.ps1 -Action down -TerraformArgs "-auto-approve"
+```
