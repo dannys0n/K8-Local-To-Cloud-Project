@@ -19,6 +19,7 @@ deploy/base/          Kubernetes resources shared by every environment
 deploy/overlays/kind/ Local workload patches and in-cluster data services
 deploy/overlays/eks/  AWS-specific workload patches
 infra/kind/           Definition of the local kind cluster and its nodes
+infra/eks/            Terraform for the AWS EKS test environment
 infra/autoscaler/     Prometheus CPU collection and autoscaling policy
 scripts/              Cluster lifecycle commands
 tools/                Local client, dashboard, bots, and smoke utilities
@@ -310,6 +311,12 @@ See:
 - `docs/failure-drills.md`
 - `docs/visualization.md`
 - `docs/eks.md`
+
+The EKS environment is managed from this repository with Terraform and the
+matching `scripts/eks.ps1` or `scripts/eks.sh` command. It uses EKS Auto Mode for
+elastic worker capacity, ECR for immutable workload images, an IP-target NLB for
+the gateway, and private ElastiCache Serverless Valkey. See `docs/eks.md` before
+creating billable AWS resources.
 
 ## Design boundaries
 

@@ -18,6 +18,15 @@ kubeconfig
 .kind/
 .k3d/
 
+# Terraform local state and generated EKS deployment overlay
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+terraform.tfvars
+backend.hcl
+.generated/
+
 *.pid
 
 .pids/

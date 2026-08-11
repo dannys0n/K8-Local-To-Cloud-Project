@@ -1,0 +1,15 @@
+aws_region  = "us-west-2"
+aws_profile = "tcp-lab"
+
+# Use a currently supported EKS minor in your chosen region.
+kubernetes_version = "1.33"
+
+# Restrict this to the public IPs used by your test clients.
+nlb_source_cidrs = ["203.0.113.10/32"]
+
+# One NAT gateway is cheaper for a disposable lab. Use false for Multi-AZ NAT.
+single_nat_gateway = true
+
+tags = {
+  Owner = "local-development"
+}

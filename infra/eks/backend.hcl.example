@@ -1,0 +1,6 @@
+# Create this bucket before migrating local state. Do not commit backend.hcl.
+bucket       = "replace-with-your-terraform-state-bucket"
+key          = "tcp-lab/eks.tfstate"
+region       = "us-west-2"
+use_lockfile = true
+encrypt      = true

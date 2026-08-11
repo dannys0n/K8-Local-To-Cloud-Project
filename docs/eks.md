@@ -1,99 +1,122 @@
-# EKS overlay
+# EKS lab
 
-The local lab is fully runnable. The EKS overlay assumes an existing EKS cluster with:
+The EKS path uses the same Kubernetes base as kind. Terraform owns AWS
+infrastructure; Kustomize owns workloads. The default is EKS Auto Mode so AWS
+supplies elastic worker capacity and the Network Load Balancer without a
+repository-managed node scaler or load-balancer controller.
 
-- AWS Load Balancer Controller installed.
-- Worker capacity across multiple Availability Zones.
-- The server and gateway images pushed to ECR.
-- A managed Valkey-compatible cluster-mode endpoint available to the cluster.
-- The repository's minimal Prometheus deployment installed.
-- A `tcp-server-valkey` Secret containing comma-separated seed `addresses`.
+## What Terraform creates
 
-Before applying:
+- A three-AZ VPC with public and private subnets.
+- EKS Auto Mode with its general-purpose node pool.
+- Immutable ECR repositories for the server, gateway, and autoscaler.
+- A private, TLS-only ElastiCache Serverless Valkey cache.
+- Security-group access from EKS workloads to Valkey.
 
-1. Replace the example ECR repository in `deploy/overlays/eks/kustomization.yaml`.
-2. Build and push `app/server`, `app/gateway`, and `infra/autoscaler` to their
-   ECR repositories.
-3. Create the Valkey Secret from your AWS-integrated secret workflow; do not
-   copy the kind development credentials.
-4. Confirm the NLB annotations match your controller version and security requirements.
-5. Apply with `kubectl apply -k deploy/overlays/eks`.
-6. Read the external endpoint with `kubectl get service gateway -n tcp-lab`.
+One NAT gateway is the lab default to reduce cost. Set
+`single_nat_gateway = false` for independent NAT gateways in every AZ.
 
-The resulting Secret contract is:
+Terraform does not install Kubernetes workloads. The scripts build an ignored
+`.generated/eks` Kustomize overlay containing the ECR URLs, immutable image tag, and NLB
+source ranges, then apply the normal EKS overlay.
 
-```yaml
-apiVersion: v1
-kind: Secret
-metadata:
-  name: tcp-server-valkey
-  namespace: tcp-lab
-stringData:
-  addresses: valkey-seed.example.internal:6379
-  username: application-user
-  password: replace-through-your-secret-workflow
-  tls: "true"
+## Prerequisites
+
+- Terraform 1.8 or newer
+- AWS CLI v2 with an authenticated profile or credential environment
+- Docker with Buildx
+- kubectl
+- An AWS account allowed to create VPC, EKS, IAM, ECR, EC2, NLB, and
+  ElastiCache resources
+
+Copy the example variables and restrict public client access before creating
+anything:
+
+```powershell
+Copy-Item infra/eks/terraform.tfvars.example infra/eks/terraform.tfvars
+$env:AWS_PROFILE = "tcp-lab"
+aws sso login
 ```
 
-`username`, `password`, and `tls` are optional so the same base manifests work
-with the unauthenticated kind cluster. Rolling the server and server-autoscaler
-Deployments reloads rotated credentials.
+`terraform.tfvars` is ignored. The `nlb_source_cidrs` default is
+`0.0.0.0/0` only so an explicit first experiment is possible; a personal `/32`
+or controlled test range is safer.
 
-Install the pinned autoscaling prerequisites before applying the overlay:
+## Manage from Windows
+
+Create/update all AWS resources, configure kubectl, build and push immutable
+Linux/AMD64 images, and apply the workloads:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/eks.ps1 -Action up
+```
+
+The combined command can take several minutes because EKS and ElastiCache are
+managed AWS services. The steps can also be run independently:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/eks.ps1 -Action infra-up
+powershell -ExecutionPolicy Bypass -File scripts/eks.ps1 -Action push -ImageTag test-001
+powershell -ExecutionPolicy Bypass -File scripts/eks.ps1 -Action deploy -ImageTag test-001
+powershell -ExecutionPolicy Bypass -File scripts/eks.ps1 -Action status
+```
+
+`deploy` requires an already-pushed immutable tag. Reusing a tag is intentionally
+rejected by ECR.
+
+## Manage from Linux, macOS, or WSL
 
 ```bash
-kubectl apply -f deploy/base/namespace.yaml
-kubectl apply -k infra/autoscaler/prometheus
-kubectl rollout status deployment/prometheus -n tcp-lab --timeout=180s
+export AWS_PROFILE=tcp-lab
+aws sso login
+bash scripts/eks.sh up
+
+# Or independently:
+bash scripts/eks.sh infra-up
+bash scripts/eks.sh push test-001
+bash scripts/eks.sh deploy test-001
+bash scripts/eks.sh status
 ```
 
-Prometheus reads the kubelet's compact resource metrics through the Kubernetes node proxy and is
-not exposed outside the cluster. The EKS overlay maps `tcp-server-autoscaler` to its own ECR
-repository alongside the server and gateway images.
-The two scaler processes are ordinary one-replica Deployments, so a ReplicaSet
-can replace them on another worker after node loss without fixed pod-name conflicts.
+Buildx publishes Linux/AMD64 and Linux/ARM64 images, so EKS Auto Mode can choose
+either architecture and the same command works from Apple Silicon.
 
-The base CPU query uses a 30-second rate window because the normal kubelet
-cAdvisor housekeeping interval is ten seconds. Faster CPU decisions require the
-EKS worker bootstrap configuration to set kubelet
-`--housekeeping-interval=1s`; lowering only the Prometheus scrape or autoscaler
-interval cannot produce fresher CPU counters.
+## Deployment behavior
 
-The stats Service remains internal on EKS. Access it temporarily with:
+The public NLB targets gateway pod IPs directly and exposes TCP port 9000. AWS
+balances new connections; established TCP sessions remain on their existing
+gateway. Gateway and server autoscalers continue to use the repository's small
+Prometheus collector. When they create Pending pods, EKS Auto Mode supplies new
+worker capacity.
+
+The Valkey connection is generated from Terraform output and stored in the
+namespace-scoped `tcp-server-valkey` Secret. Only its private endpoint and TLS
+flag are stored; no cloud credentials are placed in Kubernetes.
+
+Prometheus remains internal and ephemeral. Gateway statistics are never exposed
+through the EKS NLB. Use port-forwarding for diagnostics:
 
 ```bash
 kubectl port-forward -n tcp-lab service/gateway-stats 8404:8404
+kubectl port-forward -n tcp-lab service/prometheus 9090:9090
 ```
 
-Then open `http://127.0.0.1:8404/`.
+## State and teardown
 
-The NLB Service publishes port `9000`. Location-aware clients begin with the
-small lab `@location` handshake. The gateway resolves it to the active location
-owner and can change downstream servers while preserving the client connection.
-Valkey leases assign each identity to one server pod and fence stale owners
-with a monotonically increasing generation.
+Local Terraform state is ignored, but it exists only on this workstation. For
+anything beyond an initial disposable test, create a versioned encrypted S3
+bucket and initialize with the supplied backend example:
 
-The NLB registers gateway pod IPs directly and performs TCP health checks on the
-traffic port every five seconds, requiring two successes or failures to change
-target health. Kubernetes uses separate one-second HTTP checks against each
-gateway's local health endpoint for faster in-cluster readiness and liveness
-detection. Neither health mechanism changes server ownership.
+```bash
+terraform -chdir=infra/eks init -backend-config=backend.hcl -migrate-state
+```
 
-All worker nodes are general capacity. Zone and hostname spreading use a maximum
-skew of one and honor failed-node taints. Cold replacement pods may consolidate
-across the remaining eligible workers after a failure.
+Destroying the environment removes billable resources:
 
-The workload startup probes protect up to 90 seconds of initialization before
-liveness checks can restart a container. The zero-second `NotReady` and
-`Unreachable` tolerations evict application pods as soon as the EKS control
-plane marks a node unhealthy. For infrastructure repair, use EKS managed node groups with node auto
-repair enabled and install the EKS node monitoring agent; keep enough existing
-worker capacity for replacement pods because launching a new EC2 node is not a
-realtime recovery path.
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/eks.ps1 -Action down
+```
 
-## Valkey availability
-
-Server pods are diskless. Valkey is authoritative for location and entity
-recovery state. The EKS overlay does not deploy it. Use a managed, private,
-Multi-AZ cluster-mode service with persistence, backups, TLS, credential
-rotation, and appropriate network policies.
+Review the Terraform destroy plan before confirming. ElastiCache Serverless is
+authoritative for this lab, so destroying it removes the lab state after its
+configured snapshot behavior.
