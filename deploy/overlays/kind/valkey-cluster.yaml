@@ -13,7 +13,7 @@ spec:
     reclaimPolicy: Delete
   resources:
     requests:
-      cpu: 100m
+      cpu: 500m
       memory: 64Mi
     limits:
       memory: 256Mi
