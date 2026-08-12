@@ -197,12 +197,18 @@ function Deploy-Workloads([string]$Tag) {
     & kubectl apply -k (Join-Path $Root "infra/autoscaler/prometheus")
     if ($LASTEXITCODE -ne 0) { throw "Unable to install Prometheus." }
 
+    & kubectl apply -k (Join-Path $Root "infra/autoscaler/metrics-server")
+    if ($LASTEXITCODE -ne 0) { throw "Unable to install Metrics Server." }
+
     Write-RuntimeOverlay $Tag
     & kubectl apply -k $RuntimeOverlay
     if ($LASTEXITCODE -ne 0) { throw "Unable to deploy the EKS workload overlay." }
 
     & kubectl apply -k (Join-Path $Root "infra/observability-eks")
     if ($LASTEXITCODE -ne 0) { throw "Unable to install EKS observability." }
+
+    & kubectl rollout status deployment/metrics-server -n kube-system --timeout=3m
+    if ($LASTEXITCODE -ne 0) { throw "Metrics Server did not become ready." }
 }
 
 function Remove-KubernetesResources {
@@ -227,6 +233,9 @@ function Remove-KubernetesResources {
 
     & kubectl delete -k (Join-Path $Root "infra/autoscaler/prometheus") --ignore-not-found=true --wait=true --timeout=3m
     if ($LASTEXITCODE -ne 0) { Write-Warning "Prometheus cleanup was incomplete." }
+
+    & kubectl delete -k (Join-Path $Root "infra/autoscaler/metrics-server") --ignore-not-found=true --wait=true --timeout=3m
+    if ($LASTEXITCODE -ne 0) { Write-Warning "Metrics Server cleanup was incomplete." }
 
     if (Test-Path (Join-Path $RuntimeOverlay "kustomization.yaml")) {
         & kubectl delete -k $RuntimeOverlay --ignore-not-found=true --wait=true --timeout=5m

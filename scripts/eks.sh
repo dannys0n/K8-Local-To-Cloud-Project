@@ -60,9 +60,11 @@ deploy() {
   kubectl apply -f "$ROOT/deploy/base/namespace.yaml"
   kubectl create secret generic tcp-server-valkey -n tcp-lab --from-literal="addresses=$address" --from-literal="tls=true" --dry-run=client -o yaml | kubectl apply -f -
   kubectl apply -k "$ROOT/infra/autoscaler/prometheus"
+  kubectl apply -k "$ROOT/infra/autoscaler/metrics-server"
   write_runtime "$tag"
   kubectl apply -k "$RUNTIME"
   kubectl apply -k "$ROOT/infra/observability-eks"
+  kubectl rollout status deployment/metrics-server -n kube-system --timeout=3m
 }
 
 cleanup_kubernetes() {
@@ -83,6 +85,8 @@ cleanup_kubernetes() {
     echo "Warning: observability cleanup was incomplete." >&2
   kubectl delete -k "$ROOT/infra/autoscaler/prometheus" --ignore-not-found=true --wait=true --timeout=3m || \
     echo "Warning: Prometheus cleanup was incomplete." >&2
+  kubectl delete -k "$ROOT/infra/autoscaler/metrics-server" --ignore-not-found=true --wait=true --timeout=3m || \
+    echo "Warning: Metrics Server cleanup was incomplete." >&2
   if [[ -f "$RUNTIME/kustomization.yaml" ]]; then
     kubectl delete -k "$RUNTIME" --ignore-not-found=true --wait=true --timeout=5m || \
       echo "Warning: workload cleanup was incomplete; Terraform destroy will still be attempted." >&2
