@@ -16,7 +16,6 @@ from redis.exceptions import RedisError
 
 MIN_REPLICAS = 1
 MAX_REPLICAS = 500
-SCALE_UP_CPU_THRESHOLD = 80.0
 TOKEN_PATH = "/var/run/secrets/kubernetes.io/serviceaccount/token"
 CA_PATH = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
 
@@ -35,6 +34,7 @@ class Scaler:
         self.cpu_request = float(os.environ["CPU_REQUEST_MILLICORES"])
         self.cpu_window = os.getenv("CPU_RATE_WINDOW", "30s")
         self.interval = float(os.getenv("EVALUATION_INTERVAL_SECONDS", "15"))
+        self.up_threshold = float(os.getenv("SCALE_UP_CPU_THRESHOLD", "80"))
         self.down_threshold = float(os.getenv("SCALE_DOWN_CPU_THRESHOLD", "20"))
         self.down_evaluations = env_int("SCALE_DOWN_STABILIZATION_EVALUATIONS", 20)
         self.max_change_pods = env_int("MAX_SCALE_CHANGE_PODS", 1)
@@ -85,7 +85,7 @@ class Scaler:
         if len(values) != current:
             self.low_cpu_count = 0
             return current
-        required = max(MIN_REPLICAS, math.ceil(sum(values) / SCALE_UP_CPU_THRESHOLD))
+        required = max(MIN_REPLICAS, math.ceil(sum(values) / self.up_threshold))
         average = sum(values) / len(values)
         self.low_cpu_count = self.low_cpu_count + 1 if average <= self.down_threshold else 0
         change = self.maximum_change(current)

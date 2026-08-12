@@ -6,3 +6,10 @@ patches:
   - path: gateway-loadbalancer-patch.yaml
   - path: gateway-spread-patch.yaml
   - path: server-spread-patch.yaml
+  - path: autoscaler-responsive-env-patch.yaml
+    target:
+      group: apps
+      version: v1
+      kind: Deployment
+      namespace: tcp-lab
+      labelSelector: app=tcp-server-autoscaler
