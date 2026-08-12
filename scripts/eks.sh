@@ -81,16 +81,6 @@ cleanup_kubernetes() {
   # Terraform dismantles the cluster networking.
   kubectl delete service gateway -n tcp-lab --ignore-not-found=true --wait=true --timeout=5m || \
     echo "Warning: Gateway NLB cleanup was incomplete." >&2
-  kubectl delete -k "$ROOT/infra/observability-eks" --ignore-not-found=true --wait=true --timeout=3m || \
-    echo "Warning: observability cleanup was incomplete." >&2
-  kubectl delete -k "$ROOT/infra/autoscaler/prometheus" --ignore-not-found=true --wait=true --timeout=3m || \
-    echo "Warning: Prometheus cleanup was incomplete." >&2
-  kubectl delete -k "$ROOT/infra/autoscaler/metrics-server" --ignore-not-found=true --wait=true --timeout=3m || \
-    echo "Warning: Metrics Server cleanup was incomplete." >&2
-  if [[ -f "$RUNTIME/kustomization.yaml" ]]; then
-    kubectl delete -k "$RUNTIME" --ignore-not-found=true --wait=true --timeout=5m || \
-      echo "Warning: workload cleanup was incomplete; Terraform destroy will still be attempted." >&2
-  fi
 }
 
 case "$ACTION" in

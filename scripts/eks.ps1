@@ -217,8 +217,12 @@ function Remove-KubernetesResources {
         return
     }
 
+    $PreviousErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
     & kubectl --request-timeout=10s get namespace tcp-lab *> $null
-    if ($LASTEXITCODE -ne 0) {
+    $KubectlExitCode = $LASTEXITCODE
+    $ErrorActionPreference = $PreviousErrorActionPreference
+    if ($KubectlExitCode -ne 0) {
         Write-Warning "The EKS API is unavailable; skipping Kubernetes cleanup and continuing with Terraform."
         return
     }
@@ -228,21 +232,6 @@ function Remove-KubernetesResources {
     & kubectl delete service gateway -n tcp-lab --ignore-not-found=true --wait=true --timeout=5m
     if ($LASTEXITCODE -ne 0) { Write-Warning "Gateway NLB cleanup was incomplete." }
 
-    & kubectl delete -k (Join-Path $Root "infra/observability-eks") --ignore-not-found=true --wait=true --timeout=3m
-    if ($LASTEXITCODE -ne 0) { Write-Warning "Observability cleanup was incomplete." }
-
-    & kubectl delete -k (Join-Path $Root "infra/autoscaler/prometheus") --ignore-not-found=true --wait=true --timeout=3m
-    if ($LASTEXITCODE -ne 0) { Write-Warning "Prometheus cleanup was incomplete." }
-
-    & kubectl delete -k (Join-Path $Root "infra/autoscaler/metrics-server") --ignore-not-found=true --wait=true --timeout=3m
-    if ($LASTEXITCODE -ne 0) { Write-Warning "Metrics Server cleanup was incomplete." }
-
-    if (Test-Path (Join-Path $RuntimeOverlay "kustomization.yaml")) {
-        & kubectl delete -k $RuntimeOverlay --ignore-not-found=true --wait=true --timeout=5m
-        if ($LASTEXITCODE -ne 0) {
-            Write-Warning "Workload cleanup was incomplete; Terraform destroy will still be attempted."
-        }
-    }
 }
 
 switch ($Action) {
