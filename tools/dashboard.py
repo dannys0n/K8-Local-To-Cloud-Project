@@ -7,7 +7,7 @@ import subprocess
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 
 try:
     from bots import BotManager
@@ -126,6 +126,46 @@ def list_server_pods(node_statuses: dict[str, str]) -> list[dict[str, str]]:
     return [application_pod(item, node_statuses) for item in json.loads(raw).get("items", [])]
 
 
+def list_server_assignments(server_pods: list[dict[str, str]]) -> list[dict]:
+    ready_pods = {
+        pod["name"]: pod for pod in server_pods if pod["status"] == "ready"
+    }
+    query = '{__name__=~"tcp_server_assignment(_generation|_latitude_degrees|_longitude_degrees)?|tcp_server_entities"}'
+    raw = run(
+        "kubectl", "get", "--raw",
+        f"/api/v1/namespaces/{NAMESPACE}/services/http:prometheus:9090/proxy/"
+        f"api/v1/query?query={quote(query)}",
+    )
+    metrics = {}
+    for sample in json.loads(raw).get("data", {}).get("result", []):
+        labels = sample.get("metric", {})
+        pod_name = labels.get("pod", "")
+        if pod_name not in ready_pods:
+            continue
+        metrics.setdefault(pod_name, {})[labels.get("__name__", "")] = (
+            labels, float(sample["value"][1])
+        )
+
+    assignments = []
+    for pod_name, values in metrics.items():
+        assigned = values.get("tcp_server_assignment")
+        latitude = values.get("tcp_server_assignment_latitude_degrees")
+        longitude = values.get("tcp_server_assignment_longitude_degrees")
+        if not assigned or assigned[1] != 1 or not latitude or not longitude:
+            continue
+        labels = assigned[0]
+        assignments.append({
+            "server": labels.get("server_id", ""),
+            "location_id": int(labels.get("location_id", 0)),
+            "latitude": latitude[1],
+            "longitude": longitude[1],
+            "instance": pod_name,
+            "node": ready_pods[pod_name]["node"],
+            "current": int(values.get("tcp_server_entities", ({}, 0))[1]),
+        })
+    return sorted(assignments, key=lambda item: item["location_id"])
+
+
 def list_valkey_pods(node_statuses: dict[str, str]) -> list[dict]:
     raw = run(
         "kubectl", "get", "pods", "-n", NAMESPACE,
@@ -221,7 +261,7 @@ def inspect_valkey_cluster(valkey_pods: list[dict]) -> dict:
 
 def inspect_pod(pod: dict, include_clients: bool = True) -> dict:
     pod = dict(pod)
-    pod.update(clients=0, backend_sessions=0, backends=[], sessions=[], error="")
+    pod.update(clients=0, backend_sessions=0, sessions=[], error="")
     try:
         raw = run(
             "kubectl", "get", "--raw",
@@ -241,13 +281,6 @@ def inspect_pod(pod: dict, include_clients: bool = True) -> dict:
         pod["backend_sessions"] = int(stats.get(
             "ready_session_count", sum(item["status"] == "ready" for item in pod["sessions"])
         ))
-        for item in stats.get("routes", []):
-            pod["backends"].append({
-                "gateway": pod["name"], "server": item.get("server", ""),
-                "location_id": item.get("location_id"), "instance": item.get("instance", ""),
-                "latitude": item.get("latitude"), "longitude": item.get("longitude"),
-                "address": item.get("address", ""), "generation": item.get("generation", 0),
-            })
     except Exception as error:
         pod["error"] = str(error)
     return pod
@@ -255,10 +288,19 @@ def inspect_pod(pod: dict, include_clients: bool = True) -> dict:
 
 def collect_infrastructure() -> dict:
     node_statuses = list_node_statuses()
+    server_pods = list_server_pods(node_statuses)
     valkey_pods = list_valkey_pods(node_statuses)
+    try:
+        server_assignments = list_server_assignments(server_pods)
+        assignment_error = ""
+    except Exception as error:
+        server_assignments = []
+        assignment_error = str(error)
     return {
         "gateway_instances": list_pods(node_statuses),
-        "server_pods": list_server_pods(node_statuses),
+        "server_pods": server_pods,
+        "server_assignments": server_assignments,
+        "assignment_error": assignment_error,
         "valkey_pods": valkey_pods,
         "valkey": inspect_valkey_cluster(valkey_pods),
     }
@@ -305,36 +347,11 @@ def snapshot(include_clients: bool = True) -> dict:
     gateway_instances = infrastructure["gateway_instances"]
     pods = [pod for pod in gateway_instances if pod["status"] == "ready"]
     server_pods = infrastructure["server_pods"]
-    server_pods_by_ip = {pod["ip"]: pod for pod in server_pods if pod["ip"]}
+    backends = [dict(item) for item in infrastructure["server_assignments"]]
     valkey_pods = infrastructure["valkey_pods"]
     valkey = infrastructure["valkey"]
     with ThreadPoolExecutor(max_workers=max(1, len(pods))) as pool:
         gateways = list(pool.map(lambda pod: inspect_pod(pod, include_clients), pods))
-    unique_backends = {}
-    for backend in (item for gateway in gateways for item in gateway["backends"]):
-        current = unique_backends.setdefault(backend["server"], {
-            "server": backend["server"], "location_id": backend["location_id"],
-            "latitude": backend["latitude"], "longitude": backend["longitude"],
-            "address": "", "instance": "", "node": "", "generation": 0, "current": 0,
-            "gateways": set(),
-        })
-        if backend["generation"] >= current["generation"]:
-            if backend["generation"] > current["generation"]:
-                current["gateways"].clear()
-            current["generation"] = backend["generation"]
-            current["gateways"].add(backend["gateway"])
-            current["address"] = backend["address"]
-            server_pod = server_pods_by_ip.get(backend["address"].split(":")[0], {})
-            current["instance"] = backend["instance"] or server_pod.get("name", "")
-            current["node"] = server_pod.get("node", "")
-    for session in (item for gateway in gateways for item in gateway["sessions"]):
-        if session["server"] in unique_backends:
-            unique_backends[session["server"]]["current"] += 1
-    backends = sorted(unique_backends.values(), key=lambda item: item["server"])
-    for backend in backends:
-        for internal_field in ("address", "generation", "gateways"):
-            backend.pop(internal_field)
-
     server_instances = sorted(server_pods, key=lambda pod: pod["name"])
 
     application_instances = gateway_instances + server_instances + [
@@ -355,6 +372,7 @@ def snapshot(include_clients: bool = True) -> dict:
         "backends": backends,
         "errors": (
             ([f"Kubernetes: {infrastructure_error}"] if infrastructure_error else [])
+            + ([f'Assignments: {infrastructure["assignment_error"]}'] if infrastructure["assignment_error"] else [])
             + ([f'Valkey: {valkey["error"]}'] if valkey["error"] else [])
             + [f'{p["name"]}: {p["error"]}' for p in gateways if p["error"]]
         ),
