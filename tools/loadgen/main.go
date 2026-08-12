@@ -21,8 +21,9 @@ import (
 )
 
 const (
-	inputInterval = time.Second / 30
-	ioTimeout     = time.Second
+	inputInterval   = time.Second / 30
+	ioTimeout       = time.Second
+	responseTimeout = 3 * time.Second
 )
 
 type counters struct{ disconnected, gateway, ready atomic.Int64 }
@@ -34,6 +35,7 @@ type client struct {
 	counts               *counters
 	conn                 net.Conn
 	reader               *bufio.Reader
+	sequence             uint64
 	latitude, longitude  float64
 	hasPosition          bool
 	serverRelevance      bool
@@ -109,75 +111,113 @@ func (c *client) connect() error {
 		command = fmt.Sprintf("@position %.8f %.8f", c.latitude, c.longitude)
 	}
 	_, err = c.exchange(command)
+	if err == nil {
+		_ = c.conn.SetDeadline(time.Time{})
+	}
 	return err
 }
 
-// request mirrors GatewayClient: retry an application command once after an
-// I/O disconnect, but leave routing errors for the normal reconnect interval.
-func (c *client) request(command string) (map[string]any, error) {
-	body, err := c.exchange(command)
-	if err == nil || c.state != 0 {
-		return body, err
-	}
-	if err = c.connect(); err != nil {
-		return nil, err
-	}
-	return c.exchange(command)
+type response struct {
+	body map[string]any
+	err  error
 }
 
-func (c *client) run(ctx context.Context, rng *mathrand.Rand) {
+func (c *client) runConnected(ctx context.Context, rng *mathrand.Rand, maxInFlight int) error {
 	angle := rng.Float64() * 2 * math.Pi
 	x, y := math.Cos(angle), math.Sin(angle)
 	zoom := 2 + rng.Intn(17)
-	now := time.Now()
-	nextDirection := now.Add(time.Duration(rng.Float64() * float64(3*time.Second)))
-	nextReconnect := now
-	sequence := 0
+	nextDirection := time.Now().Add(time.Duration(rng.Float64() * float64(3*time.Second)))
+	outstanding := 0
+	responses := make(chan response, maxInFlight+1)
+	readerDone := make(chan struct{})
+	conn, reader := c.conn, c.reader
+	go func(conn net.Conn, reader *bufio.Reader) {
+		defer close(readerDone)
+		for {
+			_ = conn.SetReadDeadline(time.Now().Add(responseTimeout))
+			line, err := reader.ReadBytes('\n')
+			var body map[string]any
+			if err == nil {
+				err = json.Unmarshal(line, &body)
+				if message, found := body["error"]; found {
+					err = fmt.Errorf("gateway: %v", message)
+				}
+			}
+			select {
+			case responses <- response{body: body, err: err}:
+			case <-ctx.Done():
+				return
+			}
+			if err != nil {
+				return
+			}
+		}
+	}(conn, reader)
+
+	ticker := time.NewTicker(inputInterval)
+	defer ticker.Stop()
+	defer func() {
+		_ = conn.Close()
+		<-readerDone
+	}()
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case result := <-responses:
+			if result.err != nil {
+				return result.err
+			}
+			if outstanding > 0 {
+				outstanding--
+			}
+			lat, latOK := result.body["client_latitude"].(float64)
+			lon, lonOK := result.body["client_longitude"].(float64)
+			if latOK && lonOK {
+				c.latitude, c.longitude, c.hasPosition = lat, lon, true
+			}
+		case now := <-ticker.C:
+			if outstanding >= maxInFlight {
+				continue
+			}
+			if !now.Before(nextDirection) {
+				angle = rng.Float64() * 2 * math.Pi
+				x, y = math.Cos(angle), math.Sin(angle)
+				nextDirection = now.Add(3 * time.Second)
+			}
+			c.sequence++
+			_ = conn.SetWriteDeadline(time.Now().Add(ioTimeout))
+			_, err := fmt.Fprintf(conn,
+				"@input %s %d %.3f %.3f %.2f %t %t %t\n",
+				c.uid, c.sequence, x, y, float64(zoom), c.serverRelevance,
+				c.spatialRelevance, c.crossServerRelevance,
+			)
+			if err != nil {
+				return err
+			}
+			outstanding++
+		}
+	}
+}
+
+func (c *client) run(ctx context.Context, rng *mathrand.Rand, maxInFlight int) {
 	timer := time.NewTimer(time.Duration(rng.Float64() * float64(inputInterval)))
+	defer timer.Stop()
 	select {
 	case <-ctx.Done():
-		timer.Stop()
 		return
 	case <-timer.C:
 	}
 	defer c.close()
-	for {
-		started := time.Now()
-		if c.state != 2 {
-			if !started.Before(nextReconnect) {
-				_ = c.connect()
-				nextReconnect = time.Now().Add(100 * time.Millisecond)
-			}
-		} else {
-			if !started.Before(nextDirection) {
-				angle = rng.Float64() * 2 * math.Pi
-				x, y = math.Cos(angle), math.Sin(angle)
-				nextDirection = started.Add(3 * time.Second)
-			}
-			if c.state == 2 {
-				sequence++
-				body, err := c.request(fmt.Sprintf(
-					"@input %s %d %.3f %.3f %.2f %t %t %t",
-					c.uid, sequence, x, y, float64(zoom), c.serverRelevance,
-					c.spatialRelevance, c.crossServerRelevance,
-				))
-				if err == nil {
-					lat, latOK := body["client_latitude"].(float64)
-					lon, lonOK := body["client_longitude"].(float64)
-					if latOK && lonOK {
-						c.latitude, c.longitude, c.hasPosition = lat, lon, true
-					}
-				}
-			}
+	for ctx.Err() == nil {
+		if err := c.connect(); err == nil {
+			_ = c.runConnected(ctx, rng, maxInFlight)
 		}
-		wait := inputInterval - time.Since(started)
-		if wait < 0 {
-			wait = 0
-		}
-		timer.Reset(wait)
+		c.close()
+		delay := 100*time.Millisecond + time.Duration(rng.Intn(201))*time.Millisecond
+		timer.Reset(delay)
 		select {
 		case <-ctx.Done():
-			timer.Stop()
 			return
 		case <-timer.C:
 		}
@@ -202,12 +242,17 @@ func main() {
 	host := flag.String("host", "host.docker.internal", "gateway host")
 	port := flag.Int("port", 9000, "gateway port")
 	count := flag.Int("clients", 1, "number of clients")
+	maxInFlight := flag.Int("max-in-flight", 6, "maximum unacknowledged inputs per client")
 	serverRelevance := flag.Bool("server-relevance", true, "request entities authoritative on the same server")
 	spatialRelevance := flag.Bool("spatial-relevance", true, "spatially filter requested server entities")
 	crossServerRelevance := flag.Bool("cross-server-relevance", true, "request relevant entities from other servers")
 	flag.Parse()
 	if *count < 1 || *count > 500 {
 		fmt.Fprintln(os.Stderr, "clients must be between 1 and 500")
+		os.Exit(2)
+	}
+	if *maxInFlight < 1 || *maxInFlight > 64 {
+		fmt.Fprintln(os.Stderr, "max-in-flight must be between 1 and 64")
 		os.Exit(2)
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -225,7 +270,7 @@ func main() {
 		}
 		clients = append(clients, item)
 		wait.Add(1)
-		go func() { defer wait.Done(); item.run(ctx, seeded(uid)) }()
+		go func() { defer wait.Done(); item.run(ctx, seeded(uid), *maxInFlight) }()
 	}
 	go func() {
 		<-ctx.Done()

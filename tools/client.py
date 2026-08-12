@@ -53,6 +53,7 @@ PAGE = r"""<!doctype html>
     <div class="card"><div class="label">Client UID</div><div id="clientUid" class="value">—</div></div>
     <div class="card"><div class="label">Entities in server</div><div id="entityCount" class="value route">0</div></div>
     <div class="card"><div class="label">Connected gateway pod</div><div id="gateway" class="value">—</div></div>
+    <div class="card"><div class="label">Application RTT</div><div id="latency" class="value route">—</div></div>
     <div class="card"><div class="label">Logical server</div><div id="server" class="value">—</div></div>
     <div class="card"><div class="label">Server pod</div><div id="instance" class="value">—</div></div>
     <div class="card"><div class="label">Relevant clients</div><div id="relevantClients" class="value route">0</div></div>
@@ -76,6 +77,7 @@ PAGE = r"""<!doctype html>
     function showRoute(body){
       currentRoute=body;
       if(body.gateway)observedGateways.add(body.gateway);
+      if(Number.isFinite(body.latency_ms))el('latency').textContent=`${body.latency_ms.toFixed(1)} ms`;
       if(Number.isInteger(body.entity_count))el('entityCount').textContent=body.entity_count;el('server').textContent=body.server||'—';
       el('gateway').textContent=body.gateway||'—';el('instance').textContent=body.instance||'—';
       renderServers();renderProxy();
@@ -130,7 +132,7 @@ PAGE = r"""<!doctype html>
     map.on('move zoom resize',drawProxyEdge);
     async function reconnect(silent=false){if(reconnecting)return;reconnecting=true;try{const body=await request('/api/reconnect',{method:'POST'});showRoute(body||{});connection(body?'ready':'gateway');inputDirty=true}catch(error){if(!silent)reportError(error.message);refresh()}finally{reconnecting=false}}
     el('reconnect').addEventListener('click',()=>reconnect(false));
-    async function refresh(){try{const state=await request('/api/state');connection(state.connection);if(state.latitude!==null&&!teleporting)applyAuthoritativePosition({client_latitude:state.latitude,client_longitude:state.longitude});showRoute(state.route||{gateway:state.gateway})}catch(error){connection('disconnected')}}
+    async function refresh(){try{const state=await request('/api/state');connection(state.connection);if(state.latitude!==null&&!teleporting)applyAuthoritativePosition({client_latitude:state.latitude,client_longitude:state.longitude});const route=state.route||{gateway:state.gateway};if(Number.isFinite(state.latency_ms))route.latency_ms=state.latency_ms;showRoute(route)}catch(error){connection('disconnected')}}
     loadLocations().then(refresh).catch(error=>{reportError(error.message);refresh()});setInterval(sendInput,1000/30);setInterval(expireEntityMarkers,250);setInterval(refresh,1000);setInterval(()=>{if(connectionState!=='ready')reconnect(true)},250);setInterval(()=>loadLocations().catch(()=>{}),5000);
   </script>
 </body>

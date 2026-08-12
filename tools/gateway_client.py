@@ -3,6 +3,7 @@
 import json
 import socket
 import threading
+import time
 
 
 IO_TIMEOUT_SECONDS = 1.0
@@ -25,6 +26,7 @@ class GatewayClient:
         self.route = None
         self.latitude = None
         self.longitude = None
+        self.latency_ms = None
 
     def _close(self):
         stream, sock = self.stream, self.sock
@@ -43,6 +45,7 @@ class GatewayClient:
             self.connection = "disconnected"
             self.gateway = None
             self.route = None
+            self.latency_ms = None
 
     def _connect(self):
         self._close()
@@ -111,11 +114,15 @@ class GatewayClient:
         self._validate_uid(client_uid)
         if sequence < 0:
             raise ValueError("input sequence is invalid")
+        started = time.perf_counter()
         body = self.exchange(f"@teleport {client_uid} {sequence} {latitude:.8f} {longitude:.8f}")
+        latency_ms = round((time.perf_counter() - started) * 1000, 1)
         with self.state_lock:
             self.latitude, self.longitude, self.route = latitude, longitude, body
             self.gateway = body.get("gateway")
             self.connection = "ready"
+            self.latency_ms = latency_ms
+            body["latency_ms"] = latency_ms
         return body
 
     def send_input(
@@ -129,22 +136,30 @@ class GatewayClient:
         server_relevance = bool(server_relevance)
         spatial_relevance = bool(spatial_relevance)
         cross_server_relevance = bool(cross_server_relevance)
+        started = time.perf_counter()
         body = self.exchange(
             f"@input {client_uid} {sequence} {x:.3f} {y:.3f} {zoom:.2f} "
             f"{str(server_relevance).lower()} {str(spatial_relevance).lower()} "
             f"{str(cross_server_relevance).lower()}"
         )
+        latency_ms = round((time.perf_counter() - started) * 1000, 1)
         with self.state_lock:
             self.latitude = body["client_latitude"]
             self.longitude = body["client_longitude"]
             self.route = body
+            self.latency_ms = latency_ms
+            body["latency_ms"] = latency_ms
         return body
 
     def reconnect(self):
         with self.lock:
             try:
+                started = time.perf_counter()
                 self._connect()
                 with self.state_lock:
+                    self.latency_ms = round((time.perf_counter() - started) * 1000, 1)
+                    if self.route:
+                        self.route["latency_ms"] = self.latency_ms
                     return self.route
             except (OSError, ValueError, ConnectionError):
                 self._close()
@@ -158,6 +173,7 @@ class GatewayClient:
                 "gateway": self.gateway,
                 "latitude": self.latitude,
                 "longitude": self.longitude,
+                "latency_ms": self.latency_ms,
                 "route": self.route,
             }
 
