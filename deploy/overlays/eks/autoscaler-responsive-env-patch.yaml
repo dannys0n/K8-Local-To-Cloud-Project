@@ -2,7 +2,7 @@
   path: /spec/template/spec/containers/0/env/-
   value:
     name: CPU_RATE_WINDOW
-    value: "15s"
+    value: "30s"
 - op: add
   path: /spec/template/spec/containers/0/env/-
   value:
@@ -12,9 +12,19 @@
   path: /spec/template/spec/containers/0/env/-
   value:
     name: SCALE_UP_CPU_THRESHOLD
-    value: "70"
+    value: "65"
 - op: add
   path: /spec/template/spec/containers/0/env/-
   value:
     name: SCALE_DOWN_STABILIZATION_EVALUATIONS
     value: "12"
+- op: add
+  path: /spec/template/spec/containers/0/env/-
+  value:
+    name: MAX_SCALE_CHANGE_PODS
+    value: "4"
+- op: add
+  path: /spec/template/spec/containers/0/env/-
+  value:
+    name: MAX_SCALE_CHANGE_PERCENT
+    value: "100"
