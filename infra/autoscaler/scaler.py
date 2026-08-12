@@ -42,6 +42,8 @@ class Scaler:
         self.manage_locations = os.getenv("MANAGE_LOCATIONS") == "true"
         self.valkey = self.connect_valkey() if self.manage_locations else None
         self.low_cpu_count = 0
+        self.incomplete_cpu_count = 0
+        self.last_replica_count = None
         self.token = open(TOKEN_PATH, encoding="utf-8").read().strip()
         self.api = os.getenv("KUBERNETES_SERVICE_HOST")
         port = os.getenv("KUBERNETES_SERVICE_PORT_HTTPS", "443")
@@ -82,16 +84,33 @@ class Scaler:
         return max(self.max_change_pods, math.ceil(current * self.max_change_percent / 100))
 
     def desired_replicas(self, current: int, values: list[float]) -> int:
-        if len(values) != current:
+        if current != self.last_replica_count:
             self.low_cpu_count = 0
+            self.incomplete_cpu_count = 0
+            self.last_replica_count = current
+
+        if not values:
+            self.incomplete_cpu_count += 1
+            if self.incomplete_cpu_count >= self.down_evaluations:
+                self.low_cpu_count = 0
             return current
+
         required = max(MIN_REPLICAS, math.ceil(sum(values) / self.up_threshold))
+        change = self.maximum_change(current)
+        if len(values) <= current and required > current:
+            self.low_cpu_count = 0
+            self.incomplete_cpu_count = 0
+            return min(MAX_REPLICAS, current + change, required)
+
+        if len(values) != current:
+            self.incomplete_cpu_count += 1
+            if self.incomplete_cpu_count >= self.down_evaluations:
+                self.low_cpu_count = 0
+            return current
+
+        self.incomplete_cpu_count = 0
         average = sum(values) / len(values)
         self.low_cpu_count = self.low_cpu_count + 1 if average <= self.down_threshold else 0
-        change = self.maximum_change(current)
-        if required > current:
-            self.low_cpu_count = 0
-            return min(MAX_REPLICAS, current + change, required)
         if current > MIN_REPLICAS and self.low_cpu_count >= self.down_evaluations:
             self.low_cpu_count = 0
             return max(MIN_REPLICAS, current - change, required)

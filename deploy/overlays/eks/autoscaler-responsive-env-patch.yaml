@@ -2,7 +2,7 @@
   path: /spec/template/spec/containers/0/env/-
   value:
     name: CPU_RATE_WINDOW
-    value: "30s"
+    value: "45s"
 - op: add
   path: /spec/template/spec/containers/0/env/-
   value:
