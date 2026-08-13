@@ -70,6 +70,7 @@ func (g *gateway) serveHTTP(ctx context.Context, address string) {
 			g.backendFailures.Load(), g.recoveryAttempts.Load(), g.recoverySuccesses.Load(),
 			g.handoffAttempts.Load(), g.handoffSuccesses.Load(),
 		)
+		g.backendDuration.write(writer, "tcp_gateway_backend_duration_seconds", "Gateway to server request round-trip duration.")
 	})
 	mux.HandleFunc("/", func(writer http.ResponseWriter, _ *http.Request) {
 		writer.Header().Set("Content-Type", "text/html; charset=utf-8")

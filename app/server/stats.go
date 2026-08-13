@@ -103,6 +103,7 @@ func (s *server) serveMetrics(ctx context.Context, address string, logger *slog.
 			strconv.Quote(serverID), strconv.FormatInt(locationID, 10), latitude,
 			strconv.Quote(serverID), strconv.FormatInt(locationID, 10), longitude,
 		)
+		s.valkeyDuration.write(writer)
 	})
 	server := &http.Server{Addr: address, Handler: mux, ReadHeaderTimeout: 2 * time.Second}
 	go func() {

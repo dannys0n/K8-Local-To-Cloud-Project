@@ -90,6 +90,7 @@ type server struct {
 	visibilityRemoteEntities atomic.Int64
 	visibilityDurationBits   atomic.Uint64
 	visibilityFailures       atomic.Uint64
+	valkeyDuration           valkeyLatencyHistogram
 }
 
 type response struct {
@@ -205,6 +206,7 @@ func main() {
 		inputs: make(chan inputCommand, 8192), entities: make(map[string]*entityState),
 		remoteEntities: make(map[spatialCell]map[int64]visibilityCellSnapshot),
 	}
+	cache.AddHook(valkeyLatencyHook{histogram: &s.valkeyDuration})
 	if err := s.refreshTopology(ctx); err != nil {
 		logger.Error("load location topology", "error", err)
 		os.Exit(1)

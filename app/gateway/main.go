@@ -92,6 +92,7 @@ type gateway struct {
 	recoverySuccesses   atomic.Uint64
 	handoffAttempts     atomic.Uint64
 	handoffSuccesses    atomic.Uint64
+	backendDuration     latencyHistogram
 	nextSession         atomic.Uint64
 	nextResolver        atomic.Uint64
 }
@@ -423,6 +424,8 @@ func (g *gateway) exchange(connection *backendConnection, message string) ([]byt
 }
 
 func (g *gateway) exchangeUntil(connection *backendConnection, message string, deadline time.Time) ([]byte, error) {
+	started := time.Now()
+	defer func() { g.backendDuration.observe(time.Since(started)) }()
 	_ = connection.conn.SetDeadline(deadline)
 	if _, err := connection.writer.WriteString(message + "\n"); err != nil {
 		return nil, err
