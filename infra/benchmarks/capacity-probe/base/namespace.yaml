@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: tcp-lab-benchmark
+  labels:
+    app.kubernetes.io/part-of: tcp-lab-capacity-benchmark
+

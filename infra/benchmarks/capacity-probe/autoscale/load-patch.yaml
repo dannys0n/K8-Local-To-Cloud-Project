@@ -1,0 +1,14 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: capacity-probe
+  namespace: tcp-lab-benchmark
+spec:
+  template:
+    spec:
+      containers:
+        - name: probe
+          env:
+            - name: CPU_LOAD
+              value: "true"
+
