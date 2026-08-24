@@ -28,15 +28,11 @@ the existing headless-client implementation and only observe those settings.
 
 Raw JSON contains Kubernetes context, parameters, pod lifecycle timestamps,
 node identity/capacity, HPA and Deployment transitions, Kubernetes Events,
-cluster warnings, and the derived milestones used by `summary.csv`,
-`aggregates.csv`, and `report.html`.
+cluster warnings, and the derived milestones used by `summary.csv` and
+`report.html`.
 
-`report.html` is a self-contained, dependency-free report. Open it directly in
-a browser to compare timing distributions across kind and EKS, then select an
-individual run to inspect replica, CPU, client-connection, worker, pod lifecycle,
-and milestone timelines. Rebuild it from the retained JSON at any time with:
-
-```powershell
-python tools/scale_benchmark.py report
-start .generated\scale-benchmarks\report.html
-```
+Report columns are deliberately mode-specific. Direct replica requests, HPA
+decisions, application autoscaling, worker-loss recovery, and new-node
+provisioning/removal use separate start-to-end timing names. A blank cell means
+that measurement does not apply to the run; values from different modes are
+never combined under one generic autoscaler field.

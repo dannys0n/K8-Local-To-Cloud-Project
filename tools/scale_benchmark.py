@@ -632,6 +632,9 @@ def percentile(values: list[float], fraction: float) -> float | None:
 
 
 def generate_report() -> tuple[Path, Path]:
+    def shown(value: Any) -> Any:
+        return "" if value is None else value
+
     OUTPUT.mkdir(parents=True, exist_ok=True)
     runs = []
     for path in sorted(OUTPUT.glob("*.json")):
@@ -691,29 +694,67 @@ def generate_report() -> tuple[Path, Path]:
                     int(item["bots"].get("ready", 0)) for item in after_initial_connect),
                 "application_final_ready_clients": int(active_application[-1]["bots"].get("ready", 0)),
             })
+        mode = str(run.get("mode", ""))
+        direct_mode = mode in {"pod-single", "pod-multi", "node-capacity"}
+        new_node_names = {item.get("name") for item in run.get("summary", {}).get("new_nodes", [])}
+        demand_at = event_at("scale_requested") or event_at("load_applied")
+        new_node_ready_times = []
+        new_node_removed_times = []
+        for node_name in new_node_names:
+            ready_event = next((item for item in events
+                                if item.get("type") == "node_ready" and item.get("node") == node_name), None)
+            removed_event = next((item for item in events
+                                  if item.get("type") == "node_removed" and item.get("node") == node_name), None)
+            if ready_event and demand_at:
+                new_node_ready_times.append(duration(demand_at, ready_event.get("at_source") or ready_event.get("at")))
+            if removed_event:
+                new_node_removed_times.append(duration(event_at("scale_down_requested"), removed_event.get("at")))
         rows.append({
             "run_id": run["run_id"], "environment": run.get("environment"), "mode": run.get("mode"),
-            "result": run.get("result"), "replicas": run.get("parameters", {}).get("replicas") or
+            "result": run.get("result"), "test_target_replicas": run.get("parameters", {}).get("replicas") or
             run.get("parameters", {}).get("max_replicas") or "",
-            "scale_ready_seconds": milestones.get("scale_request_to_ready_seconds") or "",
-            "autoscaler_first_decision_seconds": milestones.get("hpa_first_decision_seconds") or
-            milestones.get("application_gateway_first_scale_seconds") or "",
-            "autoscaler_target_ready_seconds": milestones.get("hpa_to_target_ready_seconds") or
-            milestones.get("application_all_clients_ready_seconds") or "",
-            "scale_down_seconds": milestones.get("hpa_scale_down_seconds") or
-            milestones.get("application_scale_down_request_seconds") or "",
-            "worker_recovery_seconds": milestones.get("worker_loss_recovery_seconds") or "",
-            "pod_ready_average_seconds": round(statistics.mean(pod_times), 3) if pod_times else "",
-            "pod_ready_p50_seconds": percentile(pod_times, .50) or "",
-            "pod_ready_p95_seconds": percentile(pod_times, .95) or "",
-            "pod_ready_max_seconds": round(max(pod_times), 3) if pod_times else "",
-            "pod_delete_average_seconds": round(statistics.mean(delete_times), 3) if delete_times else "",
-            "new_nodes": len(run.get("summary", {}).get("new_nodes", [])),
-            "application_peak_gateways": milestones.get("application_max_gateway_replicas") or "",
-            "application_peak_servers": milestones.get("application_max_server_replicas") or "",
-            "application_peak_nodes": milestones.get("application_max_nodes") or "",
-            "application_min_ready_after_connect": milestones.get("application_min_ready_after_initial_connect") or "",
-            "application_final_ready_clients": milestones.get("application_final_ready_clients") or "",
+            "direct_scale_request_to_all_pods_ready_seconds": shown(
+                milestones.get("scale_request_to_ready_seconds") if direct_mode else None),
+            "direct_pod_request_to_ready_average_seconds": (
+                round(statistics.mean(pod_times), 3) if direct_mode and pod_times else ""),
+            "direct_pod_request_to_ready_p95_seconds": (
+                shown(percentile(pod_times, .95)) if direct_mode else ""),
+            "direct_scale_down_request_to_pod_removed_average_seconds": (
+                round(statistics.mean(delete_times), 3) if direct_mode and delete_times else ""),
+            "hpa_load_to_first_scale_decision_seconds": shown(
+                milestones.get("hpa_first_decision_seconds") if mode == "hpa" else None),
+            "hpa_enabled_to_max_replicas_ready_seconds": shown(
+                milestones.get("hpa_to_target_ready_seconds") if mode == "hpa" else None),
+            "hpa_load_removed_to_min_replicas_ready_seconds": shown(
+                milestones.get("hpa_scale_down_seconds") if mode == "hpa" else None),
+            "hpa_load_removed_to_pod_removed_average_seconds": (
+                round(statistics.mean(delete_times), 3) if mode == "hpa" and delete_times else ""),
+            "application_load_to_gateway_first_scale_seconds": shown(
+                milestones.get("application_gateway_first_scale_seconds") if application else None),
+            "application_load_to_server_first_scale_seconds": shown(
+                milestones.get("application_server_first_scale_seconds") if application else None),
+            "application_load_to_initial_all_clients_ready_seconds": shown(
+                milestones.get("application_all_clients_ready_seconds") if application else None),
+            "application_load_removed_to_min_replicas_requested_seconds": shown(
+                milestones.get("application_scale_down_request_seconds") if application else None),
+            "worker_stopped_to_replacement_workload_ready_seconds": shown(
+                milestones.get("worker_loss_recovery_seconds") if mode == "worker-loss" else None),
+            "worker_restarted_to_node_ready_seconds": shown(
+                milestones.get("worker_restore_seconds") if mode == "worker-loss" else None),
+            "new_node_count": len(new_node_names),
+            "demand_to_last_new_node_ready_seconds": shown(
+                max(value for value in new_node_ready_times if value is not None)
+                if any(value is not None for value in new_node_ready_times) else None),
+            "scale_down_request_to_last_new_node_removed_seconds": shown(
+                max(value for value in new_node_removed_times if value is not None)
+                if any(value is not None for value in new_node_removed_times) else None),
+            "application_peak_gateways": shown(milestones.get("application_max_gateway_replicas") if application else None),
+            "application_peak_servers": shown(milestones.get("application_max_server_replicas") if application else None),
+            "application_peak_nodes": shown(milestones.get("application_max_nodes") if application else None),
+            "application_min_ready_clients_after_initial_connect": shown(
+                milestones.get("application_min_ready_after_initial_connect") if application else None),
+            "application_ready_clients_at_load_removal": shown(
+                milestones.get("application_final_ready_clients") if application else None),
             "started_at": run.get("started_at"), "finished_at": run.get("finished_at"),
         })
     csv_path = OUTPUT / "summary.csv"
@@ -723,12 +764,25 @@ def generate_report() -> tuple[Path, Path]:
         writer.writeheader()
         writer.writerows(rows)
     numeric_fields = [
-        "scale_ready_seconds", "autoscaler_first_decision_seconds",
-        "autoscaler_target_ready_seconds", "scale_down_seconds",
-        "worker_recovery_seconds", "pod_ready_average_seconds",
-        "pod_ready_p95_seconds", "pod_delete_average_seconds", "new_nodes",
+        "direct_scale_request_to_all_pods_ready_seconds",
+        "direct_pod_request_to_ready_average_seconds",
+        "direct_pod_request_to_ready_p95_seconds",
+        "direct_scale_down_request_to_pod_removed_average_seconds",
+        "hpa_load_to_first_scale_decision_seconds",
+        "hpa_enabled_to_max_replicas_ready_seconds",
+        "hpa_load_removed_to_min_replicas_ready_seconds",
+        "hpa_load_removed_to_pod_removed_average_seconds",
+        "application_load_to_gateway_first_scale_seconds",
+        "application_load_to_server_first_scale_seconds",
+        "application_load_to_initial_all_clients_ready_seconds",
+        "application_load_removed_to_min_replicas_requested_seconds",
+        "worker_stopped_to_replacement_workload_ready_seconds",
+        "worker_restarted_to_node_ready_seconds",
+        "new_node_count", "demand_to_last_new_node_ready_seconds",
+        "scale_down_request_to_last_new_node_removed_seconds",
         "application_peak_gateways", "application_peak_servers", "application_peak_nodes",
-        "application_min_ready_after_connect", "application_final_ready_clients",
+        "application_min_ready_clients_after_initial_connect",
+        "application_ready_clients_at_load_removal",
     ]
     grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for row in rows:
@@ -756,77 +810,40 @@ def generate_report() -> tuple[Path, Path]:
         "<tr>" + "".join(f"<td>{html.escape(str(row.get(field, '')))}</td>" for field in aggregate_fields) + "</tr>"
         for row in aggregates
     )
-    report_runs = [{
-        "run_id": run.get("run_id"), "environment": run.get("environment"),
-        "mode": run.get("mode"), "result": run.get("result"),
-        "started_at": run.get("started_at"), "finished_at": run.get("finished_at"),
-        "parameters": run.get("parameters", {}), "events": run.get("events", []),
-        "deployment_samples": run.get("deployment_samples", []),
-        "hpa_samples": run.get("hpa_samples", []),
-        "application_samples": run.get("application_samples", []),
-        "summary": run.get("summary", {}),
-    } for run in runs]
-    payload = json.dumps({"runs": report_runs, "rows": rows}, separators=(",", ":")).replace("<", "\\u003c")
-    interactive_script = r"""
-<script>
-const DATA=JSON.parse(document.getElementById('benchmark-data').textContent);
-const NS='http://www.w3.org/2000/svg';
-const COLORS=['#58a6ff','#3fb950','#f0883e','#f85149','#bc8cff','#39c5cf'];
-const IMPORTANT=new Set(['scale_requested','autoscaler_enabled','autoscale_target_ready','load_removed','autoscale_minimum_ready','worker_stop_requested','worker_loss_recovered','worker_start_requested','worker_ready_after_restore','node_scale_down_wait_started','node_scale_down_complete']);
-const $=id=>document.getElementById(id);
-const seconds=(value,origin)=>(Date.parse(value)-origin)/1000;
-function svgNode(name,attrs={}){const node=document.createElementNS(NS,name);for(const [key,value] of Object.entries(attrs))node.setAttribute(key,value);return node}
-function textNode(svg,x,y,value,anchor='start',cls='axis-label'){const node=svgNode('text',{x,y,'text-anchor':anchor,class:cls});node.textContent=value;svg.appendChild(node)}
-function lineChart(target,title,series,events=[]){
-  target.innerHTML='';const heading=document.createElement('h3');heading.textContent=title;target.appendChild(heading);
-  const populated=series.map((item,index)=>({...item,color:item.color||COLORS[index%COLORS.length],points:item.points.filter(point=>point[0]&&Number.isFinite(Number(point[1])))})).filter(item=>item.points.length);
-  if(!populated.length){target.insertAdjacentHTML('beforeend','<p class="empty">No samples captured for this run.</p>');return}
-  const times=populated.flatMap(item=>item.points.map(point=>Date.parse(point[0]))).concat(events.map(item=>Date.parse(item.at))).filter(Number.isFinite);
-  const origin=Math.min(...times),end=Math.max(...times),span=Math.max(1,(end-origin)/1000);
-  const values=populated.flatMap(item=>item.points.map(point=>Number(point[1])));const max=Math.max(1,...values);const top=max*1.08;
-  const W=1000,H=285,L=55,R=18,T=18,B=38,x=value=>L+value/span*(W-L-R),y=value=>T+(top-value)/top*(H-T-B);
-  const svg=svgNode('svg',{viewBox:`0 0 ${W} ${H}`,role:'img','aria-label':title});svg.classList.add('plot');target.appendChild(svg);
-  for(let tick=0;tick<=4;tick++){const value=top*tick/4,py=y(value);svg.appendChild(svgNode('line',{x1:L,x2:W-R,y1:py,y2:py,class:'grid'}));textNode(svg,L-8,py+4,value>=10?Math.round(value):value.toFixed(1),'end')}
-  svg.appendChild(svgNode('line',{x1:L,x2:W-R,y1:H-B,y2:H-B,class:'axis'}));
-  textNode(svg,L,H-12,'0s','middle');textNode(svg,W-R,H-12,`${span.toFixed(1)}s`,'middle');
-  for(const event of events.filter(item=>IMPORTANT.has(item.type))){const px=x(seconds(event.at,origin));const line=svgNode('line',{x1:px,x2:px,y1:T,y2:H-B,class:'event-line'});const tip=svgNode('title');tip.textContent=`${event.type}: ${seconds(event.at,origin).toFixed(2)}s`;line.appendChild(tip);svg.appendChild(line)}
-  for(const item of populated){const points=item.points.map(point=>`${x(seconds(point[0],origin))},${y(Number(point[1]))}`).join(' ');svg.appendChild(svgNode('polyline',{points,fill:'none',stroke:item.color,'stroke-width':2.5,'stroke-linejoin':'round'}));if(item.points.length<70)for(const point of item.points){const dot=svgNode('circle',{cx:x(seconds(point[0],origin)),cy:y(Number(point[1])),r:2.8,fill:item.color});const tip=svgNode('title');tip.textContent=`${item.name}: ${point[1]} at ${seconds(point[0],origin).toFixed(2)}s`;dot.appendChild(tip);svg.appendChild(dot)}}
-  const legend=document.createElement('div');legend.className='legend';for(const item of populated)legend.insertAdjacentHTML('beforeend',`<span><i style="background:${item.color}"></i>${item.name}</span>`);if(events.some(item=>IMPORTANT.has(item.type)))legend.insertAdjacentHTML('beforeend','<span><i class="event-key"></i>milestone</span>');target.appendChild(legend);
-}
-function lifecycle(target,run){
-  target.innerHTML='<h3>Pod lifecycle phases</h3>';const pods=(run.summary?.pods||[]).filter(pod=>pod.created_to_scheduled_seconds!=null||pod.scheduled_to_started_seconds!=null||pod.started_to_ready_seconds!=null);
-  if(!pods.length){target.insertAdjacentHTML('beforeend','<p class="empty">No pod lifecycle samples captured.</p>');return}
-  const shown=pods.slice(0,32),total=pod=>['created_to_scheduled_seconds','scheduled_to_started_seconds','started_to_ready_seconds'].reduce((sum,key)=>sum+Number(pod[key]||0),0),max=Math.max(1,...shown.map(total));
-  const legend=document.createElement('div');legend.className='legend';legend.innerHTML='<span><i style="background:#58a6ff"></i>create → scheduled</span><span><i style="background:#f0883e"></i>scheduled → started</span><span><i style="background:#3fb950"></i>started → ready</span>';target.appendChild(legend);
-  for(const pod of shown){const row=document.createElement('div');row.className='phase-row';row.innerHTML=`<span title="${pod.name}">${pod.name}</span><div class="phase-bar"></div><b>${total(pod).toFixed(2)}s</b>`;const bar=row.querySelector('.phase-bar');[['created_to_scheduled_seconds','#58a6ff'],['scheduled_to_started_seconds','#f0883e'],['started_to_ready_seconds','#3fb950']].forEach(([key,color])=>{const segment=document.createElement('i');segment.style.cssText=`width:${Number(pod[key]||0)/max*100}%;background:${color}`;segment.title=`${key.replaceAll('_',' ')}: ${Number(pod[key]||0).toFixed(3)}s`;bar.appendChild(segment)});target.appendChild(row)}
-  if(pods.length>shown.length)target.insertAdjacentHTML('beforeend',`<p class="empty">Showing the first ${shown.length} of ${pods.length} pods.</p>`);
-}
-function eventTable(target,run){
-  const events=run.events.filter(item=>IMPORTANT.has(item.type));target.innerHTML='<h3>Milestone timeline</h3>';if(!events.length){target.insertAdjacentHTML('beforeend','<p class="empty">No major milestone events captured.</p>');return}
-  const origin=Date.parse(run.started_at||events[0].at);const table=document.createElement('table');table.className='compact';table.innerHTML='<thead><tr><th>Elapsed</th><th>Event</th><th>Details</th></tr></thead><tbody></tbody>';for(const event of events){const details=Object.entries(event).filter(([key])=>!['at','type'].includes(key)).map(([key,value])=>`${key}=${Array.isArray(value)?value.join(','):typeof value==='object'?JSON.stringify(value):value}`).join(' · ');table.tBodies[0].insertAdjacentHTML('beforeend',`<tr><td>${seconds(event.at,origin).toFixed(2)}s</td><td>${event.type}</td><td>${details}</td></tr>`)}target.appendChild(table);
-}
-function renderRun(){
-  const run=DATA.runs.find(item=>item.run_id===$('runSelect').value)||DATA.runs[0];if(!run)return;
-  $('runTitle').textContent=`${run.environment} / ${run.mode}`;$('runMeta').textContent=`${run.run_id} · ${run.result} · ${JSON.stringify(run.parameters)}`;
-  const cards=[['Result',run.result],['Pods observed',(run.summary?.pods||[]).length],['New workers',(run.summary?.new_nodes||[]).length],['Duration',`${seconds(run.finished_at,Date.parse(run.started_at)).toFixed(1)}s`]];$('runCards').innerHTML=cards.map(([label,value])=>`<div><span>${label}</span><b>${value}</b></div>`).join('');
-  const events=run.events||[],deployment=run.deployment_samples||[],hpa=run.hpa_samples||[],app=run.application_samples||[];
-  const charts=$('runCharts');charts.innerHTML='';const add=()=>{const section=document.createElement('section');charts.appendChild(section);return section};
-  if(app.length){lineChart(add(),'Client connection states',[{name:'fully ready',points:app.map(x=>[x.at,x.bots.ready])},{name:'gateway only',points:app.map(x=>[x.at,x.bots.gateway])},{name:'disconnected',points:app.map(x=>[x.at,x.bots.disconnected])}],events);lineChart(add(),'Application capacity',[{name:'gateway desired',points:app.map(x=>[x.at,x.gateway.desired])},{name:'gateway ready',points:app.map(x=>[x.at,x.gateway.ready])},{name:'server desired',points:app.map(x=>[x.at,x.server.desired])},{name:'server ready',points:app.map(x=>[x.at,x.server.ready])},{name:'workers',points:app.map(x=>[x.at,x.nodes])}],events)}
-  else lineChart(add(),'Deployment replicas',[{name:'desired',points:deployment.map(x=>[x.at,x.desired])},{name:'current',points:deployment.map(x=>[x.at,x.current])},{name:'ready',points:deployment.map(x=>[x.at,x.ready])}],events);
-  if(hpa.length){lineChart(add(),'HPA replicas',[{name:'current',points:hpa.map(x=>[x.at,x.current])},{name:'desired',points:hpa.map(x=>[x.at,x.desired])}],events);lineChart(add(),'Measured CPU utilization (%)',[{name:'CPU',points:hpa.map(x=>[x.at,x.cpu_utilization])}],events)}
-  const life=add();lifecycle(life,run);const milestones=add();eventTable(milestones,run);
-}
-function renderComparison(){
-  const metric=$('metricSelect').value,items=DATA.rows.filter(row=>row[metric]!==''&&Number.isFinite(Number(row[metric]))),groups=Object.groupBy?Object.groupBy(items,row=>`${row.environment} / ${row.mode}`):items.reduce((all,row)=>((all[`${row.environment} / ${row.mode}`]??=[]).push(row),all),{});
-  const target=$('comparisonChart');target.innerHTML='';const names=Object.keys(groups);if(!names.length){target.textContent='No data for this metric.';return}const max=Math.max(...items.map(row=>Number(row[metric])),1),W=1000,H=70+names.length*44,L=205,R=70,x=value=>L+value/max*(W-L-R);const svg=svgNode('svg',{viewBox:`0 0 ${W} ${H}`});svg.classList.add('plot');target.appendChild(svg);
-  names.forEach((name,index)=>{const y=45+index*44,values=groups[name].map(row=>Number(row[metric])),mean=values.reduce((a,b)=>a+b,0)/values.length,p95=[...values].sort((a,b)=>a-b)[Math.ceil(values.length*.95)-1];svg.appendChild(svgNode('line',{x1:L,x2:W-R,y1:y,y2:y,class:'grid'}));textNode(svg,L-12,y+4,name,'end');values.forEach((value,point)=>{const dot=svgNode('circle',{cx:x(value),cy:y+(point%3-1)*6,r:5,fill:'#58a6ff'});const tip=svgNode('title');tip.textContent=`${value.toFixed(3)}s`;dot.appendChild(tip);svg.appendChild(dot)});svg.appendChild(svgNode('line',{x1:x(mean),x2:x(mean),y1:y-13,y2:y+13,stroke:'#3fb950','stroke-width':4}));const diamond=svgNode('path',{d:`M ${x(p95)} ${y-8} l 8 8 l -8 8 l -8 -8 z`,fill:'#f0883e'});svg.appendChild(diamond);textNode(svg,W-R+8,y+4,`avg ${mean.toFixed(2)}s`)});textNode(svg,L,H-12,'0s','middle');textNode(svg,W-R,H-12,`${max.toFixed(1)}s`,'middle');$('comparisonLegend').innerHTML='<span><i style="background:#58a6ff;border-radius:50%"></i>individual run</span><span><i style="background:#3fb950"></i>average</span><span><i style="background:#f0883e;transform:rotate(45deg)"></i>p95</span>';
-}
-const runSelect=$('runSelect');for(const run of [...DATA.runs].reverse()){const option=document.createElement('option');option.value=run.run_id;option.textContent=`${run.environment} · ${run.mode} · ${run.run_id.slice(0,15)}`;runSelect.appendChild(option)}runSelect.addEventListener('change',renderRun);$('metricSelect').addEventListener('change',renderComparison);renderComparison();renderRun();
-</script>
-"""
+    chart_metrics = [
+        ("Direct request → all pods Ready", "direct_scale_request_to_all_pods_ready_seconds_average"),
+        ("HPA load → first scale decision", "hpa_load_to_first_scale_decision_seconds_average"),
+        ("HPA enabled → max replicas Ready", "hpa_enabled_to_max_replicas_ready_seconds_average"),
+        ("HPA load removed → minimum Ready", "hpa_load_removed_to_min_replicas_ready_seconds_average"),
+        ("Application load → first gateway scale", "application_load_to_gateway_first_scale_seconds_average"),
+        ("Application load removed → minimum requested", "application_load_removed_to_min_replicas_requested_seconds_average"),
+        ("Worker stopped → replacement workload Ready", "worker_stopped_to_replacement_workload_ready_seconds_average"),
+        ("Demand → last new node Ready", "demand_to_last_new_node_ready_seconds_average"),
+        ("Scale-down request → last new node removed", "scale_down_request_to_last_new_node_removed_seconds_average"),
+    ]
+    chart_values = [float(row.get(field) or 0) for row in aggregates for _, field in chart_metrics]
+    chart_max = max(chart_values, default=1) or 1
+    charts = [
+        "<section><h3>How to read this report</h3>"
+        "<p>Every timing label states its exact start and end event. Direct means an explicit replica request, "
+        "HPA means metrics-driven scaling, and application means the lab's workload autoscalers. "
+        "Blank table cells mean the measurement does not apply to that run. New-node readiness uses the "
+        "Kubernetes Ready timestamp; the raw event also retains when the benchmark observed it.</p></section>"
+    ]
+    for label, field in chart_metrics:
+        bars = []
+        for row in aggregates:
+            if row.get(field) == "":
+                continue
+            value = float(row[field])
+            width = max(1, round(value / chart_max * 100, 2))
+            name = f"{row['environment']} / {row['mode']}"
+            bars.append(f"<div class='bar-row'><span>{html.escape(name)}</span><i style='width:{width}%'></i><b>{value:.3f}s</b></div>")
+        if bars:
+            charts.append(f"<section><h3>{html.escape(label)}</h3>{''.join(bars)}</section>")
     report_path = OUTPUT / "report.html"
     report_path.write_text(f"""<!doctype html><html><head><meta charset=\"utf-8\"><title>TCP lab capacity benchmarks</title>
-<style>:root{{color-scheme:dark;font:14px system-ui}}body{{margin:2rem auto;max-width:1500px;padding:0 1.2rem;background:#0d1117;color:#e6edf3}}h1{{font-size:1.6rem}}h2{{margin-top:2rem}}h3{{margin:.1rem 0 1rem}}select{{margin-left:.5rem;padding:.5rem;background:#0d1117;color:#e6edf3;border:1px solid #30363d;border-radius:5px}}.toolbar{{display:flex;gap:1.5rem;flex-wrap:wrap;align-items:center;padding:1rem;background:#161b22;border:1px solid #30363d;border-radius:6px}}.scroll{{overflow:auto}}table{{border-collapse:collapse;width:100%}}th,td{{padding:.55rem;border:1px solid #30363d;text-align:right;white-space:nowrap}}th:first-child,td:first-child{{text-align:left}}th{{background:#161b22}}tr:nth-child(even){{background:#161b22}}.compact td:nth-child(2),.compact td:nth-child(3){{text-align:left}}.note,.empty{{color:#8b949e}}.charts{{display:grid;grid-template-columns:repeat(auto-fit,minmax(520px,1fr));gap:1rem}}section{{min-width:0;padding:1rem;background:#161b22;border:1px solid #30363d;border-radius:6px}}.plot{{display:block;width:100%;min-height:230px}}.axis{{stroke:#8b949e}}.grid{{stroke:#30363d;stroke-width:1}}.axis-label{{fill:#8b949e;font-size:12px}}.event-line{{stroke:#d29922;stroke-width:1;stroke-dasharray:4 4;opacity:.8}}.legend{{display:flex;gap:1rem;flex-wrap:wrap;color:#8b949e;margin:.5rem 0}}.legend span{{display:flex;align-items:center;gap:.35rem}}.legend i{{display:inline-block;width:.75rem;height:.75rem}}.event-key{{border-left:2px dashed #d29922;width:1px!important}}.cards{{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:.7rem;margin:1rem 0}}.cards div{{padding:.8rem;background:#161b22;border:1px solid #30363d;border-radius:6px}}.cards span{{display:block;color:#8b949e}}.cards b{{display:block;font-size:1.35rem;margin-top:.25rem}}.phase-row{{display:grid;grid-template-columns:155px 1fr 65px;gap:.6rem;align-items:center;margin:.45rem 0}}.phase-row>span{{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}.phase-row b{{text-align:right}}.phase-bar{{display:flex;height:.8rem;background:#21262d;border-radius:3px;overflow:hidden}}.phase-bar i{{display:block;min-width:1px}}details{{margin-top:1.5rem}}summary{{cursor:pointer;font-size:1.1rem;font-weight:600;padding:.75rem;background:#161b22;border:1px solid #30363d}}@media(max-width:700px){{.charts{{grid-template-columns:1fr}}.phase-row{{grid-template-columns:100px 1fr 55px}}}}</style></head><body><h1>TCP lab capacity benchmarks</h1><p class=\"note\">Generated {html.escape(utc_now())}. All graphs are rendered locally from the retained raw JSON; no server or external JavaScript is required.</p><h2>Environment comparison</h2><div class='toolbar'><label>Metric<select id='metricSelect'><option value='scale_ready_seconds'>Scale request → ready</option><option value='autoscaler_first_decision_seconds'>Autoscaler first decision</option><option value='autoscaler_target_ready_seconds'>Autoscaler → target ready</option><option value='scale_down_seconds'>Scale down</option><option value='worker_recovery_seconds'>Worker-loss recovery</option><option value='pod_ready_average_seconds'>Average pod ready</option><option value='pod_ready_p95_seconds'>Pod ready p95</option></select></label><div id='comparisonLegend' class='legend'></div></div><section id='comparisonChart'></section><h2 id='runTitle'>Run timeline</h2><p id='runMeta' class='note'></p><div class='toolbar'><label>Run<select id='runSelect'></select></label></div><div id='runCards' class='cards'></div><div id='runCharts' class='charts'></div><details><summary>Aggregate values</summary><div class='scroll'><table><thead><tr>{''.join(f'<th>{html.escape(field)}</th>' for field in aggregate_fields)}</tr></thead><tbody>{aggregate_body}</tbody></table></div></details><details><summary>Individual run values</summary><div class='scroll'><table><thead><tr>{''.join(f'<th>{html.escape(field)}</th>' for field in fields)}</tr></thead><tbody>{body}</tbody></table></div></details><script type='application/json' id='benchmark-data'>{payload}</script>{interactive_script}</body></html>""", encoding="utf-8")
+<style>:root{{color-scheme:dark;font:14px system-ui}}body{{margin:2rem;background:#0d1117;color:#e6edf3}}h1{{font-size:1.5rem}}table{{border-collapse:collapse;width:100%}}th,td{{padding:.55rem;border:1px solid #30363d;text-align:right}}th:first-child,td:first-child{{text-align:left}}th{{position:sticky;top:0;background:#161b22}}tr:nth-child(even){{background:#161b22}}.note{{color:#8b949e}}.charts{{display:grid;grid-template-columns:repeat(auto-fit,minmax(360px,1fr));gap:1rem}}section{{padding:1rem;background:#161b22;border:1px solid #30363d;border-radius:6px}}section h3{{margin-top:0}}.bar-row{{display:grid;grid-template-columns:150px 1fr 70px;align-items:center;gap:.6rem;margin:.5rem 0}}.bar-row i{{display:block;height:.7rem;background:#58a6ff;border-radius:3px}}.bar-row b{{text-align:right;font-variant-numeric:tabular-nums}}</style></head><body><h1>TCP lab capacity benchmarks</h1><p class=\"note\">Generated {html.escape(utc_now())}. Raw JSON and JSONL files remain authoritative.</p><h2>Average timings</h2><div class='charts'>{''.join(charts)}</div><h2>Aggregates</h2><div class='scroll'><table><thead><tr>{''.join(f'<th>{html.escape(field)}</th>' for field in aggregate_fields)}</tr></thead><tbody>{aggregate_body}</tbody></table></div><h2>Individual runs</h2><div class='scroll'><table><thead><tr>{''.join(f'<th>{html.escape(field)}</th>' for field in fields)}</tr></thead><tbody>{body}</tbody></table></div></body></html>""", encoding="utf-8")
     print(f"Wrote {csv_path}\nWrote {aggregate_path}\nWrote {report_path}")
     return csv_path, report_path
 
