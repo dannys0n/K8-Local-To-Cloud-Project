@@ -833,11 +833,14 @@ def generate_report(session: str | None = None,
     chart_values = [float(row.get(field) or 0) for row in aggregates for _, field in chart_metrics]
     chart_max = max(chart_values, default=1) or 1
     charts = [
-        "<section><h3>How to read this report</h3>"
-        "<p>Every timing label states its exact start and end event. Direct means an explicit replica request, "
-        "HPA means metrics-driven scaling, and application means the lab's workload autoscalers. "
-        "Blank table cells mean the measurement does not apply to that run. New-node readiness uses the "
-        "Kubernetes Ready timestamp; the raw event also retains when the benchmark observed it.</p></section>"
+        "<section class='guide'><h3>What each benchmark means</h3>"
+        "<p><b>pod-single</b><span>Start one probe pod to measure basic startup.</span></p>"
+        "<p><b>pod-multi</b><span>Start a batch directly to measure multi-pod scheduling and readiness.</span></p>"
+        "<p><b>HPA</b><span>Apply CPU load and wait for Kubernetes to scale replicas up and back down.</span></p>"
+        "<p><b>node-capacity</b><span>Create more demand than current workers can fit, forcing a new worker.</span></p>"
+        "<p><b>worker-loss</b><span>Stop a kind worker and measure workload recovery and node return.</span></p>"
+        "<p><b>application</b><span>Use dummy clients to exercise the real gateway and server autoscalers.</span></p>"
+        "</section>"
     ]
     for label, field in chart_metrics:
         bars = []
