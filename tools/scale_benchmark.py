@@ -100,6 +100,7 @@ class Recorder:
         self.data: dict[str, Any] = {
             "schema": 1,
             "run_id": self.run_id,
+            "evidence_session": os.environ.get("TCP_LAB_BENCHMARK_EVIDENCE_SESSION"),
             "mode": mode,
             "environment": environment,
             "context": context,
@@ -119,6 +120,12 @@ class Recorder:
     def event(self, event_type: str, **detail: Any) -> None:
         item = {"at": utc_now(), "type": event_type, **detail}
         self.data["events"].append(item)
+        live_events = os.environ.get("TCP_LAB_BENCHMARK_EVENT_STREAM")
+        if live_events:
+            streamed = {"run_id": self.run_id, "mode": self.data["mode"],
+                        "environment": self.data["environment"], **item}
+            with Path(live_events).open("a", encoding="utf-8") as output:
+                output.write(json.dumps(streamed, separators=(",", ":")) + "\n")
         print(f"[{item['at']}] {event_type}" + (f" {detail}" if detail else ""), flush=True)
 
     def once(self, key: str, event_type: str, **detail: Any) -> None:
@@ -631,18 +638,20 @@ def percentile(values: list[float], fraction: float) -> float | None:
     return round(ordered[index], 3)
 
 
-def generate_report() -> tuple[Path, Path]:
+def generate_report(session: str | None = None,
+                    destination: Path | None = None) -> tuple[Path, Path]:
     def shown(value: Any) -> Any:
         return "" if value is None else value
 
-    OUTPUT.mkdir(parents=True, exist_ok=True)
+    report_output = destination or OUTPUT
+    report_output.mkdir(parents=True, exist_ok=True)
     runs = []
     for path in sorted(OUTPUT.glob("*.json")):
         if path.name.endswith("-events.json"):
             continue
         try:
             item = json.loads(path.read_text(encoding="utf-8"))
-            if "run_id" in item:
+            if "run_id" in item and (session is None or item.get("evidence_session") == session):
                 runs.append(item)
         except (ValueError, OSError):
             continue
@@ -757,7 +766,7 @@ def generate_report() -> tuple[Path, Path]:
                 milestones.get("application_final_ready_clients") if application else None),
             "started_at": run.get("started_at"), "finished_at": run.get("finished_at"),
         })
-    csv_path = OUTPUT / "summary.csv"
+    csv_path = report_output / "summary.csv"
     fields = list(rows[0]) if rows else ["run_id", "environment", "mode", "result"]
     with csv_path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields)
@@ -798,7 +807,7 @@ def generate_report() -> tuple[Path, Path]:
             aggregate[f"{field}_average"] = round(statistics.mean(values), 3) if values else ""
             aggregate[f"{field}_p95"] = percentile(values, .95) or ""
         aggregates.append(aggregate)
-    aggregate_path = OUTPUT / "aggregates.csv"
+    aggregate_path = report_output / "aggregates.csv"
     aggregate_fields = list(aggregates[0]) if aggregates else ["environment", "mode", "runs", "passed"]
     with aggregate_path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=aggregate_fields)
@@ -841,7 +850,7 @@ def generate_report() -> tuple[Path, Path]:
             bars.append(f"<div class='bar-row'><span>{html.escape(name)}</span><i style='width:{width}%'></i><b>{value:.3f}s</b></div>")
         if bars:
             charts.append(f"<section><h3>{html.escape(label)}</h3>{''.join(bars)}</section>")
-    report_path = OUTPUT / "report.html"
+    report_path = report_output / "report.html"
     report_path.write_text(f"""<!doctype html><html><head><meta charset=\"utf-8\"><title>TCP lab capacity benchmarks</title>
 <style>:root{{color-scheme:dark;font:14px system-ui}}body{{margin:2rem;background:#0d1117;color:#e6edf3}}h1{{font-size:1.5rem}}table{{border-collapse:collapse;width:100%}}th,td{{padding:.55rem;border:1px solid #30363d;text-align:right}}th:first-child,td:first-child{{text-align:left}}th{{position:sticky;top:0;background:#161b22}}tr:nth-child(even){{background:#161b22}}.note{{color:#8b949e}}.charts{{display:grid;grid-template-columns:repeat(auto-fit,minmax(360px,1fr));gap:1rem}}section{{padding:1rem;background:#161b22;border:1px solid #30363d;border-radius:6px}}section h3{{margin-top:0}}.bar-row{{display:grid;grid-template-columns:150px 1fr 70px;align-items:center;gap:.6rem;margin:.5rem 0}}.bar-row i{{display:block;height:.7rem;background:#58a6ff;border-radius:3px}}.bar-row b{{text-align:right;font-variant-numeric:tabular-nums}}</style></head><body><h1>TCP lab capacity benchmarks</h1><p class=\"note\">Generated {html.escape(utc_now())}. Raw JSON and JSONL files remain authoritative.</p><h2>Average timings</h2><div class='charts'>{''.join(charts)}</div><h2>Aggregates</h2><div class='scroll'><table><thead><tr>{''.join(f'<th>{html.escape(field)}</th>' for field in aggregate_fields)}</tr></thead><tbody>{aggregate_body}</tbody></table></div><h2>Individual runs</h2><div class='scroll'><table><thead><tr>{''.join(f'<th>{html.escape(field)}</th>' for field in fields)}</tr></thead><tbody>{body}</tbody></table></div></body></html>""", encoding="utf-8")
     print(f"Wrote {csv_path}\nWrote {aggregate_path}\nWrote {report_path}")
@@ -885,7 +894,10 @@ def parser() -> argparse.ArgumentParser:
     run.add_argument("--load-seconds", type=int, default=180)
     run.add_argument("--settle-seconds", type=int, default=180)
     run.add_argument("--application", action="store_true", help="include real dummy-client autoscaler test in full suite")
-    sub.add_parser("report", help="rebuild HTML and CSV summaries from raw runs")
+    report = sub.add_parser("report", help="rebuild HTML and CSV summaries from raw runs")
+    report.add_argument("--session", help="include only runs from one evidence session")
+    report.add_argument("--output-dir", type=Path,
+                        help="write report artifacts outside the default generated directory")
     sub.add_parser("cleanup", help="remove only the isolated benchmark namespace")
     return result
 
@@ -893,7 +905,7 @@ def parser() -> argparse.ArgumentParser:
 def main() -> int:
     args = parser().parse_args()
     if args.action == "report":
-        generate_report()
+        generate_report(args.session, args.output_dir)
         return 0
     if args.action == "cleanup":
         cleanup()
