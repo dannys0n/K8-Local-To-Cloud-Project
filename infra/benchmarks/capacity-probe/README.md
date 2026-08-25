@@ -82,3 +82,14 @@ EKS login, and final EKS teardown remain explicit. A session is written to
 Use `--headed` to watch the automated Chromium session. Use
 `--skip-local-services` only when Grafana, the dashboard, and the client are
 already listening on ports 3000, 8080, and 8081 respectively.
+
+The evidence index summarizes saved external-client RTT, internal gateway-to-
+server and server-to-Valkey latency, workload RX/TX throughput, and packet
+drops. Missing telemetry is explicitly shown as `N/A`. When an application-load
+window exists, summary values are scoped to that window while charts retain the
+full run and shade the load interval. Existing evidence can be rebuilt without
+a cluster or Playwright installation:
+
+```powershell
+python tools/benchmark_evidence.py --rebuild-session <session-directory-or-id>
+```

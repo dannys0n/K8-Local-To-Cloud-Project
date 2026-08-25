@@ -8,6 +8,7 @@ import csv
 import hashlib
 import html
 import json
+import math
 import os
 import re
 import shutil
@@ -304,6 +305,218 @@ def snapshot_environment(directory: Path, name: str) -> None:
                                                encoding="utf-8")
 
 
+def parse_number(value: Any) -> float | None:
+    try:
+        number = float(value)
+        return number if math.isfinite(number) else None
+    except (TypeError, ValueError):
+        return None
+
+
+def parse_timestamp(value: str) -> float | None:
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+    except (TypeError, ValueError):
+        return None
+
+
+def percentile(values: list[float], quantile: float) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    return ordered[round((len(ordered) - 1) * quantile)]
+
+
+def format_milliseconds(value: float | None) -> str:
+    return "N/A" if value is None else f"{value:,.1f} ms"
+
+
+def format_rate(value: float | None) -> str:
+    if value is None:
+        return "N/A"
+    units = ("B/s", "KiB/s", "MiB/s", "GiB/s")
+    for unit in units[:-1]:
+        if abs(value) < 1024:
+            return f"{value:,.1f} {unit}"
+        value /= 1024
+    return f"{value:,.1f} {units[-1]}"
+
+
+def load_application_window(directory: Path) -> tuple[float, float, int] | None:
+    path = directory / "events.jsonl"
+    if not path.exists():
+        return None
+    starts: dict[str, tuple[float, int]] = {}
+    windows: list[tuple[float, float, int]] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        try:
+            event = json.loads(line)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        run_id = str(event.get("run_id", ""))
+        observed = parse_timestamp(str(event.get("at", "")))
+        if observed is None:
+            continue
+        if event.get("type") == "load_applied" and event.get("clients") is not None:
+            starts[run_id] = (observed, int(event["clients"]))
+        elif event.get("type") == "load_removed" and run_id in starts:
+            start, clients = starts.pop(run_id)
+            windows.append((start, observed, clients))
+    return max(windows, key=lambda item: item[1] - item[0]) if windows else None
+
+
+def read_telemetry(directory: Path) -> tuple[dict[str, list[tuple[float, float]]],
+                                                list[tuple[float, float]]]:
+    prometheus: dict[str, list[tuple[float, float]]] = {}
+    prometheus_path = directory / "metrics" / "prometheus.csv"
+    if prometheus_path.exists():
+        with prometheus_path.open(newline="", encoding="utf-8") as source:
+            for row in csv.DictReader(source):
+                timestamp = parse_number(row.get("timestamp"))
+                value = parse_number(row.get("value"))
+                if timestamp is not None and value is not None:
+                    prometheus.setdefault(row["metric"], []).append((timestamp, value))
+    client: list[tuple[float, float]] = []
+    client_path = directory / "metrics" / "client-path.csv"
+    if client_path.exists():
+        with client_path.open(newline="", encoding="utf-8") as source:
+            for row in csv.DictReader(source):
+                timestamp = parse_timestamp(row.get("at", ""))
+                value = parse_number(row.get("latency_ms"))
+                if timestamp is not None and value is not None:
+                    client.append((timestamp, value))
+    return prometheus, client
+
+
+def window_values(series: list[tuple[float, float]],
+                  window: tuple[float, float, int] | None) -> list[float]:
+    if window is None:
+        return [value for _, value in series]
+    start, end, _ = window
+    return [value for timestamp, value in series if start <= timestamp <= end]
+
+
+def line_chart(title: str, series: list[tuple[str, list[tuple[float, float]], str]],
+               unit: str, window: tuple[float, float, int] | None = None) -> str:
+    usable = [(name, points, color) for name, points, color in series if points]
+    if not usable:
+        return (f'<section class="chart"><h3>{html.escape(title)}</h3>'
+                '<div class="no-data">N/A — this telemetry source was unavailable.</div></section>')
+    all_points = [point for _, points, _ in usable for point in points]
+    start = min(point[0] for point in all_points)
+    end = max(point[0] for point in all_points)
+    maximum = max(point[1] for point in all_points) or 1
+    width, height, left, top, plot_width, plot_height = 1000, 260, 68, 18, 910, 200
+    duration = max(end - start, 1)
+    shading = ""
+    if window is not None:
+        window_start, window_end, clients = window
+        shade_start = max(start, window_start)
+        shade_end = min(end, window_end)
+        if shade_end > shade_start:
+            x = left + ((shade_start - start) / duration) * plot_width
+            shade_width = ((shade_end - shade_start) / duration) * plot_width
+            shading = (f'<rect x="{x:.1f}" y="{top}" width="{shade_width:.1f}" '
+                       f'height="{plot_height}" fill="#d29922" opacity=".12">'
+                       f'<title>{clients} client application-load window</title></rect>')
+    paths = []
+    legends = []
+    for name, points, color in usable:
+        if len(points) > 800:
+            stride = math.ceil(len(points) / 800)
+            points = points[::stride]
+        coordinates = " ".join(
+            f"{left + ((timestamp - start) / duration) * plot_width:.1f},"
+            f"{top + plot_height - (value / maximum) * plot_height:.1f}"
+            for timestamp, value in points)
+        paths.append(f'<polyline points="{coordinates}" fill="none" stroke="{color}" '
+                     'stroke-width="2" vector-effect="non-scaling-stroke"/>')
+        legends.append(f'<span><i style="background:{color}"></i>{html.escape(name)}</span>')
+    top_label = format_milliseconds(maximum) if unit == "ms" else format_rate(maximum)
+    minutes = duration / 60
+    return f'''<section class="chart"><h3>{html.escape(title)}</h3>
+<div class="legend">{''.join(legends)}</div>
+<svg viewBox="0 0 {width} {height}" role="img" aria-label="{html.escape(title)}">
+<line x1="{left}" y1="{top}" x2="{left}" y2="{top + plot_height}" class="axis"/>
+<line x1="{left}" y1="{top + plot_height}" x2="{left + plot_width}" y2="{top + plot_height}" class="axis"/>
+{shading}{''.join(paths)}
+<text x="4" y="{top + 5}" class="axis-label">{html.escape(top_label)}</text>
+<text x="46" y="{top + plot_height + 5}" class="axis-label">0</text>
+<text x="{left}" y="{height - 10}" class="axis-label">run start</text>
+<text x="{left + plot_width}" y="{height - 10}" text-anchor="end" class="axis-label">{minutes:.1f} min</text>
+</svg></section>'''
+
+
+def telemetry_html(directory: Path) -> str:
+    prometheus, client = read_telemetry(directory)
+    window = load_application_window(directory)
+    scope = f"{window[2]}-client application window" if window else "entire benchmark"
+    scoped_client = window_values(client, window)
+    gateway_latency = [(timestamp, value * 1000) for timestamp, value in
+                       prometheus.get("gateway_to_server_latency_p95_seconds", [])]
+    valkey_latency = [(timestamp, value * 1000) for timestamp, value in
+                      prometheus.get("server_to_valkey_latency_p95_seconds", [])]
+    cards = [
+        ("Probe RTT p50", format_milliseconds(percentile(scoped_client, .50))),
+        ("Probe RTT p95", format_milliseconds(percentile(scoped_client, .95))),
+        ("Probe RTT p99", format_milliseconds(percentile(scoped_client, .99))),
+        ("Probe RTT maximum", format_milliseconds(max(scoped_client) if scoped_client else None)),
+        ("Gateway → server p95 peak", format_milliseconds(max(window_values(gateway_latency, window), default=None))),
+        ("Server → Valkey p95 peak", format_milliseconds(max(window_values(valkey_latency, window), default=None))),
+    ]
+    card_html = "".join(
+        f'<article><span>{html.escape(label)}</span><b>{html.escape(value)}</b></article>'
+        for label, value in cards)
+    traffic_metrics = [
+        ("Gateway", "RX", "gateway_network_rx_bytes_per_second", "#58a6ff"),
+        ("Gateway", "TX", "gateway_network_tx_bytes_per_second", "#79c0ff"),
+        ("Server", "RX", "server_network_rx_bytes_per_second", "#3fb950"),
+        ("Server", "TX", "server_network_tx_bytes_per_second", "#7ee787"),
+        ("Valkey", "RX", "valkey_network_rx_bytes_per_second", "#d29922"),
+        ("Valkey", "TX", "valkey_network_tx_bytes_per_second", "#e3b341"),
+    ]
+    traffic_rows = []
+    traffic_series = []
+    for component, direction, metric, color in traffic_metrics:
+        points = prometheus.get(metric, [])
+        values = window_values(points, window)
+        traffic_rows.append(
+            f"<tr><td>{component}</td><td>{direction}</td>"
+            f"<td>{format_rate(sum(values) / len(values) if values else None)}</td>"
+            f"<td>{format_rate(max(values) if values else None)}</td></tr>")
+        traffic_series.append((f"{component} {direction}", points, color))
+    drops = []
+    for label, metric in (("Receive", "network_receive_drops_per_second"),
+                          ("Transmit", "network_transmit_drops_per_second")):
+        values = window_values(prometheus.get(metric, []), window)
+        drops.append(f"{label} peak: {max(values):,.2f} packets/s" if values else
+                     f"{label} peak: N/A")
+    window_note = (f"The amber chart region marks the {window[2]}-client application-load window. "
+                   if window else "")
+    network_available = any(prometheus.get(metric) for _, _, metric, _ in traffic_metrics)
+    network_note = "" if network_available else (
+        '<p class="warning">Container RX/TX series were unavailable in this environment; '
+        'latency data remains valid. Missing data is shown as N/A, not zero.</p>')
+    raw_links = []
+    for label, path in (("Prometheus CSV", directory / "metrics" / "prometheus.csv"),
+                        ("Client-path CSV", directory / "metrics" / "client-path.csv"),
+                        ("Timing report", directory / "report" / "report.html")):
+        if path.exists():
+            raw_links.append(f'<a href="{html.escape(path.relative_to(directory).as_posix())}">{label}</a>')
+    return f'''<h1>Network and latency</h1>
+<p class="note">Statistics cover the <b>{html.escape(scope)}</b>. Probe RTT is one external interactive client's application-command round trip, not every dummy client. {window_note}Internal latency values are already p95 measurements sampled from Prometheus.</p>
+{network_note}<div class="metric-cards">{card_html}</div>
+<div class="charts">
+{line_chart("External probe application RTT", [("RTT", client, "#58a6ff")], "ms", window)}
+{line_chart("Internal p95 latency", [("Gateway → server", gateway_latency, "#d29922"), ("Server → Valkey", valkey_latency, "#a371f7")], "ms", window)}
+{line_chart("Aggregate workload network throughput", traffic_series, "rate", window)}
+</div>
+<section class="traffic"><h3>Network throughput during {html.escape(scope)}</h3>
+<table><thead><tr><th>Workload</th><th>Direction</th><th>Average</th><th>Peak</th></tr></thead>
+<tbody>{''.join(traffic_rows)}</tbody></table><p class="note">{' · '.join(drops)}</p></section>
+<p class="raw-links">{' · '.join(raw_links)}</p>'''
+
+
 def write_index(directory: Path, metadata: dict[str, Any]) -> None:
     screenshots = sorted((directory / "screenshots").glob("*/*.png"))
     screenshots += sorted((directory / "screenshots").glob("*.png"))
@@ -313,11 +526,14 @@ def write_index(directory: Path, metadata: dict[str, Any]) -> None:
         f'<img src="{html.escape(path.relative_to(directory).as_posix())}">'
         f'<span>{html.escape(path.parent.name)} · {html.escape(path.stem)}</span></a>'
         for path in screenshots)
+    cards = cards.replace("\ufffd", "·")
     clips = "".join(
         f'<section><h2>{html.escape(path.stem)}</h2><video controls preload="metadata" '
         f'src="{html.escape(path.relative_to(directory).as_posix())}"></video></section>'
         for path in videos)
-    (directory / "index.html").write_text(f"""<!doctype html><html><head><meta charset="utf-8"><title>TCP lab benchmark evidence</title><style>:root{{color-scheme:dark;font:14px system-ui}}body{{margin:2rem;background:#0d1117;color:#e6edf3}}.meta{{white-space:pre-wrap;background:#161b22;padding:1rem;border:1px solid #30363d}}.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:1rem}}a,section{{color:inherit;text-decoration:none;background:#161b22;border:1px solid #30363d;padding:.7rem}}img,video{{display:block;width:100%;background:#000}}span{{display:block;margin-top:.5rem}}</style></head><body><h1>TCP lab benchmark evidence</h1><div class="meta">{html.escape(json.dumps(metadata, indent=2))}</div><h1>Recordings</h1><div class="grid">{clips}</div><h1>Milestone screenshots</h1><div class="grid">{cards}</div></body></html>""", encoding="utf-8")
+    styles = """.note{color:#8b949e}.warning{padding:.8rem;border-left:4px solid #d29922;background:#2d220e}.metric-cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:.7rem;margin:1rem 0}.metric-cards article{padding:1rem;background:#161b22;border:1px solid #30363d}.metric-cards span{color:#8b949e;margin:0 0 .5rem}.metric-cards b{font-size:1.35rem}.charts{display:grid;grid-template-columns:repeat(auto-fit,minmax(420px,1fr));gap:1rem}.chart svg{width:100%;min-height:220px}.axis{stroke:#484f58;stroke-width:1}.axis-label{fill:#8b949e;font-size:13px}.legend{display:flex;gap:1rem;flex-wrap:wrap;margin-bottom:.5rem}.legend span{display:flex;align-items:center;gap:.35rem;margin:0}.legend i{width:.8rem;height:.8rem;border-radius:50%}.no-data{height:220px;display:grid;place-items:center;color:#d29922}table{border-collapse:collapse;width:100%}th,td{padding:.5rem;border-bottom:1px solid #30363d;text-align:right}th:first-child,td:first-child{text-align:left}.traffic{margin-top:1rem}.raw-links{display:flex;gap:.7rem;flex-wrap:wrap}.raw-links a{padding:.45rem .7rem}"""
+    index = directory / "index.html"
+    index.write_text(f"""<!doctype html><html><head><meta charset="utf-8"><title>TCP lab benchmark evidence</title><style>:root{{color-scheme:dark;font:14px system-ui}}body{{margin:2rem;background:#0d1117;color:#e6edf3}}.meta{{white-space:pre-wrap;background:#161b22;padding:1rem;border:1px solid #30363d}}.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:1rem}}a,section{{color:inherit;text-decoration:none;background:#161b22;border:1px solid #30363d;padding:.7rem}}img,video{{display:block;width:100%;background:#000}}span{{display:block;margin-top:.5rem}}{styles}</style></head><body><h1>TCP lab benchmark evidence</h1><div class="meta">{html.escape(json.dumps(metadata, indent=2))}</div>{telemetry_html(directory)}<h1>Recordings</h1><div class="grid">{clips}</div><h1>Milestone screenshots</h1><div class="grid">{cards}</div></body></html>""", encoding="utf-8")
 
 
 def write_checksums(directory: Path) -> None:
@@ -333,6 +549,8 @@ def write_checksums(directory: Path) -> None:
 
 def parse_arguments() -> tuple[argparse.Namespace, list[str]]:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--rebuild-session",
+                        help="rebuild an existing evidence index from saved telemetry")
     parser.add_argument("--grafana-port", type=int, default=3000)
     parser.add_argument("--dashboard-port", type=int, default=8080)
     parser.add_argument("--client-port", type=int, default=8081)
@@ -381,6 +599,19 @@ def self_test(sync_playwright: Any, headed: bool) -> Path:
 
 def main() -> int:
     args, benchmark_arguments = parse_arguments()
+    if args.rebuild_session:
+        directory = Path(args.rebuild_session)
+        if not directory.is_absolute() and not directory.exists():
+            directory = OUTPUT / directory
+        directory = directory.resolve()
+        manifest = directory / "manifest.json"
+        if not manifest.exists():
+            raise RuntimeError(f"Evidence manifest not found: {manifest}")
+        metadata = json.loads(manifest.read_text(encoding="utf-8"))
+        write_index(directory, metadata)
+        write_checksums(directory)
+        print(f"Evidence site rebuilt: {directory / 'index.html'}")
+        return 0
     try:
         from playwright.sync_api import sync_playwright
     except ImportError as error:
