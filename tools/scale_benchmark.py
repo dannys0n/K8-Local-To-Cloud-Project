@@ -109,6 +109,7 @@ class Recorder:
             "events": [],
             "pods": {},
             "nodes": {},
+            "nodeclaims": {},
             "deployment_samples": [],
             "hpa_samples": [],
             "result": "running",
@@ -208,6 +209,43 @@ class Recorder:
                 record["removed_at"] = observed
                 self.once(f"node:{record['uid']}:removed", "node_removed", node=name)
 
+        if self.data["environment"] == "eks":
+            raw_claims = kubectl("get", "nodeclaims", "-o", "json", check=False)
+            claims = json.loads(raw_claims).get("items", []) if raw_claims.strip() else []
+            live_claims: set[str] = set()
+            for claim in claims:
+                meta, status = claim["metadata"], claim.get("status", {})
+                name, uid = meta["name"], meta["uid"]
+                live_claims.add(name)
+                provider_id = status.get("providerID", "")
+                node_name = status.get("nodeName") or provider_id.rsplit("/", 1)[-1]
+                record = self.data["nodeclaims"].setdefault(name, {
+                    "uid": uid, "created_at": meta.get("creationTimestamp"),
+                    "first_observed_at": observed, "provider_id": provider_id,
+                    "node": node_name, "launched_at": None, "registered_at": None,
+                    "ready_at": None, "removed_at": None,
+                })
+                record["provider_id"] = provider_id or record.get("provider_id")
+                record["node"] = node_name or record.get("node")
+                for condition, field, event_type in (
+                    ("Launched", "launched_at", "worker_launched"),
+                    ("Registered", "registered_at", "worker_registered"),
+                    ("Ready", "ready_at", "worker_claim_ready"),
+                ):
+                    transition = condition_time(claim, condition)
+                    if transition:
+                        record[field] = transition
+                        self.once(f"nodeclaim:{uid}:{condition.lower()}", event_type,
+                                  nodeclaim=name, node=record.get("node"), at_source=transition)
+                self.once(f"nodeclaim:{uid}:requested", "worker_requested",
+                          nodeclaim=name, node=record.get("node"),
+                          at_source=record["created_at"])
+            for name, record in self.data["nodeclaims"].items():
+                if name not in live_claims and record.get("removed_at") is None:
+                    record["removed_at"] = observed
+                    self.once(f"nodeclaim:{record['uid']}:removed", "worker_request_removed",
+                              nodeclaim=name, node=record.get("node"))
+
         state = deployment_state(namespace, deployment)
         key = (state["desired"], state["current"], state["ready"], state["available"])
         if key != self._last_deployment:
@@ -283,6 +321,7 @@ class Recorder:
                 "name": name,
                 "node": item.get("node"),
                 "request_to_ready_seconds": duration(request_at, item.get("ready_at")),
+                "created_to_ready_seconds": duration(item.get("created_at"), item.get("ready_at")),
                 "created_to_scheduled_seconds": duration(item.get("created_at"), item.get("scheduled_at")),
                 "scheduled_to_started_seconds": duration(item.get("scheduled_at"), item.get("started_at")),
                 "started_to_ready_seconds": duration(item.get("started_at"), item.get("ready_at")),
@@ -394,6 +433,7 @@ def run_direct(args: argparse.Namespace, context: str, environment: str, replica
         prepare_base()
         wait_for(recorder, lambda count, ready: count == 0, args.timeout, "an empty probe", args.poll, False)
         recorder.data["baseline_nodes"] = sorted(recorder.data["nodes"])
+        recorder.data["baseline_nodeclaims"] = sorted(recorder.data.get("nodeclaims", {}))
         patch_probe(recorder.run_id, args.cpu, args.memory, False, args.pull_policy, args.startup_delay)
         recorder.event("scale_requested", replicas=replicas)
         kubectl("scale", "deployment", DEPLOYMENT, "-n", NAMESPACE, f"--replicas={replicas}")
@@ -528,6 +568,7 @@ def run_hpa(args: argparse.Namespace, context: str, environment: str) -> Path:
         wait_for(recorder, lambda count, ready: count == 1 and ready == 1,
                  args.timeout, "the loaded seed pod", args.poll, False)
         recorder.data["baseline_nodes"] = sorted(recorder.data["nodes"])
+        recorder.data["baseline_nodeclaims"] = sorted(recorder.data.get("nodeclaims", {}))
         kubectl("apply", "-f", str(AUTOSCALE / "hpa.yaml"))
         kubectl("patch", "hpa", DEPLOYMENT, "-n", NAMESPACE, "--type", "merge", "-p",
                 json.dumps({"spec": {"maxReplicas": args.replicas, "metrics": [{
@@ -706,18 +747,53 @@ def generate_report(session: str | None = None,
         mode = str(run.get("mode", ""))
         direct_mode = mode in {"pod-single", "pod-multi", "node-capacity"}
         new_node_names = {item.get("name") for item in run.get("summary", {}).get("new_nodes", [])}
-        demand_at = event_at("scale_requested") or event_at("load_applied")
-        new_node_ready_times = []
+        if not new_node_names:
+            new_node_names = set(run.get("nodes", {})) - set(run.get("baseline_nodes", []))
+        pod_to_worker_request_times = []
+        worker_request_to_ready_times = []
+        pod_to_worker_ready_times = []
+        worker_ready_to_pods_ready_times = []
+        pod_to_pods_ready_times = []
         new_node_removed_times = []
         for node_name in new_node_names:
             ready_event = next((item for item in events
                                 if item.get("type") == "node_ready" and item.get("node") == node_name), None)
             removed_event = next((item for item in events
                                   if item.get("type") == "node_removed" and item.get("node") == node_name), None)
-            if ready_event and demand_at:
-                new_node_ready_times.append(duration(demand_at, ready_event.get("at_source") or ready_event.get("at")))
+            node_ready_at = ((ready_event.get("at_source") or ready_event.get("at")) if ready_event
+                             else run.get("nodes", {}).get(node_name, {}).get("ready_at"))
+            ready_epoch = parse_time(node_ready_at)
+            waiting_pods = [
+                item for item in run.get("pods", {}).values()
+                if item.get("node") == node_name and parse_time(item.get("created_at")) is not None
+                and ready_epoch is not None and parse_time(item.get("created_at")) <= ready_epoch
+            ]
+            pod_request_at = min((item.get("created_at") for item in waiting_pods),
+                                 key=lambda value: parse_time(value) or 0, default=None)
+            waiting_pods_ready_at = None
+            if waiting_pods and all(item.get("ready_at") for item in waiting_pods):
+                waiting_pods_ready_at = max((item["ready_at"] for item in waiting_pods),
+                                            key=lambda value: parse_time(value) or 0)
+
+            baseline_claims = set(run.get("baseline_nodeclaims", []))
+            matching_claim = next((claim for name, claim in run.get("nodeclaims", {}).items()
+                                   if name not in baseline_claims and
+                                   (claim.get("node") == node_name or
+                                    str(claim.get("provider_id", "")).rsplit("/", 1)[-1] == node_name)), None)
+            worker_request_at = matching_claim.get("created_at") if matching_claim else None
+
+            pod_to_worker_request_times.append(duration(pod_request_at, worker_request_at))
+            worker_request_to_ready_times.append(duration(worker_request_at, node_ready_at))
+            pod_to_worker_ready_times.append(duration(pod_request_at, node_ready_at))
+            worker_ready_to_pods_ready_times.append(duration(node_ready_at, waiting_pods_ready_at))
+            pod_to_pods_ready_times.append(duration(pod_request_at, waiting_pods_ready_at))
             if removed_event:
                 new_node_removed_times.append(duration(event_at("scale_down_requested"), removed_event.get("at")))
+
+        def slowest(values: list[float | None]) -> float | None:
+            measured = [value for value in values if value is not None]
+            return max(measured) if measured else None
+
         rows.append({
             "run_id": run["run_id"], "environment": run.get("environment"), "mode": run.get("mode"),
             "result": run.get("result"), "test_target_replicas": run.get("parameters", {}).get("replicas") or
@@ -751,9 +827,11 @@ def generate_report(session: str | None = None,
             "worker_restarted_to_node_ready_seconds": shown(
                 milestones.get("worker_restore_seconds") if mode == "worker-loss" else None),
             "new_node_count": len(new_node_names),
-            "demand_to_last_new_node_ready_seconds": shown(
-                max(value for value in new_node_ready_times if value is not None)
-                if any(value is not None for value in new_node_ready_times) else None),
+            "pod_request_to_worker_request_seconds": shown(slowest(pod_to_worker_request_times)),
+            "worker_request_to_worker_ready_seconds": shown(slowest(worker_request_to_ready_times)),
+            "demand_to_last_new_node_ready_seconds": shown(slowest(pod_to_worker_ready_times)),
+            "worker_ready_to_waiting_pods_ready_seconds": shown(slowest(worker_ready_to_pods_ready_times)),
+            "pod_request_to_waiting_pods_ready_seconds": shown(slowest(pod_to_pods_ready_times)),
             "scale_down_request_to_last_new_node_removed_seconds": shown(
                 max(value for value in new_node_removed_times if value is not None)
                 if any(value is not None for value in new_node_removed_times) else None),
@@ -787,7 +865,9 @@ def generate_report(session: str | None = None,
         "application_load_removed_to_min_replicas_requested_seconds",
         "worker_stopped_to_replacement_workload_ready_seconds",
         "worker_restarted_to_node_ready_seconds",
-        "new_node_count", "demand_to_last_new_node_ready_seconds",
+        "new_node_count", "pod_request_to_worker_request_seconds",
+        "worker_request_to_worker_ready_seconds", "demand_to_last_new_node_ready_seconds",
+        "worker_ready_to_waiting_pods_ready_seconds", "pod_request_to_waiting_pods_ready_seconds",
         "scale_down_request_to_last_new_node_removed_seconds",
         "application_peak_gateways", "application_peak_servers", "application_peak_nodes",
         "application_min_ready_clients_after_initial_connect",
@@ -814,26 +894,74 @@ def generate_report(session: str | None = None,
         writer.writeheader()
         writer.writerows(aggregates)
 
+    field_labels = {
+        "run_id": "Run ID", "environment": "Environment", "mode": "Benchmark",
+        "result": "Result", "runs": "Runs", "passed": "Passed runs",
+        "test_target_replicas": "Requested pods",
+        "direct_scale_request_to_all_pods_ready_seconds": "Pods requested → all requested pods Ready",
+        "direct_pod_request_to_ready_average_seconds": "Individual pod readiness — run average",
+        "direct_pod_request_to_ready_p95_seconds": "Individual pod readiness — run p95",
+        "direct_scale_down_request_to_pod_removed_average_seconds": "Pod removal — run average",
+        "hpa_load_to_first_scale_decision_seconds": "HPA test begins → first replica increase",
+        "hpa_enabled_to_max_replicas_ready_seconds": "HPA test begins → maximum replicas Ready",
+        "hpa_load_removed_to_min_replicas_ready_seconds": "CPU load removed → minimum replicas Ready",
+        "hpa_load_removed_to_pod_removed_average_seconds": "HPA pod removal — run average",
+        "application_load_to_gateway_first_scale_seconds": "Dummy clients started → first gateway scale",
+        "application_load_to_server_first_scale_seconds": "Dummy clients started → first server scale",
+        "application_load_to_initial_all_clients_ready_seconds": "Dummy clients started → all clients initially Ready",
+        "application_load_removed_to_min_replicas_requested_seconds": "Dummy clients removed → minimum replicas requested",
+        "worker_stopped_to_replacement_workload_ready_seconds": "Worker stopped → displaced pods Ready",
+        "worker_restarted_to_node_ready_seconds": "Worker restarted → worker Ready",
+        "new_node_count": "New workers created",
+        "pod_request_to_worker_request_seconds": "Pod requested → worker requested",
+        "worker_request_to_worker_ready_seconds": "Worker requested → worker Ready",
+        "demand_to_last_new_node_ready_seconds": "Pod requested → worker Ready",
+        "worker_ready_to_waiting_pods_ready_seconds": "Worker Ready → waiting pods Ready",
+        "pod_request_to_waiting_pods_ready_seconds": "Pod requested → waiting pods Ready",
+        "scale_down_request_to_last_new_node_removed_seconds": "Temporary pod demand removed → last added worker removed",
+        "application_peak_gateways": "Peak gateway pods",
+        "application_peak_servers": "Peak server pods",
+        "application_peak_nodes": "Peak worker nodes",
+        "application_min_ready_clients_after_initial_connect": "Lowest Ready clients after initial connection",
+        "application_ready_clients_at_load_removal": "Ready clients when load ended",
+        "started_at": "Started at", "finished_at": "Finished at",
+    }
+
+    def display_field(field: str, aggregate: bool = False) -> str:
+        if aggregate:
+            for suffix, qualifier in (("_average", "mean across runs"),
+                                      ("_p95", "p95 across runs")):
+                if field.endswith(suffix):
+                    base = field[:-len(suffix)]
+                    fallback = base.replace("_", " ").title()
+                    return f"{field_labels.get(base, fallback)} — {qualifier}"
+        return field_labels.get(field, field.replace("_", " ").title())
+
     body = "\n".join("<tr>" + "".join(f"<td>{html.escape(str(row.get(field, '')))}</td>" for field in fields) + "</tr>" for row in rows)
     aggregate_body = "\n".join(
         "<tr>" + "".join(f"<td>{html.escape(str(row.get(field, '')))}</td>" for field in aggregate_fields) + "</tr>"
         for row in aggregates
     )
     chart_metrics = [
-        ("Direct request → all pods Ready", "direct_scale_request_to_all_pods_ready_seconds_average"),
-        ("HPA load → first scale decision", "hpa_load_to_first_scale_decision_seconds_average"),
-        ("HPA enabled → max replicas Ready", "hpa_enabled_to_max_replicas_ready_seconds_average"),
-        ("HPA load removed → minimum Ready", "hpa_load_removed_to_min_replicas_ready_seconds_average"),
-        ("Application load → first gateway scale", "application_load_to_gateway_first_scale_seconds_average"),
-        ("Application load removed → minimum requested", "application_load_removed_to_min_replicas_requested_seconds_average"),
-        ("Worker stopped → replacement workload Ready", "worker_stopped_to_replacement_workload_ready_seconds_average"),
-        ("Demand → last new node Ready", "demand_to_last_new_node_ready_seconds_average"),
-        ("Scale-down request → last new node removed", "scale_down_request_to_last_new_node_removed_seconds_average"),
+        ("Pods requested → all Ready", "direct_scale_request_to_all_pods_ready_seconds_average"),
+        ("HPA start → first scale-up", "hpa_load_to_first_scale_decision_seconds_average"),
+        ("HPA start → maximum Ready", "hpa_enabled_to_max_replicas_ready_seconds_average"),
+        ("Load removed → minimum Ready", "hpa_load_removed_to_min_replicas_ready_seconds_average"),
+        ("Clients started → gateway scale-up", "application_load_to_gateway_first_scale_seconds_average"),
+        ("Clients removed → minimum requested", "application_load_removed_to_min_replicas_requested_seconds_average"),
+        ("Worker stopped → pods recovered", "worker_stopped_to_replacement_workload_ready_seconds_average"),
+        ("Pod requested → worker requested", "pod_request_to_worker_request_seconds_average"),
+        ("Worker requested → worker Ready", "worker_request_to_worker_ready_seconds_average"),
+        ("Pod requested → worker Ready", "demand_to_last_new_node_ready_seconds_average"),
+        ("Worker Ready → waiting pods Ready", "worker_ready_to_waiting_pods_ready_seconds_average"),
+        ("Pod requested → waiting pods Ready", "pod_request_to_waiting_pods_ready_seconds_average"),
+        ("Pod demand removed → worker removed", "scale_down_request_to_last_new_node_removed_seconds_average"),
     ]
     chart_values = [float(row.get(field) or 0) for row in aggregates for _, field in chart_metrics]
     chart_max = max(chart_values, default=1) or 1
     charts = [
         "<section class='guide'><h3>What each benchmark means</h3>"
+        "<p><b>capacity path</b><span>Pod requested → EKS requests a worker → worker Ready → waiting pods Ready. HPA detection is measured separately.</span></p>"
         "<p><b>pod-single</b><span>Start one probe pod to measure basic startup.</span></p>"
         "<p><b>pod-multi</b><span>Start a batch directly to measure multi-pod scheduling and readiness.</span></p>"
         "<p><b>HPA</b><span>Apply CPU load and wait for Kubernetes to scale replicas up and back down.</span></p>"
@@ -842,6 +970,14 @@ def generate_report(session: str | None = None,
         "<p><b>application</b><span>Use dummy clients to exercise the real gateway and server autoscalers.</span></p>"
         "</section>"
     ]
+    mode_names = {
+        "pod-single": "one pod",
+        "pod-multi": "pod batch",
+        "hpa": "HPA",
+        "node-capacity": "node scale",
+        "worker-loss": "node loss",
+        "application-autoscaler": "application",
+    }
     for label, field in chart_metrics:
         bars = []
         for row in aggregates:
@@ -849,13 +985,32 @@ def generate_report(session: str | None = None,
                 continue
             value = float(row[field])
             width = max(1, round(value / chart_max * 100, 2))
-            name = f"{row['environment']} / {row['mode']}"
-            bars.append(f"<div class='bar-row'><span>{html.escape(name)}</span><i style='width:{width}%'></i><b>{value:.3f}s</b></div>")
+            source_field = field.removesuffix("_average")
+            sample_count = sum(
+                item.get(source_field) != ""
+                for item in grouped[(str(row["environment"]), str(row["mode"]))])
+            name = (f"{row['environment'].upper()} · "
+                    f"{mode_names.get(row['mode'], row['mode'])} · "
+                    f"{sample_count} {'sample' if sample_count == 1 else 'samples'}")
+            bars.append(f"<div class='bar-row'><span>{html.escape(name)}</span>"
+                        f"<i style='width:{width}%'></i><b>{value:.1f}s</b></div>")
         if bars:
             charts.append(f"<section><h3>{html.escape(label)}</h3>{''.join(bars)}</section>")
     report_path = report_output / "report.html"
     report_path.write_text(f"""<!doctype html><html><head><meta charset=\"utf-8\"><title>TCP lab capacity benchmarks</title>
 <style>:root{{color-scheme:dark;font:14px system-ui}}body{{margin:2rem;background:#0d1117;color:#e6edf3}}h1{{font-size:1.5rem}}table{{border-collapse:collapse;width:100%}}th,td{{padding:.55rem;border:1px solid #30363d;text-align:right}}th:first-child,td:first-child{{text-align:left}}th{{position:sticky;top:0;background:#161b22}}tr:nth-child(even){{background:#161b22}}.note{{color:#8b949e}}.charts{{display:grid;grid-template-columns:repeat(auto-fit,minmax(360px,1fr));gap:1rem}}section{{padding:1rem;background:#161b22;border:1px solid #30363d;border-radius:6px}}section h3{{margin-top:0}}.bar-row{{display:grid;grid-template-columns:150px 1fr 70px;align-items:center;gap:.6rem;margin:.5rem 0}}.bar-row i{{display:block;height:.7rem;background:#58a6ff;border-radius:3px}}.bar-row b{{text-align:right;font-variant-numeric:tabular-nums}}</style></head><body><h1>TCP lab capacity benchmarks</h1><p class=\"note\">Generated {html.escape(utc_now())}. Raw JSON and JSONL files remain authoritative.</p><h2>Average timings</h2><div class='charts'>{''.join(charts)}</div><h2>Aggregates</h2><div class='scroll'><table><thead><tr>{''.join(f'<th>{html.escape(field)}</th>' for field in aggregate_fields)}</tr></thead><tbody>{aggregate_body}</tbody></table></div><h2>Individual runs</h2><div class='scroll'><table><thead><tr>{''.join(f'<th>{html.escape(field)}</th>' for field in fields)}</tr></thead><tbody>{body}</tbody></table></div></body></html>""", encoding="utf-8")
+    rendered = report_path.read_text(encoding="utf-8")
+    rendered = rendered.replace("<h2>Average timings</h2>",
+                                "<h2>Average elapsed time by benchmark</h2>")
+    rendered = rendered.replace("grid-template-columns:150px 1fr 70px",
+                                "grid-template-columns:minmax(210px,1.4fr) 2fr 105px")
+    for field in aggregate_fields:
+        rendered = rendered.replace(f"<th>{html.escape(field)}</th>",
+                                    f"<th>{html.escape(display_field(field, True))}</th>", 1)
+    for field in fields:
+        rendered = rendered.replace(f"<th>{html.escape(field)}</th>",
+                                    f"<th>{html.escape(display_field(field))}</th>", 1)
+    report_path.write_text(rendered, encoding="utf-8")
     print(f"Wrote {csv_path}\nWrote {aggregate_path}\nWrote {report_path}")
     return csv_path, report_path
 
